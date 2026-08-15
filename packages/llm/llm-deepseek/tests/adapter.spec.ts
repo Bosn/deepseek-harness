@@ -16,7 +16,7 @@ import { getOrCreateAnonymousUserId, type AnonymousUserId } from '@deepseek-ai/d
 import { SessionId } from '@deepseek-ai/dsh-session'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
-import { httpErrorCode } from '../src/adapter.ts'
+import { httpErrorCode, isDashScopeIntlCompatibleBaseURL } from '../src/adapter.ts'
 import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 import type { Behavior } from './mock-server.ts'
@@ -55,6 +55,28 @@ function adapterOf(config: Partial<LlmDeepSeek.Config> & { apiKey?: string } = {
     resolveUserId: () => TEST_USER_ID,
   })
 }
+
+function sseResponse(events: readonly string[]): Response {
+  return new Response(events.map(event => `data: ${event}\n\n`).join(''), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  })
+}
+
+describe('DashScope Intl endpoint recognition', () => {
+  it.each([
+    ['https://dashscope-intl.aliyuncs.com/compatible-mode/v1', true],
+    ['https://dashscope-intl.aliyuncs.com/compatible-mode/v1/', false],
+    ['https://user@dashscope-intl.aliyuncs.com/compatible-mode/v1', false],
+    ['https://api.deepseek.com', false],
+    ['https://dashscope-intl.aliyuncs.com.example/compatible-mode/v1', false],
+    ['https://dashscope-intl.aliyuncs.com/api/v1', false],
+    ['http://dashscope-intl.aliyuncs.com/compatible-mode/v1', false],
+    ['not a URL', false],
+  ])('classifies %s', (baseURL, expected) => {
+    expect(isDashScopeIntlCompatibleBaseURL(baseURL)).toBe(expected)
+  })
+})
 
 describe('DeepSeekAdapter against a mock server', () => {
   it('streams a text generation end to end through the assembler', async () => {
@@ -106,6 +128,40 @@ describe('DeepSeekAdapter against a mock server', () => {
       kinds.push(chunk.type)
     }
     expect(kinds).toEqual(['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
+  })
+
+  it('selects empty tool-identity continuation compatibility only for DashScope Intl', async () => {
+    const events = [
+      '{"choices":[{"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}',
+      '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_dash","type":"function","function":{"name":"read","arguments":""}}]}}]}',
+      '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":null,"arguments":"{\\"file_path\\":\\"x\\"}"}}]}}]}',
+      '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+      '[DONE]',
+    ]
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(sseResponse(events)))
+    try {
+      const dashScope = await harness('https://dashscope-intl.aliyuncs.com/compatible-mode/v1')
+      const compatible = await assemble(dashScope, { model: 'deepseek-v4-pro', messages: [] })
+      expect(compatible.message.content).toEqual([{
+        type: 'tool-call',
+        id: 'call_dash',
+        name: 'read',
+        arguments: '{"file_path":"x"}',
+      }])
+      expect(compatible.finish).toEqual({ kind: 'tool-calls' })
+
+      const nativeEndpoint = await harness('https://api.deepseek.com')
+      const defaultTranslation = await assemble(nativeEndpoint, { model: 'deepseek-v4-pro', messages: [] })
+      expect(defaultTranslation.message.content).toEqual([{
+        type: 'tool-call',
+        id: '',
+        name: '',
+        arguments: '{"file_path":"x"}',
+      }])
+      expect(defaultTranslation.finish).toEqual({ kind: 'tool-calls' })
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 
   it('forwards the harness user and session ids for host-side trajectory routing', async () => {

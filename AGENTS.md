@@ -63,7 +63,7 @@ pnpm install            # pnpm workspaces, node ^22.19 || >=24
 pnpm run clean           # remove build outputs and safe residue from deleted packages
 pnpm run test           # vitest unit tests
 pnpm run test:coverage  # CI coverage gate: per-file 100% on packages/*/*/src
-pnpm run test:e2e       # real-API tests; self-skip without DEEPSEEK_API_KEY
+pnpm run test:e2e       # real-API suites; each self-skips without its provider key
 pnpm run test:snapshot  # keyless ACP/headless replay vs expected outputs; filter: -t <name>
 pnpm run test:snapshot:record  # re-record expected outputs (needs key)
 pnpm run typecheck
@@ -93,7 +93,9 @@ Run checks before pushes via [dsh-pre-push-checks](.agents/skills/dsh-pre-push-c
 
 ## Secrets / .env
 
-Real-API tests and demos read `DEEPSEEK_API_KEY`, optional `DEEPSEEK_BASE_URL`, and root `.env`. cordis.yml allows `!!js` (never `!js`) under plugin `config` and entry `disabled`; other metadata stays literal, so conditional composition also uses overlays ([primer](docs/cordis-primer.md#loader-configuration)). Never commit credentials. CI e2e skips without a key; [testing.md](docs/testing.md) owns key policy.
+DeepSeek Harness is a public open-source repository. Never commit API keys, tokens, credentials, personal usernames, developer-specific local directories, absolute paths that identify a machine, or other sensitive or machine-specific values. Supply secrets and machine-specific paths through environment variables or ignored local configuration such as root `.env` and `/.dsh/`; add every new local configuration location to `.gitignore` before use.
+
+Real-API tests and demos read `DEEPSEEK_API_KEY`, optional `DEEPSEEK_BASE_URL`, and root `.env`; the DashScope Intl e2e suite uses test-only `DASHSCOPE_API_KEY`. cordis.yml allows `!!js` (never `!js`) under plugin `config` and entry `disabled`; other metadata stays literal, so conditional composition also uses overlays ([primer](docs/cordis-primer.md#loader-configuration)). CI e2e suites skip without their provider key; [testing.md](docs/testing.md) owns key policy.
 
 ## Conventions
 

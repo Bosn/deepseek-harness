@@ -103,6 +103,17 @@ const REASONING_EFFORTS = [
 const OFF_ONLY_REASONING_EFFORTS = [
   { id: OFF_REASONING_EFFORT, name: 'Off' },
 ] as const
+const DASHSCOPE_INTL_COMPATIBLE_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
+
+/**
+ * Identify the DashScope International OpenAI-compatible endpoint whose streamed tool-call
+ * continuation fields use empty placeholders.
+ * @param baseURL - resolved adapter endpoint base.
+ * @returns whether the endpoint needs DashScope continuation-field compatibility.
+ */
+export function isDashScopeIntlCompatibleBaseURL(baseURL: string): boolean {
+  return baseURL === DASHSCOPE_INTL_COMPATIBLE_BASE_URL
+}
 
 function modelInfo(provider: string, model: DeepSeekCatalogModel): LlmModelInfo {
   return {
@@ -341,6 +352,8 @@ export class DeepSeekAdapter extends LlmAdapter {
       throw new LlmError('DeepSeek API returned no response body', 'EMPTY_RESPONSE')
     }
 
-    yield* translate(parseSse(response.body, onComment))
+    yield* translate(parseSse(response.body, onComment), {
+      preserveToolCallIdentityOnEmptyDelta: isDashScopeIntlCompatibleBaseURL(connection.baseURL),
+    })
   }
 }
