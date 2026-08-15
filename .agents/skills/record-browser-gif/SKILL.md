@@ -1,24 +1,26 @@
 ---
 name: record-browser-gif
-description: Record browser or Web UI interaction demos as optimized GIFs using the available built-in browser, state-based frame capture, and deterministic encoding, then publish to a dedicated assets branch when the task includes attaching the GIF to a pull request. Use when asked to make, record, or generate a GIF that demonstrates a browser workflow, and for every pull request that changes product-user-visible GUI behavior, which MUST include a GIF recorded from the pull request's real server and model flow.
+description: Record browser or Web UI interaction demos as optimized GIFs using the available built-in browser, state-based frame capture, and deterministic encoding, then publish to a dedicated assets branch only when the user explicitly asks to attach the GIF to a pull request. Use only when the user explicitly asks to show an effect, perform browser acceptance, take screenshots, record a GIF or video, or provide a UI demo.
+disable-model-invocation: true
+user-invocable: true
 ---
 
 # Record Browser GIF
 
-Produce a short, truthful UI demonstration as a local GIF, and — only when the task includes attaching it to a pull request — publish it through the assets-branch workflow at the end of this skill. Use the browser-control skill for interaction and the bundled encoder for repeatable timing, dimensions, and size.
+Produce a short, truthful UI demonstration as a local GIF and, only when the user explicitly asks to attach it to a pull request, publish it through the assets-branch workflow at the end of this skill. Use the browser-control skill for interaction and the bundled encoder for repeatable timing, dimensions, and size.
 
 The [evidence-chain decision](../../notes/implemented/process/2026-08-08-browser-gif-evidence-chain.md) owns why one storyboard comes from one isolated run and why publication revalidates both the artifact and the demonstrated pull-request head.
 
-## Every GUI pull request includes a GIF
+## Invocation scope
 
-A pull request that changes product-user-visible GUI behavior MUST include a demonstration GIF recorded with this skill and embedded in the pull request body via [the assets-branch workflow](#publish-to-an-assets-branch).
+A user request to show an effect, perform browser acceptance, take screenshots, record a GIF or video, or provide a UI demo is the only trigger for this skill. Creating or updating a pull request, touching Web/UI code, or changing user-visible behavior does not authorize starting a server, using a real model or API, controlling a browser, capturing media, creating an assets branch, or editing a pull-request body.
 
-The recording itself is part of the evidence: use a real server booted from that pull request's branch tree, a real API key, and real model rounds. Never substitute fixture queries, mock transports, synthetic event injection, or test-only hooks unless the user explicitly asked for a fixture recording. Next to the embed, state the exact demonstrated commit SHA, the tree and origin that served it, any mode flags or browser-state exceptions, and whether a real model round ran, so reviewers know exactly what the recording proves.
+Perform only the requested recording and publication work. Match the environment to the claim: a requested real-server or real-model demonstration uses the pull request's branch tree and normal production path, while a request for a fixture demonstration may use fixtures. Next to a published embed, state the exact demonstrated commit SHA, the tree and origin that served it, any mode flags or browser-state exceptions, and whether a real model round ran, so reviewers know exactly what the recording proves.
 
 ## Keep recording separate from publication
 
 - Recording produces frame images and one local `.gif` artifact only; it never mutates remote state.
-- Publication — pushing the GIF to an assets branch and embedding it in a pull request body — is the separate final step, performed only when the task includes attaching the GIF to a pull request. It never touches the pull request's own branch.
+- Publication — pushing the GIF to an assets branch and embedding it in a pull request body — is the separate final step, performed only when the user explicitly asks to attach the GIF to a pull request. It never touches the pull request's own branch.
 - Preserve the requested recording conditions. A real-server or real-API demo must not use fixture queries, mock transports, synthetic event injection, or test-only hooks. If credentials or the server are unavailable, report that limitation instead of substituting a fixture.
 - Never read or expose credential values. Use the application's normal configuration path and a benign demonstration prompt.
 
@@ -74,11 +76,11 @@ For a large artifact, reduce `--max-width` first, then `--colors` or `--fps`; re
 1. Read the encoder's JSON summary and confirm the output path, source and encoded frame counts, dimensions, duration, and byte size.
 2. Visually read the encoded GIF itself, not only the source frames. Confirm that the transition is legible, the last state is held long enough, and no sensitive content appears. If the viewer renders only the first frame, decode representative frames from the encoded GIF with `ffmpeg` and inspect those; the pre-encode screenshots do not prove the encoded order, palette, or final hold.
 3. Run `git status --short` and confirm frames and the artifact landed only under ignored paths.
-4. Return the absolute GIF path, render it when the client supports local media, and state whether the recording used a real API, fixture, or another transport. When the task does not include attaching the GIF to a pull request, stop here.
+4. Return the absolute GIF path, render it when the client supports local media, and state whether the recording used a real API, fixture, or another transport. Unless the user explicitly asked to attach the GIF to a pull request, stop here.
 
 ## Publish to an assets branch
 
-Perform this step only when the task includes attaching the GIF to a pull request.
+Perform this step only when the user explicitly asks to attach the GIF to a pull request. Pull-request creation or update alone never implies publication.
 
 Never commit a GIF to the pull request's own branch or any branch that merges into a long-lived branch: binary media committed there bloats the repository history for every future clone. GIFs live on a dedicated orphan assets branch — a branch with no parent commit and nothing but media — and one assets branch serves a whole pull request series (named `<series>-assets`; list existing ones with `git ls-remote --heads origin '*assets*'`).
 

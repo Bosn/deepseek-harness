@@ -26,13 +26,13 @@ The command never guesses or fetches a base. Supply the ref verified from curren
 
 ## Select relevant evidence
 
-There is no universal local baseline beyond the hooks. Every behavior change needs the narrowest available test or purpose-built check that would fail for its regression; add broader checks only for surfaces the diff actually reaches.
+There is no universal local baseline beyond the hooks. Every behavior change needs the narrowest available test or purpose-built check that would fail for its regression; add broader checks only for surfaces the diff actually reaches. For a personal fork or requested quick fix, prefer the minimal repair, this focused evidence, and the PR; creating the PR does not broaden the validation scope.
 
 - **Package or script behavior:** run the owning Vitest file or focused test name. Add adjacent package tests when a shared contract changes; leave repository-wide coverage to CI unless the change is genuinely cross-cutting or the user requests it.
 - **Documentation, Agent Notes, catalogs, or doc-linked comments:** run `pnpm run doc-sync`; run full lint when the documentation workflow requires it.
-- **Model-, editor-, CLI-, or terminal-visible output:** run the focused keyless snapshot or real runnable-example scenario that owns the output.
+- **Model-, editor-, CLI-, or terminal-visible output:** run the focused keyless snapshot only when the changed output is owned by that snapshot suite; otherwise run the focused owning test.
 - **Package manifests, public exports, build configuration, worker/bin entries, or built runtime paths:** run `pnpm run build`, the relevant hygiene checks, and the owning built-artifact smoke.
-- **Real provider or agent behavior:** run the relevant `pnpm run test:e2e` target when credentials are available; never print secrets.
+- **Provider/API compatibility:** run the relevant live `pnpm run test:e2e` target only when deterministic evidence is insufficient, credentials are available, and the user authorizes the call. Credential presence is not authorization, and a live API run never authorizes Web/browser/media work. Never print secrets.
 
 Do not manually repeat a passing check merely because commit or push follows. In particular, do not run typecheck immediately before pushing solely to duplicate the pre-push hook.
 
@@ -61,7 +61,7 @@ pnpm exec vitest related packages/<group>/<package>/src/<changed>.ts \
 
 ## Full local rehearsal
 
-Run the complete local approximation only when the user explicitly requests it, while diagnosing a CI failure, or when the change spans the repository so broadly that no narrower set is credible. Use the current workflow and package scripts as the inventory; do not recreate the removed `check:pre-push` aggregate.
+Run the complete local approximation only when the user explicitly requests it, while diagnosing a CI failure, or when the change spans the repository so broadly that no narrower set is credible. These conditions do not authorize starting a real Web service or model, controlling a browser, or capturing media; those actions still require an explicit user request. Use the current workflow and package scripts as the inventory; do not recreate the removed `check:pre-push` aggregate.
 
 ## Protect history-rewriting pushes
 

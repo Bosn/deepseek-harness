@@ -23,6 +23,23 @@ interface OpenBlock {
   name?: string
 }
 
+/** Provider-specific translation behavior selected by the adapter from its resolved endpoint. */
+export interface TranslateOptions {
+  /** Preserve a tool call's non-empty id and name when continuation chunks carry empty or null placeholders. */
+  preserveToolCallIdentityOnEmptyDelta?: boolean
+}
+
+/** Merge one streamed tool identity field under the selected endpoint semantics. */
+function mergeToolIdentity(
+  current: string | undefined,
+  incoming: string | null | undefined,
+  preserveOnEmpty: boolean,
+): string | undefined {
+  if (incoming === undefined) return current
+  if (preserveOnEmpty && (incoming === null || incoming.length === 0)) return current
+  return incoming ?? undefined
+}
+
 /**
  * Map the wire finish_reason vocabulary to the harness FinishReason.
  * @param reason - the wire `finish_reason` string.
@@ -62,15 +79,27 @@ export function mapUsage(usage: WireUsage): TokenUsage {
 }
 
 /** Assemble the final ContentBlock for one open block. */
-function closeBlock(block: OpenBlock): ContentBlock {
+function closeBlock(block: OpenBlock, requireToolCallIdentity: boolean): ContentBlock {
   switch (block.kind) {
     case 'text': return { type: 'text', text: block.text }
     case 'reasoning': return { type: 'reasoning', text: block.text }
-    case 'tool-call': return {
-      type: 'tool-call',
-      id: CallId(block.callId ?? ''),
-      name: block.name ?? '',
-      arguments: block.text,
+    case 'tool-call': {
+      const missing = [
+        ...(block.callId === undefined || block.callId.length === 0 ? ['id'] : []),
+        ...(block.name === undefined || block.name.length === 0 ? ['function name'] : []),
+      ]
+      if (requireToolCallIdentity && missing.length > 0) {
+        throw new LlmError(
+          `tool-call block ${block.index} completed without a non-empty ${missing.join(' or ')}`,
+          'MALFORMED_RESPONSE',
+        )
+      }
+      return {
+        type: 'tool-call',
+        id: CallId(block.callId ?? ''),
+        name: block.name ?? '',
+        arguments: block.text,
+      }
     }
   }
 }
@@ -79,11 +108,15 @@ function closeBlock(block: OpenBlock): ContentBlock {
  * Consume SSE data payloads (ending with `[DONE]`) and yield StreamChunks.
  * Malformed JSON payloads abort the stream with `MALFORMED_RESPONSE`.
  * @param payloads - SSE data payloads from {@link parseSse}, `[DONE]`-terminated.
+ * @param options - endpoint-specific translation behavior; existing translator semantics are the default.
  * @returns deltas as they arrive; `block-end`s, `usage`, and `finish` are all deferred to the `[DONE]` sentinel.
  *   A `stop` (or absent) finish with no opened blocks is a degenerate provider completion and maps to an
  *   `EMPTY_RESPONSE` error finish instead of a successful empty message.
  */
-export async function* translate(payloads: AsyncIterable<string>): AsyncGenerator<StreamChunk> {
+export async function* translate(
+  payloads: AsyncIterable<string>,
+  options: TranslateOptions = {},
+): AsyncGenerator<StreamChunk> {
   let nextIndex = 0
   let textBlock: OpenBlock | undefined
   let reasoningBlock: OpenBlock | undefined
@@ -101,7 +134,11 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
   for await (const payload of payloads) {
     if (payload === DONE) {
       for (const block of order) {
-        yield { type: 'block-end', index: block.index, block: closeBlock(block) }
+        yield {
+          type: 'block-end',
+          index: block.index,
+          block: closeBlock(block, options.preserveToolCallIdentityOnEmptyDelta === true),
+        }
       }
       if (pendingUsage) yield { type: 'usage', usage: pendingUsage }
       const reason = pendingFinish ?? { kind: 'stop' as const }
@@ -156,8 +193,13 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
           toolBlocks.set(call.index, block)
           yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
         }
-        if (call.id !== undefined) block.callId = call.id
-        if (call.function?.name !== undefined) block.name = call.function.name
+        const preserveIdentity = options.preserveToolCallIdentityOnEmptyDelta === true
+        const callId = mergeToolIdentity(block.callId, call.id, preserveIdentity)
+        if (callId === undefined) delete block.callId
+        else block.callId = callId
+        const name = mergeToolIdentity(block.name, call.function?.name, preserveIdentity)
+        if (name === undefined) delete block.name
+        else block.name = name
         const fragment = call.function?.arguments ?? ''
         block.text += fragment
         yield {

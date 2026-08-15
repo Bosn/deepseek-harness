@@ -147,6 +147,62 @@ describe('translate: tool calls', () => {
     ])
   })
 
+  it('preserves parallel tool identities across DashScope empty continuation metadata', async () => {
+    const chunks = await collect(translate(feed(
+      firstChunk,
+      {
+        choices: [{
+          delta: {
+            tool_calls: [
+              { index: 0, id: 'call_a', type: 'function', function: { name: 'one', arguments: '{"x":' } },
+              { index: 1, id: 'call_b', type: 'function', function: { name: 'two', arguments: '{"y":' } },
+            ],
+          },
+        }],
+      },
+      {
+        choices: [{
+          delta: {
+            tool_calls: [
+              { index: 0, id: '', type: 'function', function: { name: null, arguments: '1}' } },
+              { index: 1, id: '', type: 'function', function: { name: '', arguments: '2}' } },
+            ],
+          },
+        }],
+      },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      DONE,
+    ), { preserveToolCallIdentityOnEmptyDelta: true }))
+
+    expect(chunks.filter(chunk => chunk.type === 'tool-call-delta')).toEqual([
+      { type: 'tool-call-delta', index: 0, id: 'call_a', name: 'one', argumentsDelta: '{"x":' },
+      { type: 'tool-call-delta', index: 1, id: 'call_b', name: 'two', argumentsDelta: '{"y":' },
+      { type: 'tool-call-delta', index: 0, id: 'call_a', name: 'one', argumentsDelta: '1}' },
+      { type: 'tool-call-delta', index: 1, id: 'call_b', name: 'two', argumentsDelta: '2}' },
+    ])
+    const assembler = new BlockAssembler()
+    for (const chunk of chunks) assembler.push(chunk)
+    expect(assembler.message().content).toEqual([
+      { type: 'tool-call', id: 'call_a', name: 'one', arguments: '{"x":1}' },
+      { type: 'tool-call', id: 'call_b', name: 'two', arguments: '{"y":2}' },
+    ])
+  })
+
+  it('leaves present-field replacement semantics unchanged by default', async () => {
+    const chunks = await collect(translate(feed(
+      firstChunk,
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_a', function: { name: 'one', arguments: '' } }] } }] },
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: '', function: { name: '', arguments: '{}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      DONE,
+    )))
+    expect(chunks.at(-2)).toEqual({
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: '', name: '', arguments: '{}' },
+    })
+  })
+
   it('interleaves text and tool-call blocks with distinct indices', async () => {
     const chunks = await collect(translate(feed(
       firstChunk,
@@ -312,10 +368,9 @@ describe('mapUsage', () => {
 })
 
 describe('translate: defensive tool-call branches', () => {
-  it('handles deltas that never carry id or name (empty-string fallbacks)', async () => {
+  it('retains empty-string fallbacks for deltas that never carry id or name', async () => {
     const chunks = await collect(translate(feed(
       firstChunk,
-      // Hypothetical lenient wire: argument fragments with no id/name at all.
       { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{}' } }] } }] },
       { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
       DONE,
@@ -326,6 +381,19 @@ describe('translate: defensive tool-call branches', () => {
       { type: 'block-end', index: 0, block: { type: 'tool-call', id: '', name: '', arguments: '{}' } },
       { type: 'finish', reason: { kind: 'tool-calls' } },
     ])
+  })
+
+  it('rejects DashScope tool calls that never establish a non-empty identity', async () => {
+    const stream = translate(feed(
+      firstChunk,
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: '', function: { name: null, arguments: '{}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+      DONE,
+    ), { preserveToolCallIdentityOnEmptyDelta: true })
+    await expect(collect(stream)).rejects.toMatchObject({
+      code: 'MALFORMED_RESPONSE',
+      message: 'tool-call block 0 completed without a non-empty id or function name',
+    })
   })
 
   it('handles tool_call deltas with a function object but no arguments field', async () => {

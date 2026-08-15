@@ -14,7 +14,7 @@ Linux PR 的 `node 24 / snapshots and artifacts` 必须运行完整 Web 浏览�
 
 消费方 job 在[消费方独立构建](../process/2026-07-30-independent-ci-consumer-build.md)中负责唯一一次 Linux 构建，因此 `apps/web/dist` 和包的 `lib/` 目录会保留在其工作区中，供浏览器套件使用。在托管运行器上，CI 按锁文件中的 Playwright 版本安装 Chromium 及其系统依赖。在持久化故障切换 VM 上，镜像负责预装 Linux 系统软件包，CI 只安装 Chromium，避免每次运行都通过 `apt` 改动系统。托管的默认分支 Linux 串行 job 运行该套件，并生成以操作系统和锁文件为键的浏览器缓存；PR 恢复该缓存，使必需路径无需承担压缩和上传开销，并可在锁文件变化时按操作系统前缀回退。自托管热备运行相同的比较，但不执行托管缓存操作。
 
-本地 `pnpm run test:web` 仍先构建再运行完整的浏览器套件；`test:web:built` 是已有构建产物的执行入口。开发者只在确认用户可见输出有意变化后显式运行 `DSH_SNAPSHOT=refresh pnpm run test:web`，评审每一处预期输出 diff，再以 replay 模式复验不再写文件。
+本地 `pnpm run test:web` 仍先构建再运行完整的浏览器套件；`test:web:built` 是已有构建产物的执行入口。根据[显式浏览器证据政策](../process/2026-08-15-explicit-browser-gif-evidence.md)，agent 只有在用户明确要求浏览器验收且变更约定由浏览器预期输出负责时，才运行 `DSH_SNAPSHOT=refresh pnpm run test:web`。agent 会评审每一处预期输出 diff，再以 replay 模式复验不再写文件。用户可见变更或 PR 本身都不授权这两次浏览器运行。
 
 对 PR 而言，门禁仅在 Linux 消费方 job 中运行：这些场景面向 POSIX，其他 PR job 不安装 Chromium。托管和自托管的默认分支 Linux 串行聚合作业也包含该比较，而 macOS 和 Windows 串行 job 仍不使用浏览器。PR 的 `all checks passed` 已依赖消费方 job，因此浏览器比较失败会阻止合并，无需新增 branch-protection check 名称。
 
@@ -32,4 +32,4 @@ Linux PR 的 `node 24 / snapshots and artifacts` 必须运行完整 Web 浏览�
 
 ## 后果
 
-每个 PR 都在合并前证明当前 Web 组装与所有已提交的浏览器预期输出一致，漏刷从“后续 PR 的无关变化”变成引入 PR 自己的失败。成本是消费方 job 需要安装 Chromium，并串行运行一轮浏览器场景；消费方独立构建与浏览器缓存避免重跑时重复构建和下载。门禁仍不声称跨平台浏览器一致性，Playwright/Chromium 升级若改变 ARIA 格式，升级 PR 必须显式 refresh 并评审 churn。
+每个 PR 都在合并前证明当前 Web 组装与所有已提交的浏览器预期输出一致，漏刷从“后续 PR 的无关变化”变成引入 PR 自己的失败。成本是消费方 job 需要安装 Chromium，并串行运行一轮浏览器场景；消费方独立构建与浏览器缓存避免重跑时重复构建和下载。门禁仍不声称跨平台浏览器一致性。Playwright/Chromium 升级若改变 ARIA 格式，预期输出需要经过评审的刷新，但 agent 只有在用户明确要求浏览器验收后才会运行该操作。
