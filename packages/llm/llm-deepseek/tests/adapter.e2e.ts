@@ -12,9 +12,10 @@ import { assemble, type AssembledResult } from './assemble.ts'
 
 /**
  * Real-API e2e for the direct-fetch adapter: V4 Flash + V4 Pro across
- * thinking modes and both official effort levels, plus the configured
- * DashScope International compatibility path. Each provider suite is gated
- * by its own credential (see vitest.e2e.config.ts).
+ * thinking modes and all official effort levels, plus the configured
+ * DashScope International compatibility path. Key-gated — each suite
+ * skips without its own credential ($DEEPSEEK_API_KEY, or
+ * $DASHSCOPE_API_KEY for the DashScope path; see vitest.e2e.config.ts).
  */
 
 const FLASH = 'deepseek-v4-flash'
@@ -96,7 +97,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('llm-deepseek e2e (real API)', ()
     }
   })
 
-  it('flash dynamically switches from off to high', async () => {
+  it('flash dynamically switches from off to low', async () => {
     const ctx = await harness(FLASH, { reasoningEffort: 'off' })
     const withoutThinking = await assemble(ctx,{
       model: FLASH,
@@ -111,7 +112,7 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('llm-deepseek e2e (real API)', ()
 
     const withThinking = await assemble(ctx,{
       model: FLASH,
-      reasoningEffort: ReasoningEffortId('high'),
+      reasoningEffort: ReasoningEffortId('low'),
       messages: ask('Which is larger, 9.11 or 9.8? Answer with just the number.'),
       maxTokens: 2000,
     })
