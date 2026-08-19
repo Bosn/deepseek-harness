@@ -2,7 +2,7 @@ import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { delimiter, dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import {
   normalizeSessionLog,
   normalizeStdout,
@@ -19,9 +19,6 @@ import {
   scanZstdFrames,
 } from '@deepseek-ai/dsh-session-persistence-jsonl/src/zstd.ts'
 import { describe, expect, it } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const snapshotsDir = join(dirname(fileURLToPath(import.meta.url)), 'snapshots')
 const advancedScenarioDir = join(snapshotsDir, 'advanced-toolchain')
@@ -57,10 +54,6 @@ const dshBinScript = fileURLToPath(new URL('../../../apps/cli/src/bin.ts', impor
 const tsconfigPath = fileURLToPath(new URL('../../../tsconfig.json', import.meta.url))
 const reasoningConfigPath = fileURLToPath(new URL('./fixtures/cli.cordis.yml', import.meta.url))
 const deepseekDefaultsConfigPath = fileURLToPath(new URL('./fixtures/deepseek-defaults.cordis.yml', import.meta.url))
-const dashScopeRedirectPath = fileURLToPath(new URL('./fixtures/dashscope-fetch-redirect.mjs', import.meta.url))
-const dashScopeScenarioDir = join(snapshotsDir, 'dashscope-tool-call')
-const dashScopeSessionExpected = join(dashScopeScenarioDir, 'session.expected.jsonl')
-const dashScopeStreamExpected = join(dashScopeScenarioDir, 'stream-json.expected.jsonl')
 const headlessOverlayPath = fileURLToPath(new URL('./fixtures/headless-profile.cordis.yml', import.meta.url))
 const headlessSessionExpected = join(snapshotsDir, 'headless-profile', 'session.expected.jsonl')
 const headlessFailureExpected = join(snapshotsDir, 'headless-profile', 'stderr.expected.txt')
@@ -112,51 +105,6 @@ async function deepseekDefaultsServer(): Promise<DeepSeekDefaultsServer> {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('DeepSeek defaults snapshot server has no port')
-  return {
-    url: `http://127.0.0.1:${address.port}`,
-    requests,
-    close: () => new Promise(resolve => server.close(() => { resolve() })),
-  }
-}
-
-/** Serve a DashScope-style tool call followed by the deterministic final answer. */
-async function dashScopeToolServer(): Promise<DeepSeekDefaultsServer> {
-  const requests: JsonObject[] = []
-  const responses = [
-    [
-      'data: {"choices":[{"delta":{"role":"assistant","content":null,"reasoning_content":""}}]}',
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_dashscope_read","type":"function","function":{"name":"read","arguments":"{\\"file_"}}]}}]}',
-      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","type":"function","function":{"name":null,"arguments":"path\\":\\"probe.txt\\"}"}}]}}]}',
-      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
-      'data: [DONE]',
-      '',
-    ].join('\n\n'),
-    [
-      'data: {"choices":[{"delta":{"content":"DASHSCOPE_TOOL_CALL_OK"}}]}',
-      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2}}',
-      'data: [DONE]',
-      '',
-    ].join('\n\n'),
-  ]
-  const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    let body = ''
-    request.setEncoding('utf8')
-    request.on('data', (chunk: string) => { body += chunk })
-    request.on('end', () => {
-      requests.push(JSON.parse(body) as JsonObject)
-      const payload = responses[requests.length - 1]
-      if (payload === undefined) {
-        response.writeHead(500, { 'content-type': 'text/plain' })
-        response.end('unexpected extra request')
-        return
-      }
-      response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.end(payload)
-    })
-  })
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-  const address = server.address()
-  if (address === null || typeof address === 'string') throw new Error('DashScope snapshot server has no port')
   return {
     url: `http://127.0.0.1:${address.port}`,
     requests,
@@ -615,99 +563,6 @@ describe('headless stream-json snapshots', () => {
         maxTokens: true,
         reasoningEffort: true,
       })
-    } finally {
-      await server.close()
-    }
-  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
-
-  it('preserves DashScope streamed tool identity through execution and cold persistence load', async () => {
-    const server = await dashScopeToolServer()
-    let runCwd = ''
-    try {
-      const result = await runLoaderSmoke({
-        label: 'DashScope streamed tool identity headless snapshot',
-        tempDirPrefix: 'headless-snapshot-dashscope-tool-call-',
-        binScript,
-        libBinScript: binScript,
-        configPath: deepseekDefaultsConfigPath,
-        binArgs: [deepseekDefaultsConfigPath, 'read probe.txt and return the deterministic response'],
-        tsconfigPath,
-        env: {
-          DEEPSEEK_API_KEY: 'snapshot-key',
-          DSH_SNAPSHOT: 'replay',
-          DSH_SNAPSHOT_BASE_URL: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-          DSH_SNAPSHOT_DASHSCOPE_REDIRECT_URL: server.url,
-          NODE_OPTIONS: [
-            process.env.NODE_OPTIONS,
-            `--import=${pathToFileURL(dashScopeRedirectPath).href}`,
-            '--disable-warning=ExperimentalWarning',
-          ].filter(Boolean).join(' '),
-        },
-        prepare: async (cwd) => {
-          runCwd = cwd
-          await writeFile(join(cwd, 'probe.txt'), 'DASHSCOPE_PROBE\n')
-        },
-        inspect: async (cwd) => {
-          const logs = await persistedLogs(cwd)
-          expect(logs).toHaveLength(1)
-          const actual = logs[0]
-          if (actual === undefined) throw new Error('DashScope snapshot did not persist its session')
-
-          const context = contextFromLogs([actual.content])
-          const session = scrubRequestHeaders(normalizeSessionLog(actual.content, context))
-          if (refreshing) {
-            await mkdir(dashScopeScenarioDir, { recursive: true })
-            await writeFile(dashScopeSessionExpected, session)
-          }
-          expect(session).toBe(await readFile(dashScopeSessionExpected, 'utf8'))
-
-          const records = parseJsonl(actual.content)
-          const assistant = records.find((record) => {
-            if (record.type !== 'assistant/message') return false
-            const data = record.data as JsonObject | undefined
-            const message = data?.message as JsonObject | undefined
-            return JSON.stringify(message?.content).includes('call_dashscope_read')
-          })
-          const assistantData = assistant?.data as JsonObject | undefined
-          const assistantMessage = assistantData?.message as JsonObject | undefined
-          const assistantContent = assistantMessage?.content as JsonObject[] | undefined
-          const assistantCall = assistantContent?.find(block => block.type === 'tool-call')
-          const toolCall = records.find(record => record.type === 'tool/call')?.data as JsonObject | undefined
-          const toolResult = records.find(record => record.type === 'tool/result')?.data as JsonObject | undefined
-          const resultMessage = toolResult?.message as JsonObject | undefined
-          const resultSource = resultMessage?.source as JsonObject | undefined
-          const resultContent = resultMessage?.content as JsonObject[] | undefined
-          expect([
-            assistantCall?.id,
-            toolCall?.callId,
-            resultSource?.callId,
-            resultContent?.[0]?.toolCallId,
-          ]).toEqual(Array(4).fill('call_dashscope_read'))
-          expect(toolCall?.name).toBe('read')
-          expect(resultContent?.[0]?.isError).toBe(false)
-          expect(JSON.stringify(resultContent)).toContain('DASHSCOPE_PROBE')
-          expect(actual.content).not.toContain('UNKNOWN_TOOL')
-          expect(records.findLast(record => record.type === 'turn/end')?.data)
-            .toMatchObject({ reason: { kind: 'completed' } })
-
-          const cold = new Context()
-          try {
-            await cold.plugin(SessionStore)
-            await cold.plugin(JsonlSessionPersistence, { root: join(cwd, '.sessions'), compression: 'zstd' })
-            const loaded = await cold.sessionPersistence.load(SessionId(String(actual.header.id)))
-            expect(loaded.events.some(event => event.type === 'tool/result')).toBe(true)
-          } finally {
-            await cold.fiber.dispose()
-          }
-        },
-      })
-
-      expect(result.stderr).toBe('')
-      expect(server.requests).toHaveLength(2)
-      expect(JSON.stringify(server.requests[1])).toContain('call_dashscope_read')
-      const normalized = normalizeHeadlessStream(result.stdout, runCwd)
-      if (refreshing) await writeFile(dashScopeStreamExpected, normalized)
-      expect(normalized).toBe(await readFile(dashScopeStreamExpected, 'utf8'))
     } finally {
       await server.close()
     }

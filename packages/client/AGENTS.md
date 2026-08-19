@@ -79,11 +79,11 @@ The GUI test structure (three tiers, lane map) is settled in the [GUI testing sy
 
 ## Before you push: the local check ladder
 
-Run the narrowest rung that covers what you touched; escalate only when the changed contract demands it.
+Run the narrowest rung that covers what you touched; escalate only when the change surface demands it.
 
-1. **GUI code changes** — run the owning Vitest file or focused test name. Use `pnpm run test:gui` when the change spans client/host GUI packages rather than as a universal baseline.
-2. **Snapshot-owned assembled output** — run the focused keyless snapshot when the change modifies output that the snapshot suite owns. A visible change alone does not require a snapshot. Linux PR CI owns the read-only browser replay gate; run `test:web` locally only when the user explicitly requests browser acceptance.
-3. **Before a PR** — use [dsh-pre-push-checks](../../.agents/skills/dsh-pre-push-checks/SKILL.md) to select the narrow checks for the outgoing diff; PR creation does not authorize a live server, model, browser, screenshot, recording, or media branch.
+1. **Every GUI code change** — `pnpm run test:gui` (seconds; no browser, no server): the client suites plus the host-side GUI packages. This is the inner loop; run it as freely as a typecheck.
+2. **Any change that can alter the assembled browser or visible conversation/UI output** (client components or copy, `apps/web`, Vite, `dsh-host-webserver`, connection/handler/SSE) — additionally `DSH_SNAPSHOT=replay pnpm run test:web`: rebuilds the frontend dist, then runs the browser smoke pair (the real-host case self-skips without `DEEPSEEK_API_KEY`) plus the keyless replayed e2e scenarios. Linux PR CI uses the same read-only replay mode. Use `DSH_SNAPSHOT=refresh` only after confirming an intentional output change, or `DSH_SNAPSHOT=record` with a key to re-record fixtures.
+3. **Before a PR** — use [dsh-pre-push-checks](../../.agents/skills/dsh-pre-push-checks/SKILL.md) to select the narrow checks for the outgoing diff; there is no repo-wide pre-push aggregate.
 
 If `test:gui` is red on code you did not touch, neither silently fix nor ignore it: note it in your handoff so it lands in the next PR window's sweep.
 
@@ -103,5 +103,5 @@ Bringing up a new `packages/client/<name>` plugin package (ui-workspace is a com
 2. Type the props as the four shares (`PropsRuntime` & `PropsRenderSlots` & `PropsStore` & inject face) — derive, don't hand-write. Shared/surviving state goes in a `createXXXStore()` factory declared at register; component-private state stays local.
 3. Component tests feed props directly (`createXXXStore().create()` for the store data; plain stubs for framework hooks) and assert behavior without render machinery.
 4. Tokens only in CSS; Chinese product copy; English comments.
-5. The focused owning GUI tests are green; add a snapshot only when the changed output is snapshot-owned. Local browser acceptance always requires an explicit user request.
+5. `pnpm run test:gui` green; if the component changes visible assembled output, also run `DSH_SNAPSHOT=replay pnpm run test:web`.
 6. Non-trivial change? It needs an Agent Note in the same PR (repo-wide rule) — the GUI notes above are the precedents to extend.

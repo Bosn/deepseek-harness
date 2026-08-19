@@ -1,6 +1,5 @@
 CLAUDE.local.md
 .env
-/.dsh/
 node_modules/
 lib/
 *.tsbuildinfo
