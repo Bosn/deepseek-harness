@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { BlockAssembler, createUserMessage, CallId, ReasoningEffortId , createMessage } from '@deepseek-ai/dsh-llm'
-import type { Message, StreamChunk, ToolSchema } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, CallId, ReasoningEffortId , createMessage } from '@deepseek-ai/dsh-llm'
+import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 import { LocalCredentialProvider } from '@deepseek-ai/dsh-credentials-local'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import type { Config } from '@deepseek-ai/dsh-llm-deepseek'
@@ -12,10 +12,8 @@ import { assemble, type AssembledResult } from './assemble.ts'
 
 /**
  * Real-API e2e for the direct-fetch adapter: V4 Flash + V4 Pro across
- * thinking modes and all official effort levels, plus the configured
- * DashScope International compatibility path. Key-gated — each suite
- * skips without its own credential ($DEEPSEEK_API_KEY, or
- * $DASHSCOPE_API_KEY for the DashScope path; see vitest.e2e.config.ts).
+ * thinking modes and all official effort levels. Key-gated — skips
+ * entirely without $DEEPSEEK_API_KEY (see vitest.e2e.config.ts).
  */
 
 const FLASH = 'deepseek-v4-flash'
@@ -196,63 +194,5 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)('llm-deepseek e2e (real API)', ()
     expect(kinds.filter(kind => kind === 'finish')).toHaveLength(1)
     // usage precedes finish (deferred-emit contract)
     expect(kinds.indexOf('usage')).toBeLessThan(kinds.indexOf('finish'))
-  })
-})
-
-describe.skipIf(!process.env.DASHSCOPE_API_KEY)('llm-deepseek DashScope Intl e2e (real API)', () => {
-  it('preserves streamed tool identity through a real tool-result round trip', async () => {
-    const ctx = await harness(PRO, {
-      apiKeyEnv: 'DASHSCOPE_API_KEY',
-      baseURL: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-      thinking: 'enabled',
-    })
-    const chunks: StreamChunk[] = []
-    const assembler = new BlockAssembler()
-    for await (const chunk of ctx.llm.stream({
-      provider: 'deepseek-official',
-      model: PRO,
-      reasoningEffort: ReasoningEffortId('max'),
-      messages: ask('What is the weather in Paris right now? Use the get_weather tool exactly once.'),
-      tools: [weatherTool],
-      maxTokens: 2000,
-    })) {
-      chunks.push(chunk)
-      assembler.push(chunk)
-    }
-
-    expect(assembler.finish.kind).toBe('tool-calls')
-    const call = assembler.blocks().find(block => block.type === 'tool-call')
-    expect(call).toBeDefined()
-    expect(call!.name).toBe('get_weather')
-    expect(call!.id).not.toBe('')
-    const deltas = chunks.filter(chunk => chunk.type === 'tool-call-delta')
-    expect(deltas.length).toBeGreaterThan(0)
-    expect(new Set(deltas.map(delta => delta.id))).toEqual(new Set([call!.id]))
-    expect(new Set(deltas.map(delta => delta.name))).toEqual(new Set([call!.name]))
-
-    const second = await assemble(ctx, {
-      model: PRO,
-      reasoningEffort: ReasoningEffortId('max'),
-      messages: [
-        ...ask('What is the weather in Paris right now? Use the get_weather tool exactly once.'),
-        createMessage({
-          role: 'assistant',
-          content: assembler.blocks(),
-          source: { kind: 'plugin', plugin: 'test' },
-        }),
-        createUserMessage({
-          content: [{
-            type: 'tool-result',
-            toolCallId: CallId(call!.id),
-            content: [{ type: 'text', text: 'Sunny, 22°C' }],
-          }],
-          source: { kind: 'plugin', plugin: 'test' },
-        }),
-      ],
-      tools: [weatherTool],
-      maxTokens: 2000,
-    })
-    expect(second.finish.kind).toBe('stop')
-    expect(textOf(second).toLowerCase()).toMatch(/sunny|22/)
   })
 })
