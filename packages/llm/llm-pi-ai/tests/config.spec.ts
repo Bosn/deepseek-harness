@@ -35,6 +35,11 @@ describe('reasoning schema boundary', () => {
   it('rejects a thinking format outside the offered set', () => {
     expect(configWith({ compat: { thinkingFormat: 'quantum' } })).toThrow(/expected/)
   })
+
+  it('accepts the system-prompt role switch and rejects non-boolean values', () => {
+    expect(configWith({ compat: { supportsDeveloperRole: false } })).not.toThrow()
+    expect(configWith({ compat: { supportsDeveloperRole: 'no' } })).toThrow()
+  })
 })
 
 describe('modality schema boundary', () => {

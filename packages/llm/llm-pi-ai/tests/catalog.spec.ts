@@ -755,7 +755,7 @@ describe('modelOverrides', () => {
   })
 })
 
-describe('reasoning-dispatch compat switches', () => {
+describe('compat switches', () => {
   /** The materialized models of one route, keyed by id. */
   function modelsOf(providers: Record<string, LlmPiAi.PiAiProviderProfile>, route: string): Map<string, Model<Api>> {
     const models = resolveProfiles(providers).get(route)?.piProvider.getModels() ?? []
@@ -779,6 +779,23 @@ describe('reasoning-dispatch compat switches', () => {
     expect(models.get('dialect-odd')?.compat).toEqual({ thinkingFormat: 'openai', supportsReasoningEffort: false })
   })
 
+  it('applies the system-prompt role switch beside the reasoning switches, entries winning per field', () => {
+    const models = modelsOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        compat: { supportsDeveloperRole: false },
+        models: [
+          { id: 'role-default', reasoningEfforts: { off: null, high: 'high' } },
+          { id: 'role-odd', compat: { supportsDeveloperRole: true } },
+        ],
+      },
+    }, 'acme-gateway')
+
+    expect((models.get('role-default')?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(false)
+    expect((models.get('role-odd')?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(true)
+  })
+
   it('merges the switches over the catalog entry’s own compat instead of replacing it', () => {
     const [catalogModel] = getBuiltinModels('deepseek')
     if (catalogModel === undefined) throw new Error('the installed catalog ships no deepseek model')
@@ -794,6 +811,19 @@ describe('reasoning-dispatch compat switches', () => {
     expect(models.get(catalogModel.id)?.compat).toEqual({ ...inherited, thinkingFormat: 'openai' })
   })
 
+  it('keeps a catalog role switch while overriding another switch', () => {
+    const [catalogModel] = getBuiltinModels('qwen-token-plan')
+    if (catalogModel === undefined) throw new Error('the installed catalog ships no qwen-token-plan model')
+    const inherited = catalogModel.compat as OpenAICompletionsCompat
+    expect(inherited.supportsDeveloperRole).toBe(false)
+
+    const models = modelsOf({
+      'qwen-token-plan': { models: [{ id: catalogModel.id, compat: { thinkingFormat: 'openai' } }] },
+    }, 'qwen-token-plan')
+
+    expect((models.get(catalogModel.id)?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(false)
+  })
+
   it('skips models of other protocols on a mixed route instead of failing them', () => {
     // xai ships both completions and responses models, so a route-level switch
     // must land on the former without invalidating the latter.
@@ -804,12 +834,13 @@ describe('reasoning-dispatch compat switches', () => {
 
     const models = modelsOf({
       xai: {
-        compat: { supportsReasoningEffort: false },
+        compat: { supportsReasoningEffort: false, supportsDeveloperRole: false },
         models: [{ id: completions.id }, { id: responses.id }],
       },
     }, 'xai')
 
     expect((models.get(completions.id)?.compat as OpenAICompletionsCompat).supportsReasoningEffort).toBe(false)
+    expect((models.get(completions.id)?.compat as OpenAICompletionsCompat).supportsDeveloperRole).toBe(false)
     expect(models.get(responses.id)?.compat).toEqual(responses.compat)
   })
 
@@ -819,11 +850,19 @@ describe('reasoning-dispatch compat switches', () => {
         models: [{ id: 'claude-sonnet-4-5', compat: { thinkingFormat: 'openai' } }],
       },
     })).toThrow(/exist only on openai-completions/)
+    expect(() => resolveProfiles({
+      anthropic: {
+        models: [{ id: 'claude-sonnet-4-5', compat: { supportsDeveloperRole: false } }],
+      },
+    })).toThrow(/exist only on openai-completions/)
   })
 
   it('rejects route switches no model on the route can take', () => {
     expect(() => resolveProfiles({
       anthropic: { compat: { thinkingFormat: 'openai' } },
+    })).toThrow(/no model on the route speaks openai-completions/)
+    expect(() => resolveProfiles({
+      anthropic: { compat: { supportsDeveloperRole: false } },
     })).toThrow(/no model on the route speaks openai-completions/)
   })
 })

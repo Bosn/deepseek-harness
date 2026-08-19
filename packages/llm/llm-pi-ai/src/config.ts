@@ -91,7 +91,7 @@ export interface PiAiProviderProfile {
    */
   modelOverrides?: Record<string, PiAiModelOverride>
   /**
-   * Reasoning-dispatch switches for every `openai-completions` model on this
+   * Compatibility switches for every `openai-completions` model on this
    * route; each model's own `compat` overrides per field. What neither sets
    * keeps the installed catalog entry's value, then pi-ai's baseURL-derived
    * detection.
@@ -188,6 +188,7 @@ const thinkingBudgets = z.object({
 const compatProfile: z<PiAiCompatProfile> = z.object({
   thinkingFormat: z.union(SUPPORTED_THINKING_FORMATS),
   supportsReasoningEffort: z.boolean(),
+  supportsDeveloperRole: z.boolean(),
 })
 
 /**
