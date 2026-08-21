@@ -19,7 +19,7 @@ Status: implemented
 遵循[能力 seam Agent Note](../architecture/2026-06-13-capability-seams.md)，压缩以独立包发布，使约定、算法和（后续的）消费方 API 各自独立演进：
 
 1. **接口** — `@deepseek-ai/dsh-compaction`：抽象 `CompactionEngine`，拥有 `ctx.compaction` 键、`CompactionResult` 词汇、`compaction/*` 会话事件、手动失败分类体系以及规范的检查点消息来源。它将 `compactIfNeeded()`、`compactNow()` 和 `compactRegion()` 声明为**抽象方法**——约定说明压缩*做什么*，而非*怎么做*。
-2. **实现** — `@deepseek-ai/dsh-compaction-basic`：具体的 `BasicCompactionEngine`，消费 `ctx.tokenMeter`，并拥有尾→头保留遍历、通过 `ctx.llm.stream()` 生成摘要、surface 替换、锁、步骤前压力处理和规范的上下文溢出恢复。`summarize()` 是其唯一的子类钩子；计价与回放仍归 meter 所有。
+2. **实现** — `@deepseek-ai/dsh-compaction-basic`：具体的 `BasicCompactionEngine`，消费 `ctx.tokenMeter`，并拥有尾→头保留遍历、通过 `ctx.llm.stream()` 生成摘要、surface 替换、锁、步骤前压力处理，以及语义溢出与请求大小的失败请求恢复。`summarize()` 是其唯一的子类钩子；计价与回放仍归 meter 所有。
 3. **无模型配套服务** — `@deepseek-ai/dsh-compaction-tool-result-pruner`：一个具体的可选服务，在后端选择摘要范围之前，重写当前过大的 `tool/result` 节点。它不是第二种压缩实现，也不实现 `CompactionEngine`。
 4. **面向用户的消费方** — `@deepseek-ai/dsh-command-compact` 通过 `ctx.commands` 注册无参数 `/compact`，并调用后端无关的 `compactNow()` 操作。它是供用户直接控制的命令，不是面向模型的工具。
 
@@ -33,13 +33,13 @@ Status: implemented
 
 将完整算法（保留遍历、token 求和、文本提取）作为接口上的具体方法，会将约定重新耦合到一种策略：想要不同保留策略或事件排序的后端必须与继承来的具体代码对抗。将三个操作都设为抽象，把所有*怎么做*的决策放在后端，并让接口保持为*做什么*的声明。token 测量根本不是压缩钩子；单例服务使多个消费方能够共享逐会话的回放折叠。
 
-`compactIfNeeded(agent, trigger, signal)` 接受显式的 `'pressure' | 'context-overflow'` 触发原因与取消信号。它只读取最新的持久化已路由请求；没有 header 就不执行工作，任何已路由的提供方/模型目标都使用单例估算器。`compactNow(agent, signal)` 要求 agent 处于 idle，即使未达到压力也进行一次有效的平衡缩减；不存在这种范围时返回 `null`，且不写入任何内容。`compactRegion(start, end, agent, signal?)` 将 `agent.session` 作为唯一会话身份，并为显式调用方保留可选 signal。默认摘要器依次从显式配置、最新记录的已路由目标和 agent 选项解析目标，并在任何 `llm/stream` 路由后记录提供方/模型对。它回放已路由请求的前缀，并将压缩指令追加为尾部 user 消息，从而复用提供方的热 KV Cache；见[摘要前缀缓存 Agent Note](../bug-fix/2026-07-21-compaction-summary-prefix-cache-reuse.md)。该结果携带 `llmStreamCall: true`，因为生成它时恰好通过此上下文的 LLM 服务发起了一次调用；只有满足相同条件时，子类才设置该标记，因为单有保留的 `rawOutput` 并不能判定调用路径。该调用将提供方无关的 `GenerateOptions.purpose` 设为 `compaction`；适配器可以将此用途映射为对模型隐藏的传输元数据，DeepSeek 适配器会发送 `x-deepseek-harness-compact: 1`。
+`compactIfNeeded(agent, trigger, signal)` 接受显式的 `'pressure' | 'context-overflow' | 'request-size'` 触发原因与取消信号。它只读取最新的持久化已路由请求；没有 header 就不执行工作，任何已路由的提供方/模型目标都使用单例估算器。`compactNow(agent, signal)` 要求 agent 处于 idle，即使未达到压力也进行一次有效的平衡缩减；不存在这种范围时返回 `null`，且不写入任何内容。`compactRegion(start, end, agent, signal?)` 将 `agent.session` 作为唯一会话身份，并为显式调用方保留可选 signal。默认摘要器依次从显式配置、最新记录的已路由目标和 agent 选项解析目标，并在任何 `llm/stream` 路由后记录提供方/模型对。它回放已路由请求的前缀，并将压缩指令追加为尾部 user 消息，从而复用提供方的热 KV Cache；见[摘要前缀缓存 Agent Note](../bug-fix/2026-07-21-compaction-summary-prefix-cache-reuse.md)。该结果携带 `llmStreamCall: true`，因为生成它时恰好通过此上下文的 LLM 服务发起了一次调用；只有满足相同条件时，子类才设置该标记，因为单有保留的 `rawOutput` 并不能判定调用路径。该调用将提供方无关的 `GenerateOptions.purpose` 设为 `compaction`；适配器可以将此用途映射为对模型隐藏的传输元数据，DeepSeek 适配器会发送 `x-deepseek-harness-compact: 1`。
 
 ### 成功的持久步骤工作完成后运行自动压力检查
 
 成功调用的压力检查在下一个 `agent/pre-step` 运行；此时前一响应、工具结果、缓冲上下文与 steering（中途引导）已经持久化，而下一个请求尚未派生。`dsh-compaction-basic` 通过 `ctx.tokenMeter` 测量规范的已记录请求，因此下一个请求无需推测性覆盖信封即可看到任何替换。压力达到条件后，可选的 `ctx.toolResultPruner` 重写在摘要范围选择前运行；compaction-basic 重新测量持久 surface，如果修剪恢复到安全压力便跳过摘要生成。
 
-规范的提供方上下文溢出走另一条路径。失败步骤先关闭，`agent/request-error` 接收原始请求错误。compaction-basic 自行持有按 agent 计的溢出次数，在强制执行一次有效且平衡的缩减前先修剪，且仅当 `session.surface.replaceGeneration` 增加时才返回 `{ kind: 'retry' }`；这包括没有摘要范围时仅修剪取得的进展。随后循环关闭失败轮次，开启新的编号重试轮次，并从持久日志重建请求。没有替换、任何替换前的恢复失败、取消、耗尽的上限或无关错误都会保留原始提供方失败。如果修剪已经推进 generation，而后续摘要工作失败，恢复会从该持久的已修剪 surface 重试，除非取消或 dispose（资源释放）先发生。完整生命周期决策见[调用后恢复 Agent Note](../architecture/2026-07-10-after-call-compaction-pressure-and-overflow-recovery.md)。
+语义上下文溢出与请求大小失败走另一条路径。失败步骤先关闭，`agent/request-error` 接收原始请求错误。compaction-basic 自行持有按 agent 计的恢复次数，在强制执行有效且平衡的缩减前先修剪，且仅当 `session.surface.replaceGeneration` 增加时才返回 `{ kind: 'retry' }`；这包括没有摘要范围时仅修剪取得的进展。HTTP 413 始终符合条件；TIMEOUT 仅在达到配置的大请求阈值时符合条件。请求大小恢复会限制完整摘要请求，并在单个范围无法装入时使用平衡的分层事务。随后循环关闭失败轮次，开启新的编号重试轮次，并从持久日志重建请求。没有替换、任何替换前的恢复失败、取消、耗尽的上限或无关错误都会保留原始提供方失败。如果修剪已经推进 generation，而后续摘要工作失败，恢复会从该持久的已修剪 surface 重试，除非取消或 dispose（资源释放）先发生。完整生命周期决策见[调用后恢复 Agent Note](../architecture/2026-07-10-after-call-compaction-pressure-and-overflow-recovery.md)；字节启发式与上限见[请求大小恢复 Agent Note](../bug-fix/2026-08-21-request-size-timeout-recovery.md)。
 
 ```
 assistant/message → tool/result/context/steering → step/end
@@ -67,7 +67,7 @@ retry → next numbered step/start      ⟵ derives from the replacement surface
 
 ### 近似收敛不变式
 
-`resolveConfig` 提供可用默认值：阈值比例 `0.8`、保留尾部比例 `0.16`、空的摘要提供方/模型覆盖、`maxTokens: 8192`、`compactionRetries: 1`、`maxOverflowRetries: 1` 以及 `auto: true`。可选的精确提供方/模型策略会部分覆盖顶层默认值；压力根据拥有该路由的 LLM 适配器所报告容量缩放比例，而 `retainTokens` 可以替代按比例保留。保留量必须低于最终阈值。收敛仍然是动态的，因为提供方输出上限可能被隐藏或显式的推理（reasoning）token 消耗，摘要大小也不可预测。如果压力仍高于阈值，`compactIfNeeded()` 会按配置的重试次数再次压缩头部检查点，但每次提交的摘要必须小于其遮蔽的内容。溢出不需要容量元数据，并会绕过阈值和保留尾部策略，执行一次最大且平衡的头部缩减，留下最新的不可分割单元。所有权划分由[已路由模型上下文与压缩策略 Agent Note](../architecture/2026-07-20-routed-model-context-and-compaction-policy.md)规定。
+`resolveConfig` 提供可用默认值：阈值比例 `0.8`、保留尾部比例 `0.16`、空的摘要提供方/模型覆盖、`maxTokens: 8192`、`compactionRetries: 1`、`maxOverflowRetries: 1`、`summarizationInputBytes: 524288`、`timeoutRecoveryBytes: 524288`、`learnedByteSafetyRatio: 0.75` 以及 `auto: true`。可选的精确提供方/模型策略会部分覆盖顶层默认值；压力根据拥有该路由的 LLM 适配器所报告容量缩放比例，而 `retainTokens` 可以替代按比例保留。保留量必须低于最终阈值。收敛仍然是动态的，因为提供方输出上限可能被隐藏或显式的推理（reasoning）token 消耗，摘要大小也不可预测。如果压力仍高于阈值，`compactIfNeeded()` 会按配置的重试次数再次压缩头部检查点，但每次提交的摘要必须小于其遮蔽的内容。失败请求恢复不需要容量元数据，并会绕过阈值和保留尾部策略，执行平衡的头部缩减，留下最新的不可分割单元。所有权划分由[已路由模型上下文与压缩策略 Agent Note](../architecture/2026-07-20-routed-model-context-and-compaction-policy.md)规定。
 
 ### Surface 替换：`compaction/*` 事件仅存在于日志；一条 `user/message` 承载摘要
 
@@ -131,4 +131,4 @@ compaction/end      → log-only. Releases the lock (carries `error` on a recove
 - **循环测试：** 测试固定 pre-step 发生在前一个 `step/end` 之后、下一个 `step/start` 之前，使用实际 `agent/request` 路由，关闭失败步骤，分配新的重试编号，并覆盖完整的抛出/带内溢出 → 压缩 → 重建重试组合。
 - **手动测试：** 无需模型密钥即可固定 maintenance 串行化、标记顺序、注入保留、活动／陈旧未匹配标记分类、取消、闭合／flush 失败、命令映射以及排队 TUI 流程。
 - **带密钥 e2e：** 真实模型和 bash 会话在降低的限制下触发压缩，记录完整的 `compaction/start…end` 对，缩小 surface，并完成任务。
-- **快照：** 组装后的上下文溢出场景仅在 `llmStreamCall: true` 证明本地 LLM 服务执行了辅助调用时，才从 `compaction/summary` 派生该调用；规范重建的块在不固定提供方增量切分的情况下固定完整恢复过程。
+- **快照：** 组装后的 HTTP 413 场景仅在 `llmStreamCall: true` 证明本地 LLM 服务执行了辅助调用时，才从 `compaction/summary` 派生该调用；规范重建的块在不固定提供方增量切分的情况下固定完整恢复过程。

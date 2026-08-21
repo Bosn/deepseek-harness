@@ -9,6 +9,7 @@ import { contentHasImage, createUserMessage, BlockAssembler, LlmError } from '@d
 import type {
   ContentBlock, FinishReason, GenerateOptions, Message, TokenUsage, ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
 interface SummaryConfig {
@@ -65,6 +66,21 @@ const COMPACTION_INSTRUCTION = [
   `- If the conversation already contains a ${SUMMARY_OPEN_TAG} block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.`,
 ].join('\n')
 
+const COMPACTION_INSTRUCTION_MESSAGE = createUserMessage({
+  content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
+  source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
+})
+
+/**
+ * Estimated wire bytes of the fixed compaction instruction message. The
+ * summarizer appends it to every replay, so a byte cap on the complete
+ * summarization request must reserve this overhead up front.
+ * @returns instruction message byte estimate, the same estimator the cap uses.
+ */
+export function estimateCompactionInstructionBytes(): number {
+  return estimateMessageBytes(COMPACTION_INSTRUCTION_MESSAGE)
+}
+
 /** Framing that makes the replacement user message established context. */
 const CHECKPOINT_PREAMBLE =
   'This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.'
@@ -82,6 +98,12 @@ export interface SummarizationInput {
   readonly tools?: readonly ToolSchema[]
   /** The shadowed region, in surface order, that precedes the compaction instruction. */
   readonly messages: readonly Message[]
+  /**
+   * Optional cap on the complete summarization request's estimated wire bytes
+   * (header plus replayed messages plus the instruction). Exceeding it throws
+   * before any provider call instead of replaying an oversized request.
+   */
+  readonly maxRequestBytes?: number
 }
 
 /** Safe summary content plus the exact auxiliary call envelope recorded with it. */
@@ -145,11 +167,20 @@ export async function summarizeWithLlm(
   const assembler = new BlockAssembler()
   const messages: Message[] = [
     ...input.messages,
-    createUserMessage({
-      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
-      source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
-    }),
+    COMPACTION_INSTRUCTION_MESSAGE,
   ]
+  if (input.maxRequestBytes !== undefined) {
+    const totalBytes = estimateHeaderBytes({
+      config: { provider: target.provider, model: target.model },
+      ...input.system === undefined ? {} : { system: input.system },
+      ...input.tools === undefined ? {} : { tools: [...input.tools] },
+    }) + messages.reduce((sum, message) => sum + estimateMessageBytes(message), 0)
+    if (totalBytes > input.maxRequestBytes) {
+      throw new Error(
+        `compaction summarizer request needs ${totalBytes} estimated bytes, over the ${input.maxRequestBytes}-byte cap`,
+      )
+    }
+  }
   const options: GenerateOptions = {
     provider: target.provider,
     model: target.model,

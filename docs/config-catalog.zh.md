@@ -480,7 +480,13 @@ export interface Config {
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
-  /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
+  /**
+   * Fraction of a failed request's estimated bytes adopted as the
+   * probe-learned byte budget after HTTP 413 or eligible large-request timeout
+   * recovery. Must be in `(0, 1)`. Defaults to `0.75`.
+   */
+  learnedByteSafetyRatio?: number
+  /** Enable automatic pressure and failed-request recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
 
@@ -500,8 +506,27 @@ export interface CompactionPolicyConfig {
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
   compactionRetries?: number
-  /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
+  /** Maximum retries after context-overflow or request-size recovery; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
+  /**
+   * Optional bound on the estimated wire-byte size of the routed model request.
+   * Gateways answer oversized bodies with HTTP 413, which token pressure on a
+   * mega-context model can never predict; when set, pressure compaction also
+   * fires at this byte bound. Unset by default (token pressure only).
+   */
+  maxRequestBytes?: number
+  /**
+   * Optional cap on each complete summarizer request's estimated wire bytes.
+   * Oversized ranges use balanced hierarchical compaction transactions so
+   * every summarized message stays within a bounded request. Defaults to
+   * `512 * 1024`.
+   */
+  summarizationInputBytes?: number
+  /**
+   * Minimum estimated request bytes at which a stream `TIMEOUT` may trigger
+   * request-size compaction before generic retry. Defaults to `512 * 1024`.
+   */
+  timeoutRecoveryBytes?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -513,7 +538,7 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 }
 ```
 
-来源：[`packages/compaction/compaction-basic/src/types.ts:38`](../packages/compaction/compaction-basic/src/types.ts)
+来源：[`packages/compaction/compaction-basic/src/types.ts:57`](../packages/compaction/compaction-basic/src/types.ts)
 
 <a id="deepseek-aidsh-compaction-tool-result-pruner"></a>
 

@@ -86,8 +86,10 @@ function requestBytes(session: Session): number {
   const events = session.events
   for (const seq of session.surface.nodes) {
     const event = events[seq]
+    /* v8 ignore next -- validated surface seqs always name existing session events. */
     if (event === undefined) continue
     const message = session.deriveEventMessage(event)
+    /* v8 ignore next -- validated surface nodes always project to messages. */
     if (message !== null) bytes += estimateMessageBytes(message)
   }
   return bytes
@@ -119,6 +121,8 @@ const compactionRetriesSchema = z.number().step(1).min(0)
 const maxOverflowRetriesSchema = z.number().step(1).min(0)
 const maxRequestBytesSchema = z.number().step(1).min(1)
 const summarizationInputBytesSchema = z.number().step(1).min(1)
+const timeoutRecoveryBytesSchema = z.number().step(1).min(1)
+const learnedByteSafetyRatioSchema = z.number()
 
 const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   provider: z.string().required(),
@@ -133,6 +137,7 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   maxOverflowRetries: maxOverflowRetriesSchema,
   maxRequestBytes: maxRequestBytesSchema,
   summarizationInputBytes: summarizationInputBytesSchema,
+  timeoutRecoveryBytes: timeoutRecoveryBytesSchema,
 })
 
 /**
@@ -157,6 +162,8 @@ export class BasicCompactionEngine extends CompactionEngine {
     maxOverflowRetries: maxOverflowRetriesSchema,
     maxRequestBytes: maxRequestBytesSchema,
     summarizationInputBytes: summarizationInputBytesSchema,
+    timeoutRecoveryBytes: timeoutRecoveryBytesSchema,
+    learnedByteSafetyRatio: learnedByteSafetyRatioSchema,
     modelPolicies: z.array(modelPolicy),
     auto: z.boolean(),
   })
@@ -165,8 +172,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   readonly config: ResolvedConfig
 
   private readonly warnedPressureConfigTargets = new Set<string>()
-  private readonly overflowRetries = new WeakMap<Agent, number>()
-  private readonly overflowAgents = new WeakMap<Session, Agent>()
+  private readonly recoveryRetries = new WeakMap<Agent, number>()
+  private readonly recoveryAgents = new WeakMap<Session, Agent>()
   /** Per-agent byte budgets learned from gateway 413 rejections (pressure probe). */
   private readonly learnedByteBudgets = new WeakMap<Agent, number>()
 
@@ -212,71 +219,77 @@ export class BasicCompactionEngine extends CompactionEngine {
     })
 
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.overflowRetries.delete(agent)
+      if (status === 'idle') this.recoveryRetries.delete(agent)
     })
 
     // A successful response starts a fresh overflow-recovery sequence even
     // when tool calls continue the same turn into another request.
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'assistant/message') return
-      const agent = this.overflowAgents.get(session)
-      if (agent !== undefined) this.overflowRetries.delete(agent)
+      const agent = this.recoveryAgents.get(session)
+      if (agent !== undefined) this.recoveryRetries.delete(agent)
     })
 
     ctx.on('agent/request-error', async (
       { agent, failure, signal },
       next,
     ) => {
-      if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next()
-      this.overflowAgents.set(agent.session, agent)
+      if (signal.aborted) return next()
       const target = routedTarget(agent.session)
       if (target === undefined) return next()
       const policy = resolveTargetPolicy(this.config, target)
-      const retries = this.overflowRetries.get(agent) ?? 0
+      const failedBytes = requestBytes(agent.session)
+      const requestSizeFailure = failure.status === 413
+        || (failure.code === 'TIMEOUT' && failedBytes >= policy.timeoutRecoveryBytes)
+      if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE && !requestSizeFailure) return next()
+
+      this.recoveryAgents.set(agent.session, agent)
+      const retries = this.recoveryRetries.get(agent) ?? 0
       if (retries >= policy.maxOverflowRetries) return next()
 
-      // The request failed on wire size: shrink the probe-learned pressure
-      // budget so later turns compact BEFORE the gateway rejects again.
-      const failedBytes = requestBytes(agent.session)
-      const learned = Math.floor(failedBytes * 3 / 4)
-      if (learned >= MIN_USEFUL_REQUEST_BYTES) {
-        const current = this.learnedByteBudgets.get(agent)
-        if (current === undefined || learned < current) {
-          this.learnedByteBudgets.set(agent, learned)
+      // HTTP 413 confirms byte pressure. A TIMEOUT above the configured
+      // threshold opts into the same conservative recovery because resending
+      // the unchanged large envelope can repeat an upload-side stall.
+      if (requestSizeFailure) {
+        const learned = Math.floor(failedBytes * this.config.learnedByteSafetyRatio)
+        if (learned >= MIN_USEFUL_REQUEST_BYTES) {
+          const current = this.learnedByteBudgets.get(agent)
+          if (current === undefined || learned < current) {
+            this.learnedByteBudgets.set(agent, learned)
+          }
         }
       }
 
       const generation = agent.session.surface.replaceGeneration
+      const trigger: CompactionTrigger = requestSizeFailure ? 'request-size' : 'context-overflow'
+      const label = requestSizeFailure ? 'request-size' : 'context-overflow'
       let result: CompactionResult | null
       try {
-        result = await this.compactIfNeeded(agent, 'context-overflow', signal)
+        result = await this.compactIfNeeded(agent, trigger, signal)
       } catch (recoveryError: unknown) {
         const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
         if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
-            `context-overflow compaction failed after durable surface progress: ${message}; `
+            `${label} compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
           )
-          this.overflowRetries.set(agent, retries + 1)
+          this.recoveryRetries.set(agent, retries + 1)
           return { kind: 'retry' }
         }
         ctx.logger.warn(
-          // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while recovery is awaited.
-          `context-overflow compaction failed: ${message}; ${signal.aborted
+          `${label} compaction failed: ${message}; ${signal.aborted
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
-      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal can abort while compaction is awaited.
       if (signal.aborted
         || agent.session.surface.replaceGeneration <= generation) return next()
-      if (result !== null) logResult(result, 'context overflow recovery')
-      this.overflowRetries.set(agent, retries + 1)
+      if (result !== null) logResult(result, `${label} recovery`)
+      this.recoveryRetries.set(agent, retries + 1)
       return { kind: 'retry' }
     })
   }
@@ -304,12 +317,11 @@ export class BasicCompactionEngine extends CompactionEngine {
   }
 
   /**
-   * Compact for replayed step-boundary pressure or one provider-confirmed context
-   * overflow. Both triggers price the latest durable routed request envelope;
-   * overflow bypasses the normal threshold and retained-tail policy so it can
-   * force one useful balanced reduction.
+   * Compact for step-boundary pressure, semantic context overflow, or
+   * request-size recovery. Failure recovery bypasses the normal threshold and
+   * retained-tail policy so it can force one useful balanced reduction.
    * @param agent - agent whose latest durable routed request is measured.
-   * @param trigger - normal step-boundary pressure or context-overflow recovery.
+   * @param trigger - normal pressure, semantic context overflow, or request-size recovery.
    * @param signal - live turn cancellation signal forwarded to summarization.
    * @returns the latest summary compaction result, or `null` when no summary ran.
    */
@@ -325,6 +337,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     let measurement = meter.measure(agent.session)
     switch (trigger) {
       case 'context-overflow':
+      case 'request-size':
         break
       case 'pressure':
         break
@@ -338,7 +351,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     // capacity and checks its target-specific threshold.
     const prune = this.ctx.get('toolResultPruner')
 
-    if (trigger === 'context-overflow') {
+    if (trigger !== 'pressure') {
       if (prune !== undefined) {
         prune.pruneSession(agent.session)
         measurement = meter.measure(agent.session)
@@ -419,6 +432,7 @@ export class BasicCompactionEngine extends CompactionEngine {
    * @param end - inclusive last surface-node seq.
    * @param agent - owner of the target session, used by the summarizer.
    * @param signal - optional summarization cancellation signal.
+   * @param summarizationInputBytes - optional complete-request byte cap for hierarchical compaction.
    * @returns the successful durable compaction result.
    */
   override async compactRegion(

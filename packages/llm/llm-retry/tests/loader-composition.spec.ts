@@ -11,6 +11,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { createUserMessage, LlmAdapter, LlmError, resolveRetryPolicy  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
+import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { startMockLlmServer, type MockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -73,6 +74,7 @@ async function loadYaml(lines: readonly string[]): Promise<Context> {
     ['@deepseek-ai/dsh-tools', ToolRuntime],
     ['@deepseek-ai/dsh-agent', AgentRegistry],
     ['@deepseek-ai/dsh-llm-deepseek', LlmDeepSeek],
+    ['@deepseek-ai/dsh-llm-pi-ai', LlmPiAi],
     ['@deepseek-ai/dsh-llm-retry', retry],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
   ])
@@ -189,6 +191,62 @@ describe('real Loader composition', () => {
       source: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     })
     expect(loaded.agents).toBeInstanceOf(AgentRegistry)
+  })
+
+  it('recovers a pi-ai route from a real quota-worded HTTP 429', { timeout: 60_000 }, async () => {
+    vi.stubEnv('PI_AI_LOADER_TEST_KEY', 'test-key')
+    mockServer = await startMockLlmServer({ sequence: ['quota_exceeded', 'success'] })
+    const loaded = await loadYaml([
+      "- name: '@deepseek-ai/dsh-llm'",
+      "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-system-prompt'",
+      "- name: '@deepseek-ai/dsh-tools'",
+      "- name: '@deepseek-ai/dsh-agent'",
+      "- name: '@deepseek-ai/dsh-llm-pi-ai'",
+      '  config:',
+      '    providers:',
+      '      qwen-test:',
+      '        apiKeyEnv: PI_AI_LOADER_TEST_KEY',
+      '        api: openai-completions',
+      `        baseURL: '${mockServer.baseURL}'`,
+      '        models:',
+      '          - id: qwen-test-model',
+      '            contextWindow: 1000000',
+      '            maxTokens: 32768',
+      '        retryPolicy:',
+      '          mode: normal',
+      '          maxRetries: 3',
+      '          retryableCodes: [RATE_LIMIT]',
+      '          backoff:',
+      '            initialDelayMs: 1',
+      '            maxDelayMs: 25',
+      '            jitterRatio: 0',
+      '            rateLimitDelaysMs: [25]',
+      "- name: '@deepseek-ai/dsh-llm-retry'",
+      "- name: '@deepseek-ai/dsh-agent-loop'",
+    ])
+    const agent = loaded.agentLoop.create(SessionId('loader-pi-ai-cooldown'), {
+      provider: 'qwen-test',
+      model: 'qwen-test-model',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(mockServer.requests.map(request => request.scriptBehavior))
+      .toEqual(['quota_exceeded', 'success'])
+    const retried = agent.session.events.filter(event => event.type === 'llm/retry')
+    expect(retried).toHaveLength(1)
+    expect(retried[0]?.data).toMatchObject({
+      provider: 'qwen-test',
+      retry: 1,
+      delayMs: 25,
+      failure: { code: 'RATE_LIMIT', status: 429 },
+    })
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      source: { provider: 'qwen-test', model: 'qwen-test-model' },
+    })
   })
 
   it('ends the turn with the original 429 only after the cooldown schedule is exhausted', { timeout: 60_000 }, async () => {

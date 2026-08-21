@@ -20,9 +20,9 @@ import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { EpochHeader, Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { frameSummary } from './summarizer.ts'
+import { estimateCompactionInstructionBytes, frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 
 interface RegionDependencies {
@@ -44,6 +44,8 @@ interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
   readonly shadowedTokenCount: number
+  /** Front message count that exceeds the byte cap and compacts separately. */
+  readonly dropCount: number
   readonly input: SummarizationInput
 }
 
@@ -61,10 +63,8 @@ interface CompactionTransactionOptions {
   /** Manual command that initiated this transaction, when present. */
   readonly sourceCommandId?: CommandId
   /**
-   * Optional byte cap on the summarizer's replayed input. Beyond it the oldest
-   * messages drop out of the summarization input (with a marker) so the
-   * summarizer request itself can never exceed a gateway request-size limit;
-   * the durable replacement still covers the full shadowed range.
+   * Optional byte cap on each complete summarizer request. Oversized ranges
+   * are partitioned into balanced compaction transactions that each fit it.
    */
   readonly summarizationInputBytes?: number
 }
@@ -167,27 +167,104 @@ export async function compactSurfaceRegion(
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
   if (options.owner === null) signal?.throwIfAborted()
-  const selection = validateSurfaceRegion(session, start, end)
+  const initial = validateSurfaceRegion(session, start, end)
   const entryState = inspectCompactionEntryState(session.events)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
     'compaction',
   )
+  const owner = resolveCompactionOwner(options, entryState)
 
-  let owner: number | null
+  // Front messages outside the request cap compact in earlier transactions;
+  // every durable replacement is backed by a bounded summarizer request.
+  let remainingSeqs: readonly number[] = initial.shadowedSeqs
+  while (true) {
+    const headSeq = remainingSeqs[0]
+    const tailSeq = remainingSeqs.at(-1)
+    /* v8 ignore next 3 -- validated regions and each bounded prefix leave at least one selected event. */
+    if (headSeq === undefined || tailSeq === undefined) {
+      throw new Error('compactRegion: bounded compaction exhausted the selected region')
+    }
+    const current = validateSurfaceRegion(session, headSeq, tailSeq)
+    const prepared = prepareCompaction(
+      dependencies,
+      session,
+      current,
+      options.summarizationInputBytes,
+    )
+    if (prepared.dropCount === 0) {
+      return runCompactionTransaction(
+        dependencies,
+        session,
+        prepared,
+        agent,
+        options,
+        owner,
+        signal,
+      )
+    }
+    const omittedSeqs = current.shadowedSeqs.slice(0, prepared.dropCount)
+    const omittedHeadSeq = omittedSeqs[0]
+    const omittedTailSeq = omittedSeqs.at(-1)
+    /* v8 ignore next 3 -- a positive prepared drop count always selects a non-empty prefix. */
+    if (omittedHeadSeq === undefined || omittedTailSeq === undefined) {
+      throw new Error('compactRegion: bounded compaction selected an empty prefix')
+    }
+    await compactSurfaceRegion(
+      dependencies,
+      session,
+      omittedHeadSeq,
+      omittedTailSeq,
+      agent,
+      options,
+      signal,
+    )
+    remainingSeqs = remainingSeqs.slice(prepared.dropCount)
+  }
+}
+
+/** Resolve the transaction owner or reject a manual call inside an open turn. */
+function resolveCompactionOwner(
+  options: CompactionTransactionOptions,
+  entryState: CompactionEntryState,
+): number | null {
   if (options.owner === null) {
     if (entryState.openTurn !== null) {
       throw new ManualCompactionError('busy', 'manual compaction: the session already has an open turn')
     }
-    owner = null
-  } else {
-    if (entryState.openTurn === null) {
-      throw new Error('compactRegion: no open turn — automatic compaction events must be enclosed in a turn')
-    }
-    owner = entryState.openTurn
+    return null
   }
+  if (entryState.openTurn === null) {
+    throw new Error('compactRegion: no open turn — automatic compaction events must be enclosed in a turn')
+  }
+  return entryState.openTurn
+}
 
+/**
+ * Run the single prepared compaction transaction: open the durable lock, run
+ * the summarizer, recheck stability, and commit the replacement across the
+ * prepared span. Every failure after the opening marker makes exactly one
+ * `compaction/end` attempt; a failed close deliberately leaves the unmatched
+ * start detectable.
+ * @param dependencies - conversation meter and dynamically dispatched summarizer hook.
+ * @param session - session whose surface is mutated.
+ * @param prepared - priced selection and replay input built against the current surface.
+ * @param agent - agent used by the summarizer.
+ * @param options - bracket owner, stability rule, flush hook, and command identity.
+ * @param owner - resolved bracket owner (turn number or null).
+ * @param signal - optional summarization cancellation signal.
+ * @returns the successful durable compaction result.
+ */
+async function runCompactionTransaction(
+  dependencies: RegionDependencies,
+  session: Session,
+  prepared: PreparedCompaction,
+  agent: Agent,
+  options: CompactionTransactionOptions,
+  owner: number | null,
+  signal?: AbortSignal,
+): Promise<CompactionResult> {
   const compactionId = CompactionId(randomUUID())
   const lifecycle = {
     compactionId,
@@ -206,12 +283,6 @@ export async function compactSurfaceRegion(
   let stage: TransactionFailure['stage'] = 'summary'
 
   try {
-    const prepared = prepareCompaction(
-      dependencies,
-      session,
-      selection,
-      options.summarizationInputBytes,
-    )
     const summarized = await summarizeCompaction(
       dependencies,
       prepared,
@@ -361,12 +432,14 @@ function prepareCompaction(
     || selectedNodes.some((node, index) => node.seq !== selection.shadowedSeqs[index])) {
     throw new SurfaceChangedError('compaction: selected surface changed before summarization began')
   }
+  const rebuilt = buildSummarizationInput(session, selection.shadowedSeqs, summarizationInputBytes)
   return {
     ...selection,
     measurement,
     selectedNodes,
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
-    input: buildSummarizationInput(session, selection.shadowedSeqs, summarizationInputBytes),
+    dropCount: rebuilt.dropCount,
+    input: rebuilt.input,
   }
 }
 
@@ -506,55 +579,106 @@ function completeCompaction(
  * instruction after this, so the call is a genuine prefix of the conversation
  * and reuses the provider's KV cache.
  *
- * With a byte cap set, messages drop from the FRONT of the replayed region
- * until the envelope fits the cap (the newest message always stays), and a
- * marker message records the omission. The durable replacement still covers
- * the entire shadowed region: the cap only shapes what the summarizer reads,
- * so a compaction can never be blocked by the same gateway request-size limit
- * that overflowed the conversation itself.
+ * With a byte cap set, the budget first reserves the fixed instruction
+ * message's bytes, then messages drop from the FRONT of the replayed region
+ * until header, kept messages, and instruction fit together. The returned
+ * `dropCount` tells the caller which front messages need their own earlier
+ * compaction transactions — nothing is silently erased with a marker, and an
+ * indivisible header-plus-newest overshoot fails loud instead of replaying an
+ * oversized request.
  * @param session - session supplying the request header and per-node projection.
  * @param shadowedSeqs - the surface-node seqs, in order, being compacted.
- * @param maxBytes - optional cap on total replay bytes (header plus messages).
- * @returns the replayed conversation prefix to condense.
+ * @param maxBytes - optional cap on total replay bytes (header plus messages plus instruction).
+ * @returns the replayed conversation prefix to condense and the front drop count.
  */
 function buildSummarizationInput(
   session: Session,
   shadowedSeqs: readonly number[],
   maxBytes: number | undefined,
-): SummarizationInput {
+): { input: SummarizationInput; dropCount: number } {
   const header = session.requestHeader()
   const events = session.events
-  let messages = shadowedSeqs
-    // shadowedSeqs are current surface seqs, so each is a valid log index.
-    // oxlint-disable-next-line typescript/no-non-null-assertion
-    .map(seq => session.deriveEventMessage(events[seq]!))
-    .filter((message): message is Message => message !== null)
+  // shadowedSeqs are current surface seqs, so each is a valid log index of a
+  // settled message event and the projection is total.
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const messages = shadowedSeqs.map(seq => session.deriveEventMessage(events[seq]!)!)
 
+  let dropCount = 0
   if (maxBytes !== undefined) {
-    let total = estimateHeaderBytes(header)
-    for (const message of messages) total += estimateMessageBytes(message)
-    let dropCount = 0
-    while (total > maxBytes && dropCount < messages.length - 1) {
-      // oxlint-disable-next-line typescript/no-non-null-assertion
-      total -= estimateMessageBytes(messages[dropCount]!)
-      dropCount += 1
-    }
-    if (dropCount > 0) {
-      messages = [createUserMessage({
-        content: [{
-          type: 'text',
-          text: `[${dropCount} older conversation message(s) omitted from this summarization input to keep it within a request-size budget; summarize the remaining span only.]`,
-        }],
-        source: { kind: 'user' },
-      }), ...messages.slice(dropCount)]
-    }
+    dropCount = trimToByteCap(session, shadowedSeqs, messages, header, maxBytes)
   }
 
   return {
-    ...header?.system === undefined ? {} : { system: header.system },
-    ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages,
+    input: {
+      ...header?.system === undefined ? {} : { system: header.system },
+      ...header?.tools === undefined ? {} : { tools: header.tools },
+      messages: messages.slice(dropCount),
+      ...maxBytes === undefined ? {} : { maxRequestBytes: maxBytes },
+    },
+    dropCount,
   }
+}
+
+/**
+ * Count the front messages that cannot join the capped summarizer request.
+ * @param messages - full derived message list, in surface order.
+ * @param header - the routed header whose bytes count against the cap.
+ * @param maxBytes - cap on header, kept messages, and instruction combined.
+ * @returns front drop count when trimming fixes the budget.
+ */
+function trimToByteCap(
+  session: Session,
+  shadowedSeqs: readonly number[],
+  messages: readonly Message[],
+  header: EpochHeader | undefined,
+  maxBytes: number,
+): number {
+  const instructionBytes = estimateCompactionInstructionBytes()
+  const dataCap = maxBytes - instructionBytes
+  if (dataCap <= 0) {
+    throw new Error(
+      `compaction: the ${maxBytes}-byte summarization-input cap cannot accommodate `
+      + `the ${instructionBytes}-byte compaction instruction`,
+    )
+  }
+  let total = estimateHeaderBytes(header)
+  for (const message of messages) total += estimateMessageBytes(message)
+  let dropCount = 0
+  while (total > dataCap && dropCount < messages.length - 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    total -= estimateMessageBytes(messages[dropCount]!)
+    dropCount += 1
+  }
+  while (dropCount > 0 && !isBalancedPartition(session, shadowedSeqs, dropCount)) {
+    if (dropCount >= messages.length - 1) {
+      throw new Error(
+        `compaction: summarizer input cannot fit the ${maxBytes}-byte cap without splitting a tool-call/result pair`,
+      )
+    }
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    total -= estimateMessageBytes(messages[dropCount]!)
+    dropCount += 1
+  }
+  if (total > dataCap) {
+    throw new Error(
+      `compaction: summarizer input cannot fit the ${maxBytes}-byte cap: `
+      + `header and the newest message alone need ${total + instructionBytes} estimated bytes`,
+    )
+  }
+  return dropCount
+}
+
+/** Whether a front/suffix partition preserves tool-call/result pairing. */
+function isBalancedPartition(
+  session: Session,
+  shadowedSeqs: readonly number[],
+  dropCount: number,
+): boolean {
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const left = shadowedSeqs[dropCount - 1]!
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const right = shadowedSeqs[dropCount]!
+  return toolPairingBalancedAfter(session, left) && toolPairingBalancedBefore(session, right)
 }
 
 /** Inspect open-turn, unmatched-compaction, and latest seed-boundary state independently. */

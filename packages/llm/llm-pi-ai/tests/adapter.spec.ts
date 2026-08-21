@@ -300,13 +300,39 @@ describe('PiAiAdapter provider routing', () => {
   it.each([
     [401, 'AUTH'],
     [400, 'INVALID_REQUEST'],
+    [413, CONTEXT_WINDOW_EXCEEDED_CODE],
     [429, 'RATE_LIMIT'],
     [500, 'SERVER'],
   ] as const)('maps HTTP %s failures to %s', async (status, code) => {
     const server = await mockServer([{ status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }])
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
-    expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code, status } })
+    expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('treats quota-worded HTTP 429 as throttling', async () => {
+    const server = await mockServer([{
+      status: 429,
+      body: JSON.stringify({
+        error: {
+          message: 'You exceeded your current quota',
+          type: 'insufficient_quota',
+          code: 'insufficient_quota',
+        },
+      }),
+    }])
+    const ctx = await harness(server.url)
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: {
+        code: 'RATE_LIMIT',
+        status: 429,
+      },
+    })
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
@@ -350,6 +376,25 @@ describe('PiAiAdapter provider routing', () => {
 
     expect(server.paths).toEqual(['/chat/completions'])
     expect(server.closedResponses).toBe(1)
+  })
+
+  it('isolates a timed-out stream from concurrent and later requests', async () => {
+    const server = await mockServer([
+      { events: textEvents, delayMs: 200 },
+      { events: textEvents },
+      { events: textEvents },
+    ])
+    const ctx = await harness(server.url, { streamIdleTimeoutMs: 20 })
+    const stalled = assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    await vi.waitFor(() => { expect(server.requests).toHaveLength(1) })
+
+    const concurrent = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(concurrent.finish).toEqual({ kind: 'stop' })
+    expect((await stalled).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+
+    const later = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(later.finish).toEqual({ kind: 'stop' })
+    expect(server.paths).toEqual(['/chat/completions', '/chat/completions', '/chat/completions'])
   })
 })
 

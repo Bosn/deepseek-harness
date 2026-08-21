@@ -17,16 +17,9 @@ import TokenMeter, { estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SummarizationInput, SummaryResult } from '../src/summarizer.ts'
+import { summarizeWithLlm } from '../src/summarizer.ts'
 
-/**
- * Gateway request-size (HTTP 413 `RequestTooLarge`) regression coverage.
- * These tests pin the exact failure recorded from a real bricked session:
- * the provider rejects the request body with `RequestTooLarge`, the harness
- * must NOT classify it as terminal INVALID_REQUEST (which makes every later
- * turn fail instantly — the dead loop), must force-compact with a bounded
- * summarizer input, and must retry the rebuilt request exactly within the
- * configured overflow-retry budget.
- */
+/** Gateway request-size and large-timeout recovery coverage. */
 
 const REQUEST_TOO_LARGE_MESSAGE
   = '413: {"message":"Request body size exceeds maximum allowed sized","id":"449fa579-c4a3-9e93-ab20-7eb6805b6101","type":"RequestTooLarge","code":"RequestTooLarge"}'
@@ -48,7 +41,7 @@ class RecordingCompactionEngine extends BasicCompactionEngine {
   }
 }
 
-/** Conversation requests 1..overflowRequests fail like the real gateway; later ones succeed. */
+/** Conversation requests whose one-based indexes are in `failing` fail. */
 class SizeGateAdapter extends LlmAdapter {
   readonly conversationRequests: GenerateOptions[] = []
   readonly summaryRequests: GenerateOptions[] = []
@@ -60,7 +53,10 @@ class SizeGateAdapter extends LlmAdapter {
 
   constructor(
     private readonly contextWindow: number,
-    private readonly overflowRequests: number,
+    private readonly failing: ReadonlySet<number>,
+    private readonly failureStatus?: number,
+    private readonly failureCode: string = CONTEXT_WINDOW_EXCEEDED_CODE,
+    private readonly failureMessage: string = REQUEST_TOO_LARGE_MESSAGE,
   ) {
     super()
   }
@@ -91,12 +87,16 @@ class SizeGateAdapter extends LlmAdapter {
     }
 
     this.conversationRequests.push(options)
-    if (this.conversationRequests.length <= this.overflowRequests) {
+    if (this.failing.has(this.conversationRequests.length)) {
       yield {
         type: 'finish',
         reason: {
           kind: 'error',
-          failure: { message: REQUEST_TOO_LARGE_MESSAGE, code: CONTEXT_WINDOW_EXCEEDED_CODE },
+          failure: {
+            message: this.failureMessage,
+            code: this.failureCode,
+            ...this.failureStatus === undefined ? {} : { status: this.failureStatus },
+          },
         },
       }
       return
@@ -117,7 +117,12 @@ async function mountInvariants(ctx: Context): Promise<void> {
 async function harness(
   options: {
     contextWindow: number
-    overflowRequests: number
+    /** One-based conversation request indexes that fail with the gateway error. */
+    failing: ReadonlySet<number>
+    failureStatus?: number
+    omitFailureStatus?: boolean
+    failureCode?: string
+    failureMessage?: string
     compaction?: Partial<BasicCompactionConfig>
   },
 ): Promise<{ ctx: Context; compact: RecordingCompactionEngine; adapter: SizeGateAdapter }> {
@@ -126,7 +131,13 @@ async function harness(
   await mountInvariants(ctx)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TokenMeter)
-  const adapter = new SizeGateAdapter(options.contextWindow, options.overflowRequests)
+  const adapter = new SizeGateAdapter(
+    options.contextWindow,
+    options.failing,
+    options.omitFailureStatus === true ? undefined : options.failureStatus ?? 413,
+    options.failureCode,
+    options.failureMessage,
+  )
   ctx.llm.registerAdapter(['mock'], adapter)
   ctx.tools.register(defineContentToolFixture({
     name: 'work',
@@ -208,17 +219,22 @@ async function createSeededAgent(
   return agent
 }
 
-describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)', () => {
-  it('force-compacts with a bounded summarizer input, then the rebuilt retry succeeds', async () => {
-    const huge = 'x'.repeat(600 * 1024) // ~600KB — beyond the default 512KB summarizer cap.
+describe('gateway request-size recovery', () => {
+  it('compacts oversized history in bounded per-chunk transactions, then the rebuilt retry succeeds', async () => {
+    // Two individually-sized chunks: together they exceed the 512KB default
+    // summarizer cap, while each one fits the cap minus the appended
+    // instruction reservation. The front chunk receives its own compaction
+    // transaction first — no node is erased behind an omission marker.
+    const hugeOne = 'a'.repeat(360 * 1024)
+    const hugeTwo = 'b'.repeat(360 * 1024)
     const { ctx, compact, adapter } = await harness({
       contextWindow: 1_000_000,
-      overflowRequests: 1,
+      failing: new Set([1]),
     })
     try {
       const seed = sizedHistorySeed([
-        { user: huge, assistant: 'historical response 1' },
-        { user: 'RECENT HISTORY', assistant: 'historical response 2' },
+        { user: hugeOne, assistant: 'historical response 1' },
+        { user: hugeTwo, assistant: 'historical response 2' },
       ])
       const agent = await createSeededAgent(ctx, 'bounded-replay', seed)
       agent.followup(createUserMessage({
@@ -228,25 +244,23 @@ describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)',
       await waitForIdle(ctx, agent)
 
       expect(adapter.conversationRequests).toHaveLength(2)
-      // The summarizer is subclass-overridden, so no auxiliary LLM call occurs;
-      // the bounded replay input is what the recording engine captured.
-      expect(compact.capturedInputs).toHaveLength(1)
+      // Two bounded transactions: the oversized front chunk first, then the
+      // remaining span. No input carries an omission marker.
+      expect(compact.capturedInputs).toHaveLength(2)
+      for (const input of compact.capturedInputs) {
+        const payloadBytes = input.messages
+          .reduce((sum, message) => sum + estimateMessageBytes(message), 0)
+        expect(payloadBytes).toBeLessThanOrEqual(512 * 1024)
+        const replayed = JSON.stringify(input.messages)
+        expect(replayed).not.toContain('omitted from this summarization input')
+      }
 
-      // The summarizer input dropped the oldest oversized message with a marker
-      // and its replayed payload fits the default 512KB budget.
-      const input = compact.capturedInputs[0]!
-      const firstBlockText = input.messages[0]!.content
-        .map(block => (block.type === 'text' ? block.text : ''))
-        .join('')
-      expect(firstBlockText).toContain('omitted from this summarization input')
-      const payloadBytes = input.messages.slice(1)
-        .reduce((sum, message) => sum + estimateMessageBytes(message), 0)
-      expect(payloadBytes).toBeLessThanOrEqual(512 * 1024)
-
-      // The retried request no longer carries the oversized history.
+      // The retried request carries two honest checkpoints and none of the
+      // oversized original text.
       const retry = JSON.stringify(adapter.conversationRequests[1]!.messages)
-      expect(retry).not.toContain(huge)
-      expect(retry).toContain('CHECKPOINT SUMMARY')
+      expect(retry).not.toContain(hugeOne)
+      expect(retry).not.toContain(hugeTwo)
+      expect((retry.match(/CHECKPOINT SUMMARY/g) ?? []).length).toBe(2)
 
       expect([...agent.session.events].at(-1)).toMatchObject({
         type: 'turn/end',
@@ -257,10 +271,40 @@ describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)',
     }
   })
 
+  it('fails loud instead of replaying when one indivisible message exceeds the cap', async () => {
+    const indivisible = 'z'.repeat(600 * 1024) // Alone it still exceeds the cap.
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'indivisible-replay', sizedHistorySeed([
+        { user: indivisible, assistant: 'historical response 1' },
+      ]))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue from history' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      // No summarizer ran, no compaction bracket opened, the turn ends with
+      // the original overflow error — bounded, never a spin.
+      expect(compact.capturedInputs).toHaveLength(0)
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect([...agent.session.events].some(event => event.type === 'compaction/start')).toBe(false)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('terminates instead of spinning when even the rebuilt request overflows', async () => {
     const { ctx, compact, adapter } = await harness({
       contextWindow: 1_000_000,
-      overflowRequests: 2,
+      failing: new Set([1, 2]),
     })
     try {
       const agent = await createSeededAgent(ctx, 'unbounded-retry', sizedHistorySeed([
@@ -291,7 +335,7 @@ describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)',
     const recentFiller = 'recent tail '.repeat(2_100) // ~25KB: retained tail, fits the budget.
     const { ctx, adapter } = await harness({
       contextWindow: 1_000_000,
-      overflowRequests: 0,
+      failing: new Set(),
       compaction: { maxRequestBytes: 30_000 },
     })
     try {
@@ -324,14 +368,66 @@ describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)',
   })
 
   it('learns the rejected request size and compacts later growth before the gateway rejects again', async () => {
-    const seedFiller = 'seed '.repeat(20_000) // ~100KB: first request overflows the gateway probe.
-    const growthFiller = 'grow '.repeat(25_000) // ~125KB: later growth must compact proactively.
+    // ~100KB of chunkable history: each seeded message stays below the
+    // learned budget, so honest hierarchical compaction can cover it all.
+    const seedTurns = Array.from({ length: 8 }, (_, index) => ({
+      user: `seed-${index}-` + 'x'.repeat(12_000),
+      assistant: `historical response ${index}`,
+    }))
     const { ctx, compact, adapter } = await harness({
       contextWindow: 1_000_000,
-      overflowRequests: 1,
+      failing: new Set([1]),
     })
     try {
-      const agent = await createSeededAgent(ctx, 'learned-budget', sizedHistorySeed([
+      const agent = await createSeededAgent(ctx, 'learned-budget', sizedHistorySeed(seedTurns))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'first followup' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      // 413 + a rebuilt retry that succeeded after bounded chunk transactions.
+      expect(adapter.conversationRequests).toHaveLength(2)
+      expect(compact.capturedInputs.length).toBeGreaterThanOrEqual(2)
+
+      // Later chunkable growth crosses the probe-learned budget (~3/4 of the
+      // rejected size) and triggers a pressure compaction before any second
+      // gateway rejection.
+      for (let index = 0; index < 7; index += 1) {
+        agent.followup(createUserMessage({
+          content: [{ type: 'text', text: `grow-${index}-` + 'y'.repeat(15_000) }],
+          source: { kind: 'user' },
+        }))
+        await waitForIdle(ctx, agent)
+      }
+
+      const requests = adapter.conversationRequests.length
+      expect(requests).toBe(9) // 2 initial + 7 growth turns, none rejected.
+      expect(compact.capturedInputs.length).toBeGreaterThanOrEqual(3)
+      // Pressure compaction shadowed the oldest chunkable growth out of the
+      // surviving request; the retained recent tail stays verbatim.
+      const lastRequest = JSON.stringify(adapter.conversationRequests[requests - 1]!.messages)
+      expect(lastRequest).not.toContain('grow-0-')
+      expect(lastRequest).toContain('grow-6-')
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('learns byte budgets only from confirmed HTTP 413 wire-size rejections', async () => {
+    const seedFiller = 'seed '.repeat(20_000) // ~100KB: first request overflows on semantic context, not wire size.
+    const growthFiller = 'grow '.repeat(25_000) // ~125KB, below token pressure and without a learned byte budget.
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      omitFailureStatus: true,
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'semantic-overflow', sizedHistorySeed([
         { user: seedFiller, assistant: 'historical response 1' },
       ]))
       agent.followup(createUserMessage({
@@ -340,7 +436,8 @@ describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)',
       }))
       await waitForIdle(ctx, agent)
 
-      expect(adapter.conversationRequests).toHaveLength(2) // 413 + rebuilt retry.
+      // Semantic overflow recovery does not infer a wire-byte budget.
+      expect(adapter.conversationRequests).toHaveLength(2)
       expect(compact.capturedInputs).toHaveLength(1)
 
       agent.followup(createUserMessage({
@@ -349,29 +446,206 @@ describe('gateway 413 RequestTooLarge recovery (the bricked-session dead loop)',
       }))
       await waitForIdle(ctx, agent)
 
-      // A turn's own message lands only after its first pre-step, so the
-      // learned budget shows up on a later step: a third followup whose tail
-      // pushes the oversized growth out of the retained region.
+      // No learned byte budget exists, so the oversized growth produces no
+      // proactive compaction: token pressure alone governs, and it stays far
+      // below the mega-context threshold.
+      expect(adapter.conversationRequests).toHaveLength(3)
+      expect(compact.capturedInputs).toHaveLength(1)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('compacts a large timed-out request before repeating its unchanged envelope', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      omitFailureStatus: true,
+      failureCode: 'TIMEOUT',
+      failureMessage: 'pi-ai stream idle timeout after 300000ms',
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'large-timeout-recovery', sizedHistorySeed(
+        Array.from({ length: 8 }, (_, index) => ({
+          user: `large-${index}-` + 't'.repeat(75_000),
+          assistant: `historical response ${index}`,
+        })),
+      ))
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: 'tail '.repeat(200) }],
+        content: [{ type: 'text', text: 'continue from the large history' }],
         source: { kind: 'user' },
       }))
       await waitForIdle(ctx, agent)
 
-      // The gateway never rejected the later requests: with the probe-learned
-      // byte budget (~3/4 of the rejected size) active, the oversized growth
-      // triggered a second pressure compaction before it went back out.
-      expect(adapter.conversationRequests).toHaveLength(4)
-      expect(compact.capturedInputs).toHaveLength(2)
-      expect(JSON.stringify(adapter.conversationRequests[3]!.messages)).not.toContain(growthFiller)
-      const events = [...agent.session.events]
-      const lastTurnStart = events.findLast(event => event.type === 'turn/start')!
-      expect(events.some(event =>
-        event.type === 'compaction/start' && event.seq > lastTurnStart.seq)).toBe(true)
-      expect(events.at(-1)).toMatchObject({
+      expect(adapter.conversationRequests).toHaveLength(2)
+      expect(compact.capturedInputs.length).toBeGreaterThan(0)
+      expect(JSON.stringify(adapter.conversationRequests[1]!.messages)).not.toContain('large-0-')
+      expect([...agent.session.events].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('preserves a small timeout for generic retry policy instead of compacting', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      omitFailureStatus: true,
+      failureCode: 'TIMEOUT',
+      failureMessage: 'pi-ai stream idle timeout after 300000ms',
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'small-timeout', sizedHistorySeed([
+        { user: 'small history', assistant: 'historical response' },
+      ]))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect(compact.capturedInputs).toHaveLength(0)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails loud when the configured summarization cap cannot hold the compaction instruction', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      compaction: { summarizationInputBytes: 100 }, // smaller than the fixed instruction
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'tiny-cap-replay', sizedHistorySeed([
+        { user: 'modest history', assistant: 'historical response 1' },
+      ]))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue from history' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(compact.capturedInputs).toHaveLength(0)
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect([...agent.session.events].some(event => event.type === 'compaction/start')).toBe(false)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('reports exhausted byte-pressure compaction when the retained tail alone exceeds the budget', async () => {
+    // Twelve ~6KB messages: each fits the 8KB cap, so every chunk compacts,
+    // yet the retained tail plus checkpoints stays above the byte budget and
+    // the engine reports the exhausted budget instead of spinning.
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set(),
+      compaction: { maxRequestBytes: 8_000, compactionRetries: 0 },
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'byte-exhausted', sizedHistorySeed(
+        Array.from({ length: 12 }, (_, index) => ({
+          user: `seed-${index}-` + 'm'.repeat(5_500),
+          assistant: `historical response ${index}`,
+        })),
+      ))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue from history' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect(compact.capturedInputs.length).toBeGreaterThan(0)
+      expect([...agent.session.events].some(event => event.type === 'compaction/start')).toBe(true)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the probe-learned budget when a later larger rejection arrives', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1, 3]),
+      compaction: { maxRequestBytes: 1_000_000 },
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'larger-rejection', sizedHistorySeed(
+        Array.from({ length: 8 }, (_, index) => ({
+          user: `seed-${index}-` + 'x'.repeat(12_000),
+          assistant: `historical response ${index}`,
+        })),
+      ))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'first followup' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+      expect(adapter.conversationRequests).toHaveLength(2)
+
+      // A later, larger rejection cannot raise the conservative learned cap.
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'z'.repeat(200 * 1024) }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(adapter.conversationRequests).toHaveLength(4)
+      expect(compact.capturedInputs.length).toBeGreaterThanOrEqual(3)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('verifies the complete summarizer request against the cap before any provider call', async () => {
+    const { ctx, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set(),
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'summarizer-cap-check', sizedHistorySeed([
+        { user: 'a short history', assistant: 'response' },
+      ]))
+      await expect(summarizeWithLlm(ctx, {
+        summarizationProvider: 'mock',
+        summarizationModel: 'mock',
+        maxTokens: 8192,
+      }, {
+        messages: [createUserMessage({
+          content: [{ type: 'text', text: 'replay body' }],
+          source: { kind: 'user' },
+        })],
+        tools: [{ name: 'work', description: 'work', parameters: { type: 'object' } }],
+        maxRequestBytes: 50,
+      }, agent, undefined)).rejects.toThrow(/byte cap/)
+
+      expect(adapter.conversationRequests).toHaveLength(0)
+      expect(adapter.summaryRequests).toHaveLength(0)
     } finally {
       await ctx.fiber.dispose()
     }

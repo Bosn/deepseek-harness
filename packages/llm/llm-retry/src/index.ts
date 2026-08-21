@@ -121,6 +121,7 @@ function retryPolicyKey(policy: ResolvedRetryPolicy): string {
       policy.mode,
       policy.maxRetries,
       [...policy.retryableCodes].sort(),
+      Object.entries(policy.maxRetriesByCode).sort(([left], [right]) => left.localeCompare(right)),
       policy.initialDelayMs,
       policy.maxDelayMs,
       policy.jitterRatio,
@@ -175,6 +176,7 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     signal: AbortSignal,
   ): Promise<RequestErrorAction> {
     const fusedSignal = AbortSignal.any([signal, lifetime.signal])
+    /* v8 ignore next -- cancellation may win between recovery selection and backoff setup. */
     if (fusedSignal.aborted) return
     const eventData: LlmRetryEventData = policy.mode === 'normal'
       ? {
@@ -227,13 +229,22 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
         return downstream.decision
       }
-    } else if (!policy.retryableCodes.includes(failure.code)) {
-      return next()
+    } else {
+      if (!policy.retryableCodes.includes(failure.code)) return next()
+      if (signal.aborted || lifetime.signal.aborted) return
+      // Specialized recovery may rebuild durable state (for example,
+      // compaction after a large-request timeout). Generic repetition only
+      // runs when no downstream listener owns that repair.
+      const fusedSignal = AbortSignal.any([signal, lifetime.signal])
+      const downstream = await next()
+      if (fusedSignal.aborted) return
+      if (downstream?.kind === 'retry') return downstream
     }
 
     const policyKey = retryPolicyKey(policy)
     let priorPolicyRetry: SessionEvent<'llm/retry'> | undefined
     let priorRateLimitRetries = 0
+    let priorCodeRetries = 0
     for (const event of agent.session.events) {
       if (event.type !== 'llm/retry'
         || event.data.turn !== turn
@@ -242,9 +253,14 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
         || event.data.policyKey !== policyKey) continue
       priorPolicyRetry = event
       if (event.data.failure.code === 'RATE_LIMIT') priorRateLimitRetries += 1
+      if (event.data.failure.code === failure.code) priorCodeRetries += 1
     }
     const previousRetry = priorPolicyRetry?.data.retry ?? 0
-    if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
+    if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return
+    if (policy.mode === 'normal') {
+      const codeLimit = policy.maxRetriesByCode[failure.code]
+      if (codeLimit !== undefined && priorCodeRetries >= codeLimit) return
+    }
     const retry = previousRetry + 1
     const retryId = priorPolicyRetry?.data.retryId ?? RetryId(randomUUID())
     const scheduledCooldownMs = cooldownDelay(policy, priorRateLimitRetries, failure, random)
@@ -255,7 +271,7 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       // The cooldown schedule is the whole RATE_LIMIT budget: once the
       // schedule no longer covers this attempt, the remaining normal budget
       // belongs to the other retryable codes, not to fast rate-limit retries.
-      return next()
+      return
     }
     let delayMs: number
     if (scheduledCooldownMs !== undefined) {
@@ -264,7 +280,7 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       && Number.isFinite(failure.providerRetryAfterMs)
       && failure.providerRetryAfterMs > 0) {
       if (failure.providerRetryAfterMs > policy.maxDelayMs) {
-        if (policy.mode === 'normal') return next()
+        if (policy.mode === 'normal') return
         delayMs = localDelay(policy, retry, random)
       } else {
         delayMs = failure.providerRetryAfterMs

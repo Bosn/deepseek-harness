@@ -13,7 +13,7 @@ Status: implemented
 冷却调度是一个已解析的策略事实，配置一次，在执行所有其他重试决策的同一处生效：
 
 - `BackoffConfig.rateLimitDelaysMs` 为 `RATE_LIMIT` 失败逐次列出一个等待时长，默认 `[60000, 180000, 300000]`——三次冷却重试，分别等待一、三、五分钟。空数组关闭该调度并回落指数退避。
-- DeepSeek 适配器把 `QUOTA` 留给非 429 状态上的 quota 措辞（402 余额不足），并把每个 HTTP 429——无论是否带 quota 措辞——归类为 `RATE_LIMIT`，由 `dsh-llm-retry` 负责等待。有调度封顶，真正欠费的账号最坏约九分钟后仍会失败。
+- 两个适配器都把 `QUOTA` 留给非 429 状态上的 quota 措辞（402 余额不足），并把每个显式 HTTP 429——无论是否带 quota 措辞——归类为 `RATE_LIMIT`，由 `dsh-llm-retry` 负责等待。Pi-ai 从 SDK 展平后的错误消息恢复状态码；该适配器拿不到非 2xx 响应头。有调度封顶，真正欠费的账号最坏约九分钟后仍会失败。
 - `dsh-llm-retry` 把调度项作为该次尝试的延迟，用共享抖动比例抖动，但绝不会低于该调度项或有效的提供方 `Retry-After`（在定时器范围内；超出范围的值被忽略）。调度只在同一步恢复序列的 RATE_LIMIT 重试上推进，因此其他可重试 code 共用 normal 预算而不消耗冷却配置项。normal 模式下调度取代 `maxRetries` 成为 RATE_LIMIT 预算（`min(maxRetries, 调度长度)`），调度先于共享预算耗尽；always 模式在调度耗尽后继续指数退避重试。规范策略键包含该调度，因此调度变更会像任何其他策略变更一样重置同一步内的重试历史。
 - 调度是数据，不是循环变更：循环的 `agent/request-error` 恢复本就无截止时间地等待 `Promise<RequestErrorAction>`，现有的生命周期／取消信号融合也本就会在取消与 dispose 时中止分钟级等待。
 
@@ -32,4 +32,4 @@ Status: implemented
 - 遇到带 quota 措辞的 429 限流的会话现在会记录三条不进入表层的 `llm/retry` 事件（`delayMs` 默认 60 000／180 000／300 000），只在第四次被拒后以原始 429 结束回合；无论 normal 预算为五次，RATE_LIMIT 的每轮重试都不超过默认三次冷却尝试。
 - 非 429 状态上的真实欠费（402 余额不足）仍是终态 `QUOTA`；部署可以缩短、重排或禁用调度（`rateLimitDelaysMs: []`），不影响其他 code。
 - 已解析策略形状与规范 `policyKey` 都新增了调度字段，因此同一 PR 更新了已提交的回放 fixture 与策略快照：`examples/acp-agent` 的重试 overlay 与 `examples/headless-agent` 的重试 fixture 都固定了短调度，其记录的 `policyKey` 字符串嵌入了固定数组。
-- `llm-pi-ai` 共享 `ResolvedRetryPolicy`，但保留自己的分类并将 SDK 重试保持禁用；它的路由因为任何已解析策略都带有 `backoff.rateLimitDelaysMs`，获得了同样可配置的调度。
+- `llm-pi-ai` 保持禁用 SDK 重试，并使用相同的已解析冷却调度。由于 SDK 不会向其 hook 暴露非 2xx 响应头，这些路由只使用配置的冷却时间，不带提供方 `Retry-After` 下限或请求 ID 事实。

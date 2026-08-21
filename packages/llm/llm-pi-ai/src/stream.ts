@@ -36,20 +36,28 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
-function classifyPiAiError(message: string): string {
-  if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
+function statusFromMessage(message: string): number | undefined {
+  const match = /\bHTTP\s*([1-5]\d{2})\b/i.exec(message)
+    ?? /\bAPI error\s*\(([1-5]\d{2})\)/i.exec(message)
+    ?? /^\s*([1-5]\d{2})\s*:/.exec(message)
+  if (match?.[1] === undefined) return undefined
+  return Number(match[1])
+}
+
+function classifyPiAiError(message: string, status: number | undefined): string {
+  if (status === 401 || status === 403 || /\b(?:401|403)\b/.test(message)) return 'AUTH'
+  // HTTP 429 is transient throttling even when its body says
+  // `insufficient_quota`; non-429 quota/balance failures remain terminal.
+  if (status === 429 || /\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
-  if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
-  // A rejected request body (gateway or provider byte cap): resending the
-  // same bytes cannot succeed, but rerouting to the context-overflow recovery
-  // CAN — the compaction engine force-compacts the surface and retries the
-  // rebuilt, smaller request. Permanently failing the turn would brick the
-  // session exactly like the 413 dead loop it came from.
-  if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
+  // Request-size rejection needs a rebuilt envelope, so it enters compaction
+  // recovery instead of retrying the same bytes.
+  if (status === 413
+    || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
     return CONTEXT_WINDOW_EXCEEDED_CODE
   }
-  if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
-  if (/\b5\d\d\b/.test(message)) return 'SERVER'
+  if (status === 400 || /\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
+  if ((status !== undefined && status >= 500) || /\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
@@ -78,17 +86,24 @@ function classifyPiAiError(message: string): string {
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error.
  */
-export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
+export function mapStopReason(
+  message: AssistantMessage,
+  contextWindow?: number,
+): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
   const harnessOverflow = message.stopReason === 'error'
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
   if (piAiOverflow || harnessOverflow) {
+    const status = message.stopReason === 'error' && message.errorMessage !== undefined
+      ? statusFromMessage(message.errorMessage)
+      : undefined
     return {
       kind: 'error',
       failure: {
         message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}"`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
+        ...status === undefined ? {} : { status },
       },
     }
   }
@@ -115,7 +130,15 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     }
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
+      const status = statusFromMessage(text)
+      return {
+        kind: 'error',
+        failure: {
+          message: text,
+          code: classifyPiAiError(text, status),
+          ...status === undefined ? {} : { status },
+        },
+      }
     }
   }
 }

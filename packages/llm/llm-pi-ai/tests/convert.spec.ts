@@ -756,11 +756,13 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: rate limit' })))
       .toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: insufficient_quota' })))
-      .toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
+      .toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429 } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 402: insufficient_quota' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'QUOTA', status: 402 } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'OpenAI API error (429): You exceeded your current quota, please check your plan and billing details.',
-    }))).toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
+    }))).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429 } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 500: backend down' })))
       .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'provider timed out' })))
@@ -780,7 +782,7 @@ describe('mapStopReason / mapUsage', () => {
       errorMessage: 'HTTP 400: invalid input: temperature exceeds maximum allowed value',
     }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 413: Payload Too Large' })))
-      .toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
+      .toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, status: 413 } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'Failed to buffer the request body: length limit exceeded',
@@ -836,7 +838,6 @@ describe('mapStopReason / mapUsage', () => {
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
-
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
     expect(mapStopReason(truncated, 100)).toMatchObject({

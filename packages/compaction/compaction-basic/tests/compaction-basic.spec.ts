@@ -297,6 +297,8 @@ describe('compact configuration and defaults', () => {
       compactionRetries: 1,
       maxOverflowRetries: 1,
       summarizationInputBytes: 524288,
+      timeoutRecoveryBytes: 524288,
+      learnedByteSafetyRatio: 0.75,
       modelPolicies: [],
       auto: true,
     })
@@ -458,6 +460,10 @@ describe('compact configuration and defaults', () => {
         /modelPolicies\[0\]: retainRatio \(0.9\).*thresholdRatio \(0.8\)/,
       ],
       [{ modelPolicies: [{ provider: MODEL, model: MODEL }, { provider: MODEL, model: MODEL }] }, /duplicate model policy/],
+      [{ learnedByteSafetyRatio: 0 }, /learnedByteSafetyRatio.*\(0, 1\)/],
+      [{ learnedByteSafetyRatio: 1 }, /learnedByteSafetyRatio.*\(0, 1\)/],
+      [{ learnedByteSafetyRatio: 1.1 }, /learnedByteSafetyRatio.*\(0, 1\)/],
+      [{ timeoutRecoveryBytes: 0 }, /timeoutRecoveryBytes.*positive integer/],
       [{ models: { [MODEL]: { retainTokens: 10 } } }, /BasicCompactionConfig: unknown key "models"/],
       [{ thresholdRato: 0.5 }, /BasicCompactionConfig: unknown key "thresholdRato"/],
     ] as Array<[unknown, RegExp]>
@@ -895,6 +901,48 @@ describe('compaction region transaction', () => {
     expect(input.system).toBe('CONVERSATION SYSTEM')
     expect(input.tools).toEqual(tools)
     expect(summarizedText(input)).toContain('fixture user 1')
+  })
+
+  it('partitions capped summarizer requests only at balanced tool boundaries', async () => {
+    const compact = service({ auto: false })
+    const session = toolConversation()
+    const nodes = session.surface.nodes
+
+    await compact.compactRegion(
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      14_000,
+    )
+
+    expect(compact.calls.length).toBeGreaterThan(1)
+    for (const { input } of compact.calls) {
+      const openCalls = new Set<string>()
+      for (const message of input.messages) {
+        for (const block of message.content) {
+          if (block.type === 'tool-call') openCalls.add(block.id)
+          if (block.type === 'tool-result') {
+            expect(openCalls.delete(block.toolCallId)).toBe(true)
+          }
+        }
+      }
+      expect(openCalls).toEqual(new Set())
+    }
+  })
+
+  it('rejects a capped range whose only retained tool pair is indivisible', async () => {
+    const compact = service({ auto: false })
+    const session = oversizedToolResult(20_000)
+    const nodes = session.surface.nodes
+
+    await expect(compact.compactRegion(
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      5_000,
+    )).rejects.toThrow(/without splitting a tool-call\/result pair/)
   })
 
   it.each([
@@ -1493,6 +1541,29 @@ describe('automatic listener and loader composition', () => {
 
     expect(compactIfNeeded).not.toHaveBeenCalled()
     expect(pressured.events.some(event => event.type === 'compaction/start')).toBe(false)
+  })
+
+  it('delegates failed-request recovery when its signal is already aborted', async () => {
+    const ctx = createContext()
+    const compact = new TestCompactionEngine(ctx, {})
+    const session = conversation(2)
+    const owner = agent(session, MODEL)
+    const compactIfNeeded = vi.spyOn(compact, 'compactIfNeeded')
+    let delegated = 0
+
+    await expect(recover(
+      ctx,
+      owner,
+      overflow(),
+      AbortSignal.abort('request cancelled'),
+      () => {
+        delegated += 1
+        return Promise.resolve(undefined)
+      },
+    )).resolves.toBe(false)
+
+    expect(delegated).toBe(1)
+    expect(compactIfNeeded).not.toHaveBeenCalled()
   })
 
   it('warns and continues after operational failures, including non-Errors', async () => {

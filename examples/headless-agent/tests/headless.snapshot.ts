@@ -315,7 +315,7 @@ describe('headless stream-json snapshots', () => {
         expect(retries[0]?.data).toMatchObject({
           provider: 'deepseek-official',
           mode: 'normal',
-          policyKey: '["normal",1,["RATE_LIMIT"],1,1,0,[1]]',
+          policyKey: '["normal",1,["RATE_LIMIT"],[["TIMEOUT",1]],1,1,0,[1]]',
           retry: 1,
           maxRetries: 1,
           delayMs: 1,
@@ -330,7 +330,7 @@ describe('headless stream-json snapshots', () => {
     expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-  it('recovers from context overflow through an assembled compaction', async () => {
+  it('recovers from HTTP 413 request-size rejection through an assembled compaction', async () => {
     const prompt = await scenarioPrompt(compactionScenarioDir, 'compaction-recovery')
     let expectedSession = await readFile(compactionSessionFixture, 'utf8')
     let runCwd = ''
@@ -355,6 +355,15 @@ describe('headless stream-json snapshots', () => {
         if (actual === undefined) throw new Error('compaction snapshot did not persist its session')
         const records = parseJsonl(actual.content)
         const types = records.map(record => record.type)
+        const failedChunk = records.find((record) => {
+          if (record.type !== 'assistant/chunk') return false
+          const data = record.data as JsonObject | undefined
+          const chunk = data?.chunk as JsonObject | undefined
+          const reason = chunk?.reason as JsonObject | undefined
+          const failure = reason?.failure as JsonObject | undefined
+          return failure?.status === 413
+        })
+        expect(failedChunk).toBeDefined()
         expect(types.filter(type => type === 'compaction/start')).toHaveLength(1)
         expect(types.filter(type => type === 'compaction/summary')).toHaveLength(1)
         expect(types.filter(type => type === 'compaction/end')).toHaveLength(1)

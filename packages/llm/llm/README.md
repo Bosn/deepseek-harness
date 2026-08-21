@@ -10,7 +10,7 @@ An adapter registry plus a single streaming call API, interceptable via a waterf
 
 ### Retry policy
 
-Each provider adapter supplies its resolved route policy. Omitting provider configuration uses bounded normal mode with five retries after the first request; `RATE_LIMIT` failures additionally wait out the `rateLimitDelaysMs` cooldown schedule (default one, three, and five minutes, i.e. three cooldown retries). Layered configuration may retain `maxRetries` or `retryableCodes` after changing `mode` to `always`; resolution ignores those inactive normal-mode fields and captures a pure always policy. This service stores the effective policy but does not execute retries.
+Each provider adapter supplies its resolved route policy. Omitting provider configuration uses bounded normal mode with five shared retries after the first request; `maxRetriesByCode` applies stricter per-code caps and defaults to `{ TIMEOUT: 1 }`, so one five-minute idle deadline gets at most one repeat. `RATE_LIMIT` failures additionally wait out the `rateLimitDelaysMs` cooldown schedule (default one, three, and five minutes, i.e. three cooldown retries). Layered configuration may retain `maxRetries`, `retryableCodes`, or `maxRetriesByCode` after changing `mode` to `always`; resolution ignores those inactive normal-mode fields and captures a pure always policy. This service stores the effective policy but does not execute retries.
 
 ### Public API
 

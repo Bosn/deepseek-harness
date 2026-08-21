@@ -22,7 +22,7 @@ export interface CompactionPolicyConfig {
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
   compactionRetries?: number
-  /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
+  /** Maximum retries after context-overflow or request-size recovery; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
   /**
    * Optional bound on the estimated wire-byte size of the routed model request.
@@ -32,12 +32,17 @@ export interface CompactionPolicyConfig {
    */
   maxRequestBytes?: number
   /**
-   * Optional cap on the estimated wire bytes of the summarizer's replayed
-   * input. Older messages drop out of the summarization input (with a marker)
-   * beyond this cap, so the summarizer request itself can never trip a gateway
-   * byte cap. Defaults to `512 * 1024`.
+   * Optional cap on each complete summarizer request's estimated wire bytes.
+   * Oversized ranges use balanced hierarchical compaction transactions so
+   * every summarized message stays within a bounded request. Defaults to
+   * `512 * 1024`.
    */
   summarizationInputBytes?: number
+  /**
+   * Minimum estimated request bytes at which a stream `TIMEOUT` may trigger
+   * request-size compaction before generic retry. Defaults to `512 * 1024`.
+   */
+  timeoutRecoveryBytes?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -52,7 +57,13 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
-  /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
+  /**
+   * Fraction of a failed request's estimated bytes adopted as the
+   * probe-learned byte budget after HTTP 413 or eligible large-request timeout
+   * recovery. Must be in `(0, 1)`. Defaults to `0.75`.
+   */
+  learnedByteSafetyRatio?: number
+  /** Enable automatic pressure and failed-request recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
 
@@ -72,11 +83,14 @@ interface ResolvedPolicyFields {
   /** Absent until a request-byte bound is configured. */
   readonly maxRequestBytes?: number
   readonly summarizationInputBytes: number
+  readonly timeoutRecoveryBytes: number
 }
 
 /** Validated immutable config whose target-specific defaults remain unresolved. */
 export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
   readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
+  /** Fraction of a rejected request's bytes adopted as the probe-learned budget. */
+  readonly learnedByteSafetyRatio: number
   readonly auto: boolean
 }
 

@@ -10,7 +10,7 @@
 
 ### 重试策略
 
-每个提供方适配器都会提供解析后的路由策略。省略提供方配置时使用有界 normal mode，在首次请求后最多重试五次；`RATE_LIMIT` 失败还会按 `rateLimitDelaysMs` 冷却调度等待（默认一、三、五分钟，即三次冷却重试）。分层配置把 `mode` 改为 `always` 后可能残留 `maxRetries` 或 `retryableCodes`；解析过程会忽略这些不再生效的 normal-mode 字段，并捕获纯 always 策略。本服务存储有效策略，但不执行重试。
+每个提供方适配器都会提供解析后的路由策略。省略提供方配置时使用有界 normal mode，在首次请求后最多共享五次重试；`maxRetriesByCode` 可施加更严格的按 code 上限，默认 `{ TIMEOUT: 1 }`，因此一次五分钟空闲截止最多只会重复一次。`RATE_LIMIT` 失败还会按 `rateLimitDelaysMs` 冷却调度等待（默认一、三、五分钟，即三次冷却重试）。分层配置把 `mode` 改为 `always` 后可能残留 `maxRetries`、`retryableCodes` 或 `maxRetriesByCode`；解析过程会忽略这些不再生效的 normal-mode 字段，并捕获纯 always 策略。本服务存储有效策略，但不执行重试。
 
 ### 公开 API
 

@@ -25,10 +25,13 @@ const DEFAULT_RETAIN_RATIO = 0.16
 /**
  * Default cap on the summarizer's replayed input bytes. The summarization
  * call is itself an ordinary model request, so it must fit the same gateway
- * request-size limits as the conversation it is condensing; dropping the
- * oldest input beyond this cap keeps overflow recovery deterministic.
+ * request-size limits as the conversation it is condensing; hierarchical
+ * bounded transactions keep every summarized message represented.
  */
 export const DEFAULT_SUMMARIZATION_INPUT_BYTES = 512 * 1024
+
+/** Default request-size threshold for recovering an idle stream timeout through compaction. */
+export const DEFAULT_TIMEOUT_RECOVERY_BYTES = 512 * 1024
 
 /**
  * Probe-learned request-byte budgets below this floor no longer drive
@@ -36,6 +39,13 @@ export const DEFAULT_SUMMARIZATION_INPUT_BYTES = 512 * 1024
  * overflow recovery alone keeps the session alive.
  */
 export const MIN_USEFUL_REQUEST_BYTES = 64 * 1024
+
+/**
+ * Default fraction of a request-size failure's estimated bytes adopted as the
+ * probe-learned byte budget. Lowering the fraction buys more headroom against
+ * nondeterministic gateway sizing; raising it keeps more surface per turn.
+ */
+export const DEFAULT_LEARNED_BYTE_SAFETY_RATIO = 0.75
 
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
@@ -49,11 +59,13 @@ const POLICY_CONFIG_KEYS = [
   'maxOverflowRetries',
   'maxRequestBytes',
   'summarizationInputBytes',
+  'timeoutRecoveryBytes',
 ] as const
 
 /** Complete public top-level configuration key set. */
 const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   ...POLICY_CONFIG_KEYS,
+  'learnedByteSafetyRatio',
   'modelPolicies',
   'auto',
 ])
@@ -87,6 +99,8 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   if (config.auto !== undefined && typeof config.auto !== 'boolean') {
     throw new Error('BasicCompactionConfig: auto must be a boolean')
   }
+  const learnedByteSafetyRatio = config.learnedByteSafetyRatio ?? DEFAULT_LEARNED_BYTE_SAFETY_RATIO
+  assertSafetyRatio('BasicCompactionConfig.learnedByteSafetyRatio', learnedByteSafetyRatio)
 
   const thresholdRatio = config.thresholdRatio ?? DEFAULT_THRESHOLD_RATIO
   const retention = resolveRetention(config, { retainRatio: DEFAULT_RETAIN_RATIO })
@@ -110,6 +124,8 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
     ...config.maxRequestBytes === undefined ? {} : { maxRequestBytes: config.maxRequestBytes },
     summarizationInputBytes: config.summarizationInputBytes ?? DEFAULT_SUMMARIZATION_INPUT_BYTES,
+    timeoutRecoveryBytes: config.timeoutRecoveryBytes ?? DEFAULT_TIMEOUT_RECOVERY_BYTES,
+    learnedByteSafetyRatio,
     modelPolicies,
     auto: config.auto ?? true,
   })
@@ -144,6 +160,7 @@ export function resolveTargetPolicy(
       ? {}
       : { maxRequestBytes: override?.maxRequestBytes ?? config.maxRequestBytes }),
     summarizationInputBytes: override?.summarizationInputBytes ?? config.summarizationInputBytes,
+    timeoutRecoveryBytes: override?.timeoutRecoveryBytes ?? config.timeoutRecoveryBytes,
   })
 }
 
@@ -188,6 +205,7 @@ export function resolveCompactSpec(
     maxOverflowRetries: policy.maxOverflowRetries,
     ...policy.maxRequestBytes === undefined ? {} : { maxRequestBytes: policy.maxRequestBytes },
     summarizationInputBytes: policy.summarizationInputBytes,
+    timeoutRecoveryBytes: policy.timeoutRecoveryBytes,
   })
 }
 
@@ -278,6 +296,9 @@ function validatePolicy(
   if (config.summarizationInputBytes !== undefined) {
     assertPositiveInteger(`${name}.summarizationInputBytes`, config.summarizationInputBytes)
   }
+  if (config.timeoutRecoveryBytes !== undefined) {
+    assertPositiveInteger(`${name}.timeoutRecoveryBytes`, config.timeoutRecoveryBytes)
+  }
 
   validateSummarizationPair(config, name)
 }
@@ -337,5 +358,11 @@ function assertNonNegativeInteger(name: string, value: unknown): asserts value i
 function assertRatio(name: string, value: unknown): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 1) {
     throw new Error(`${name} (${String(value)}) must be a number in (0, 1]`)
+  }
+}
+
+function assertSafetyRatio(name: string, value: unknown): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new Error(`${name} (${String(value)}) must be a number in (0, 1)`)
   }
 }

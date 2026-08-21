@@ -234,15 +234,15 @@ interface LlmFailure {
 - **工具调用的 `arguments` 全程保持原始 JSON 字符串。** 部分片段通过 `argumentsDelta` 流式传输；如果提供方返回的是已解析的对象，适配器在 `block-end` 时重新序列化为字符串。
 - **两条受支持的错误路径，共用一个 `LlmFailure` 类型。** 失败可以从 `stream()` 抛出（传输／协议错误），**或者**以 `finish {kind:'error'|'aborted', failure}` 结束流（无法在流中途抛异常的适配器用它表示提供方带内错误）。`LlmError.failure` 携带同一个 `LlmFailure`。调用选定适配器后，流会保留被抛出的确切 `Error` 对象，并将不可变事实以及实际服务注册所对应的不可变重试策略关联到该调用；agent loop（智能体循环）关闭失败步骤，再把错误、事实、不可变的先前已重试失败事实、实际服务策略和轮次信号提供给 `agent/request-error`。处理该错误的 listener 在其 await 的修复完成后返回 `{ kind: 'retry' }`；若未恢复，结构化失败会成为轮次错误，并且该次尝试不会提交正常 assistant 消息或工具副作用。
 - **一次适配器调用就是一次提供方尝试。** 适配器禁用库重试。agent 层恢复会打开另一个持久、带编号的轮次；直接调用 `ctx.llm.stream()` 的调用方仍然只尝试一次。
-- **提供方停顿在传输层受到时限约束。** 两个已交付的远程适配器都暴露正数且有限的 `streamIdleTimeoutMs`，默认五分钟。watchdog 只在 iterator `next()` 尚未完成时启动，整个请求使用同一个稳定 signal，把自身到期映射为 `TIMEOUT`，并把更早发生的调用方中止保留为 `ABORTED`。
-- **上下文溢出只有一个规范 code。** 两个 DeepSeek 适配器都通过 `isContextWindowExceededError()` 对提供方的显式细节分类并暴露 `CONTEXT_WINDOW_EXCEEDED`，无论失败以抛出的 HTTP `LlmError` 还是带内 finish error 到达。消费方按 code 路由，绝不依赖提供方文本。
+- **提供方停顿在传输层受到时限约束。** 两个已交付的远程适配器都暴露正数且有限的 `streamIdleTimeoutMs`，默认五分钟。watchdog 只在 iterator `next()` 尚未完成时启动，使用请求本地的稳定 signal，把自身到期映射为 `TIMEOUT`，保留更早发生的调用方 `ABORTED`，且无法中止同一适配器上的并发或后续请求。
+- **上下文与请求大小溢出共享一个恢复 code。** 两个 DeepSeek 适配器都对语义上下文溢出和 HTTP 413 请求体拒绝暴露 `CONTEXT_WINDOW_EXCEEDED`，无论失败以抛出的 HTTP `LlmError` 还是带内 finish error 到达。`failure.status === 413` 可在不解析提供方文本的情况下区分字节压力与语义溢出。
 - **空 completion 是可重试错误，而不是静默的成功结果。** 两个适配器都把没有携带任何内容块的终止性 `stop` 结束映射为携带规范 `EMPTY_RESPONSE` code 的 `finish {kind:'error'}`，`dsh-llm-retry` 默认会重试它；详见[空模型响应可重试](../../.agents/notes/implemented/bug-fix/2026-07-24-empty-model-response-is-retryable.md)。
 - **每个提供方 HTTP 请求都携带应用归属头。** 适配器发送 `attributionHeaders()`（见下文）作为 `User-Agent` 基线，并通过协议级测试加以证明。
 - **回放状态归适配器所有；其切分是共享词汇。** 成功的 `finish` 可以携带一个 `ReplayEnvelope`：不透明的响应级元数据，加上与发射块序列对齐的可选逐块条目。对齐关系是 harness 的词汇——组装丢弃某个块时，同一位置的条目一并丢弃，因此存储的元数据始终描述存储的内容。循环把裁剪后的数据与组装后的 assistant 消息一起存储。后续请求中，仅当历史提供方与目标提供方当前注册到完全相同的适配器实例时，`LlmRuntime` 才会传递该状态。该适配器负责校验状态并拥有所有跨模型或跨提供方转换；其他适配器只会收到提供方无关的内容以及提供方／模型字段，不会收到私有状态。持久化内容保持权威：读取适配器无法使用的已存状态只会把这一条消息降级为提供方无关转换并带出诊断，而不是让请求失败。
 
 ## `ResolvedRetryPolicy`
 
-重试配置会在路由注册前解析为不可变的可辨识联合。normal mode 携带 `mode: 'normal'`、有限的 `maxRetries`、`retryableCodes`，以及必填的 `initialDelayMs`、`maxDelayMs`、`jitterRatio` 与 `rateLimitDelaysMs`；always mode 携带 `mode: 'always'` 和相同的必填退避字段，但没有有限上限。`rateLimitDelaysMs` 是 `RATE_LIMIT` 失败逐次尝试的冷却调度（默认一、三、五分钟，即三次冷却重试）：一次 step 的 RATE_LIMIT 重试按顺序消耗其配置项，其他可重试 code 共用 normal 预算而不会推进它；该调度为 normal mode 的 RATE_LIMIT 预算设限，空数组改回指数退避，抖动围绕调度项变化，而最终等待绝不会低于该调度项或有效的提供方 `Retry-After`。省略提供方策略时使用重试五次的 normal 默认值。分层 settings 在切换到 always 模式后可能保留仅属于 normal 的 `maxRetries` 或 `retryableCodes`；解析器会忽略这些未启用字段，并捕获纯 always 策略。`LlmRuntime.providerRetryPolicy(provider)` 返回注册值；调用选定实际提供服务的注册后，`llmRetryPolicyOf(stream)` 返回从中捕获的值，因此之后释放或替换路由都无法改变进行中失败的恢复策略。可选配置输入字段由[生成的配置目录](../config-catalog.md)列出。
+重试配置会在路由注册前解析为不可变的可辨识联合。normal mode 携带 `mode: 'normal'`、有限共享 `maxRetries`、`retryableCodes`、不可变 `maxRetriesByCode`，以及必填的 `initialDelayMs`、`maxDelayMs`、`jitterRatio` 与 `rateLimitDelaysMs`；always mode 携带 `mode: 'always'` 和相同的必填退避字段，但没有有限上限。按 code 上限会叠加在共享预算上，省略时默认为 `{ TIMEOUT: 1 }`，避免重复的五分钟空闲截止耗尽全部五次共享重试。`rateLimitDelaysMs` 是 `RATE_LIMIT` 失败逐次尝试的冷却调度（默认一、三、五分钟，即三次冷却重试）：一次 step 的 RATE_LIMIT 重试按顺序消耗其配置项，其他可重试 code 共用 normal 预算而不会推进它；该调度为 normal mode 的 RATE_LIMIT 预算设限，空数组改回指数退避，抖动围绕调度项变化，而最终等待绝不会低于该调度项或有效的提供方 `Retry-After`。分层 settings 在切换到 always 模式后可能保留仅属于 normal 的 `maxRetries`、`retryableCodes` 或 `maxRetriesByCode`；解析器会忽略这些未启用字段，并捕获纯 always 策略。`LlmRuntime.providerRetryPolicy(provider)` 返回注册值；调用选定实际提供服务的注册后，`llmRetryPolicyOf(stream)` 返回从中捕获的值，因此之后释放或替换路由都无法改变进行中失败的恢复策略。可选配置输入字段由[生成的配置目录](../config-catalog.md)列出。
 
 ## `AppIdentity`：应用归属
 
