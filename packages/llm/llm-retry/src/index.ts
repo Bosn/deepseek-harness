@@ -1,6 +1,9 @@
 /**
  * Provider-routed model-request retry policy on the agent loop's request
- * recovery extension point. Each scheduled retry is durable before its cancellable wait.
+ * recovery extension point. Each scheduled retry is durable before its
+ * cancellable wait. `RATE_LIMIT` failures wait out the policy's configured
+ * cooldown schedule (default one, three, and five minutes) instead of the
+ * fast exponential backoff, so gateway 429 throttling has time to clear.
  *
  * @module @deepseek-ai/dsh-llm-retry
  */
@@ -11,6 +14,7 @@ import z from '@deepseek-ai/schemastery'
 import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RetryId } from './brand.ts'
 import type { LlmRetryEventData } from './types.ts'
 
@@ -55,16 +59,64 @@ async function settleDownstream(
   }
 }
 
+function jittered(base: number, jitterRatio: number, ceiling: number, random: () => number): number {
+  const jitter = 1 - jitterRatio + 2 * jitterRatio * random()
+  return Math.min(base * jitter, ceiling)
+}
+
 function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
   const exponent = Math.min(retry - 1, 1024)
   const exponential = Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
-  const jitter = 1 - config.jitterRatio + 2 * config.jitterRatio * random()
-  return Math.min(exponential * jitter, config.maxDelayMs)
+  return jittered(exponential, config.jitterRatio, config.maxDelayMs, random)
+}
+
+/**
+ * Resolve the configured `RATE_LIMIT` cooldown wait for one retry, or
+ * `undefined` when the schedule does not cover this attempt (a non-rate-limit
+ * failure, an empty schedule, or every entry consumed). The schedule advances
+ * only on RATE_LIMIT retries within this step's recovery sequence, so other
+ * retried codes share the normal budget without consuming cooldown entries. A
+ * positive provider `Retry-After` within timer range raises the wait —
+ * throttling advice can only extend the cooldown — while an out-of-range value
+ * is ignored in favor of the schedule entry. Jitter varies the schedule entry,
+ * and the final wait never falls below the entry or a valid provider hint.
+ * @param policy - the serving registration's resolved per-provider policy.
+ * @param rateLimitAttempt - zero-based count of prior RATE_LIMIT retries in this step's recovery sequence.
+ * @param failure - the classified model-request failure being recovered.
+ * @param random - jitter sample source.
+ * @returns the cooldown delay in milliseconds when the schedule applies.
+ */
+function cooldownDelay(
+  policy: ResolvedRetryPolicy,
+  rateLimitAttempt: number,
+  failure: LlmFailure,
+  random: () => number,
+): number | undefined {
+  if (failure.code !== 'RATE_LIMIT') return undefined
+  const entry = policy.rateLimitDelaysMs[rateLimitAttempt]
+  if (entry === undefined) return undefined
+  let floor = entry
+  const providerMs = failure.providerRetryAfterMs
+  if (providerMs !== undefined
+    && Number.isFinite(providerMs)
+    && providerMs > 0
+    && providerMs <= MAX_TIMER_DELAY_MS) {
+    floor = Math.max(floor, providerMs)
+  }
+  // Jitter varies the entry; both floors survive it. Throttling advice and
+  // the scheduled entry can extend the wait, never shorten it.
+  return Math.max(jittered(entry, policy.jitterRatio, MAX_TIMER_DELAY_MS, random), floor)
 }
 
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
   return policy.mode === 'always'
-    ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio])
+    ? JSON.stringify([
+      policy.mode,
+      policy.initialDelayMs,
+      policy.maxDelayMs,
+      policy.jitterRatio,
+      [...policy.rateLimitDelaysMs],
+    ])
     : JSON.stringify([
       policy.mode,
       policy.maxRetries,
@@ -72,6 +124,7 @@ function retryPolicyKey(policy: ResolvedRetryPolicy): string {
       policy.initialDelayMs,
       policy.maxDelayMs,
       policy.jitterRatio,
+      [...policy.rateLimitDelaysMs],
     ])
 }
 
@@ -179,19 +232,35 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     }
 
     const policyKey = retryPolicyKey(policy)
-    const priorPolicyRetry = agent.session.events.findLast((event): event is SessionEvent<'llm/retry'> =>
-      event.type === 'llm/retry'
-      && event.data.turn === turn
-      && event.data.step === step
-      && event.data.provider === provider
-      && event.data.policyKey === policyKey,
-    )
+    let priorPolicyRetry: SessionEvent<'llm/retry'> | undefined
+    let priorRateLimitRetries = 0
+    for (const event of agent.session.events) {
+      if (event.type !== 'llm/retry'
+        || event.data.turn !== turn
+        || event.data.step !== step
+        || event.data.provider !== provider
+        || event.data.policyKey !== policyKey) continue
+      priorPolicyRetry = event
+      if (event.data.failure.code === 'RATE_LIMIT') priorRateLimitRetries += 1
+    }
     const previousRetry = priorPolicyRetry?.data.retry ?? 0
     if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
     const retry = previousRetry + 1
     const retryId = priorPolicyRetry?.data.retryId ?? RetryId(randomUUID())
+    const scheduledCooldownMs = cooldownDelay(policy, priorRateLimitRetries, failure, random)
+    if (policy.mode === 'normal'
+      && failure.code === 'RATE_LIMIT'
+      && policy.rateLimitDelaysMs.length > 0
+      && scheduledCooldownMs === undefined) {
+      // The cooldown schedule is the whole RATE_LIMIT budget: once the
+      // schedule no longer covers this attempt, the remaining normal budget
+      // belongs to the other retryable codes, not to fast rate-limit retries.
+      return next()
+    }
     let delayMs: number
-    if (failure.providerRetryAfterMs !== undefined
+    if (scheduledCooldownMs !== undefined) {
+      delayMs = scheduledCooldownMs
+    } else if (failure.providerRetryAfterMs !== undefined
       && Number.isFinite(failure.providerRetryAfterMs)
       && failure.providerRetryAfterMs > 0) {
       if (failure.providerRetryAfterMs > policy.maxDelayMs) {

@@ -17,14 +17,17 @@ describe('provider retry policy', () => {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
+      rateLimitDelaysMs: [60_000, 180_000, 300_000],
     })
     expect(Object.isFrozen(policy)).toBe(true)
     if (policy.mode !== 'normal') throw new Error('expected normal policy')
     expect(Object.isFrozen(policy.retryableCodes)).toBe(true)
+    expect(Object.isFrozen(policy.rateLimitDelaysMs)).toBe(true)
   })
 
   it('resolves and detaches a configured normal policy', () => {
     const retryableCodes = ['BUSY']
+    const rateLimitDelaysMs = [30_000, 90_000]
     const config: RetryPolicyConfig = {
       mode: 'normal',
       maxRetries: 4,
@@ -33,11 +36,13 @@ describe('provider retry policy', () => {
         initialDelayMs: 25,
         maxDelayMs: 100,
         jitterRatio: 0,
+        rateLimitDelaysMs,
       },
     }
 
     const policy = resolveRetryPolicy(config, 'provider.retryPolicy')
     retryableCodes.push('LATE')
+    rateLimitDelaysMs.push(1)
 
     expect(policy).toEqual({
       mode: 'normal',
@@ -46,6 +51,7 @@ describe('provider retry policy', () => {
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0,
+      rateLimitDelaysMs: [30_000, 90_000],
     })
   })
 
@@ -55,6 +61,7 @@ describe('provider retry policy', () => {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
+      rateLimitDelaysMs: [60_000, 180_000, 300_000],
     })
     expect(RetryPolicySchema).toBeDefined()
   })
@@ -71,6 +78,16 @@ describe('provider retry policy', () => {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
+      rateLimitDelaysMs: [60_000, 180_000, 300_000],
+    })
+  })
+
+  it('resolves an empty cooldown schedule that disables the rate-limit cooldown', () => {
+    expect(resolveRetryPolicy({
+      mode: 'normal',
+      backoff: { rateLimitDelaysMs: [] },
+    }, 'provider.retryPolicy')).toMatchObject({
+      rateLimitDelaysMs: [],
     })
   })
 
@@ -90,6 +107,12 @@ describe('provider retry policy', () => {
     [{ mode: 'normal', retryableCodes: [429] }, /non-empty strings/],
     [{ mode: 'normal', maxRetires: 1 }, /unknown key "maxRetires"/],
     [{ mode: 'always', backoff: { initialDelay: 1 } }, /unknown key "initialDelay"/],
+    [{ mode: 'normal', backoff: { rateLimitDelaysMs: [0] } }, /rateLimitDelaysMs/],
+    [{ mode: 'normal', backoff: { rateLimitDelaysMs: [-5] } }, /rateLimitDelaysMs/],
+    [{ mode: 'normal', backoff: { rateLimitDelaysMs: [1.5] } }, /rateLimitDelaysMs/],
+    [{ mode: 'normal', backoff: { rateLimitDelaysMs: [Number.POSITIVE_INFINITY] } }, /rateLimitDelaysMs/],
+    [{ mode: 'normal', backoff: { rateLimitDelaysMs: [MAX_TIMER_DELAY_MS + 1] } }, /rateLimitDelaysMs/],
+    [{ mode: 'normal', backoff: { rateLimitDelaysMs: ['500'] } }, /rateLimitDelaysMs/],
     [{ mode: 'sometimes' }, /mode must be "normal" or "always"/],
   ] as const)('rejects invalid policy %#', (config, message) => {
     expect(() => {

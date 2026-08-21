@@ -1,6 +1,7 @@
 # Retry-scenario overlay: pin the bounded transient retry policy to a
-# deterministic 1 ms zero-jitter delay so the durable `llm/retry` event
-# (`delayMs`) and replay wall time stay reproducible. The overlay changes no
+# deterministic 1 ms zero-jitter delay and a paired 1 ms RATE_LIMIT cooldown
+# schedule so the durable `llm/retry` event (`delayMs`) and replay wall time
+# stay reproducible. The overlay changes no
 # tool or prompt composition, so its scenarios share the default header class.
 # Config patches replace whole plugin configs: the provider patch restates its
 # adapter fields around `retryPolicy`, while the app patch re-pins the recorded
@@ -22,6 +23,7 @@
               initialDelayMs: 1
               maxDelayMs: 1
               jitterRatio: 0
+              rateLimitDelaysMs: [1, 1]
           models:
             - id: deepseek-v4-flash
             - id: deepseek-v4-pro

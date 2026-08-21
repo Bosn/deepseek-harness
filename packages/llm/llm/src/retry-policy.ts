@@ -22,6 +22,13 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
   'TIMEOUT',
   'TRANSPORT',
 ])
+/**
+ * Default per-retry cooldown waits for `RATE_LIMIT` failures: one, three, and
+ * five minutes. Gateway 429 throttling (including quota-worded 429s such as
+ * qwen Model Studio `insufficient_quota`) clears on a minute scale, too slow
+ * for the ten-second exponential ceiling.
+ */
+const DEFAULT_RATE_LIMIT_DELAYS_MS = Object.freeze([60_000, 180_000, 300_000])
 
 /** Bounded exponential backoff with symmetric jitter around each local delay. */
 export interface BackoffConfig {
@@ -31,6 +38,17 @@ export interface BackoffConfig {
   maxDelayMs?: number
   /** Symmetric random multiplier range around one (default 0.1). */
   jitterRatio?: number
+  /**
+   * Per-retry cooldown waits in milliseconds applied to `RATE_LIMIT` failures
+   * (default `[60000, 180000, 300000]`): the Nth RATE_LIMIT retry of one
+   * step's recovery sequence waits entry N-1, and other retried codes share
+   * the normal budget without advancing the schedule, so the default delivers
+   * three one-, three-, and five-minute cooldown retries. The effective
+   * `RATE_LIMIT` retry budget is the schedule length (capped by
+   * `maxRetries` in normal mode); an empty array disables the schedule and
+   * falls back to the exponential backoff.
+   */
+  rateLimitDelaysMs?: number[]
 }
 
 /** Current bounded transient retry behavior for one provider route. */
@@ -61,6 +79,7 @@ export interface ResolvedRetryBackoff {
   readonly initialDelayMs: number
   readonly maxDelayMs: number
   readonly jitterRatio: number
+  readonly rateLimitDelaysMs: readonly number[]
 }
 
 /** Fully resolved bounded transient retry policy. */
@@ -82,6 +101,9 @@ const backoffSchema: z<BackoffConfig> = z.object({
   initialDelayMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_INITIAL_DELAY_MS),
   maxDelayMs: z.number().max(MAX_TIMER_DELAY_MS).default(DEFAULT_MAX_DELAY_MS),
   jitterRatio: z.number().min(0).max(1).default(DEFAULT_JITTER_RATIO),
+  rateLimitDelaysMs: z.array(
+    z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS),
+  ).default([...DEFAULT_RATE_LIMIT_DELAYS_MS]),
 })
 
 const normalPolicySchema: z<NormalRetryPolicyConfig> = z.object({
@@ -110,7 +132,9 @@ const NORMAL_POLICY_KEYS: ReadonlySet<string> = new Set([
 const ALWAYS_POLICY_KEYS: ReadonlySet<string> = new Set([
   'mode', 'maxRetries', 'retryableCodes', 'backoff',
 ])
-const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitterRatio'])
+const BACKOFF_KEYS: ReadonlySet<string> = new Set([
+  'initialDelayMs', 'maxDelayMs', 'jitterRatio', 'rateLimitDelaysMs',
+])
 
 function validateKeys(value: object, allowed: ReadonlySet<string>, path: string): void {
   for (const key of Object.keys(value)) {
@@ -123,6 +147,7 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   const initialDelayMs = config?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS
   const maxDelayMs = config?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS
   const jitterRatio = config?.jitterRatio ?? DEFAULT_JITTER_RATIO
+  const rateLimitDelaysMs = config?.rateLimitDelaysMs ?? [...DEFAULT_RATE_LIMIT_DELAYS_MS]
 
   if (!Number.isFinite(initialDelayMs) || initialDelayMs <= 0 || initialDelayMs > MAX_TIMER_DELAY_MS) {
     throw new Error(`${path}.initialDelayMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`)
@@ -136,8 +161,20 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
     throw new Error(`${path}.jitterRatio must be between 0 and 1`)
   }
+  if (rateLimitDelaysMs.some(delay => !Number.isSafeInteger(delay)
+    || delay < 1
+    || delay > MAX_TIMER_DELAY_MS)) {
+    throw new Error(
+      `${path}.rateLimitDelaysMs must contain only positive safe integers no greater than ${MAX_TIMER_DELAY_MS}`,
+    )
+  }
 
-  return Object.freeze({ initialDelayMs, maxDelayMs, jitterRatio })
+  return Object.freeze({
+    initialDelayMs,
+    maxDelayMs,
+    jitterRatio,
+    rateLimitDelaysMs: Object.freeze([...rateLimitDelaysMs]),
+  })
 }
 
 /**

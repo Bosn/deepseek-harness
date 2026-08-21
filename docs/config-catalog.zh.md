@@ -936,7 +936,7 @@ export interface Config {
   streamIdleTimeoutMs?: number
   /** Maximum accumulated base64 image payload per request (default 20 MiB). */
   maxRequestImageBytes?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
+  /** Provider-owned model-request retry policy; omission uses normal mode with five retries and a `RATE_LIMIT` cooldown schedule. */
   retryPolicy?: RetryPolicyConfig
 }
 
@@ -1061,7 +1061,7 @@ export interface PiAiProviderProfile {
    * requests instead of being rejected by a request-size cap.
    */
   maxRequestImageBytes?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
+  /** Provider-owned model-request retry policy; omission uses normal mode with five retries and a `RATE_LIMIT` cooldown schedule. */
   retryPolicy?: RetryPolicyConfig
 }
 

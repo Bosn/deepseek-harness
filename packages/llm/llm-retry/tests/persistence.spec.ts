@@ -45,7 +45,7 @@ describe.each(['jsonl', 'sqlite'] as const)('%s retry-event persistence', (kind)
         step: 1,
         provider: 'mock',
         mode: 'always',
-        policyKey: '["always",500,10000,0.1]',
+        policyKey: '["always",500,10000,0.1,[60000,180000,300000]]',
         retry: 1,
         delayMs: 750,
         failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
