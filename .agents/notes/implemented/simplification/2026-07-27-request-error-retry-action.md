@@ -10,11 +10,11 @@ Model-request recovery was decided inside `agent/request-error` but communicated
 
 ## Decision
 
-`agent/request-error` returns `RequestErrorAction`, whose handling action is `{ kind: 'retry' }`; the default `undefined` keeps the failed turn terminal. A listener that does not own the failure calls `next()`. A listener that owns it performs any awaited repair and returns the retry action without delegating.
+`agent/request-error` returns `RequestErrorAction`, whose handling action is `{ kind: 'retry' }`; the default `undefined` leaves the request unhandled so the open step and turn terminate with the failure. A listener that does not own the failure calls `next()`. A listener that owns it performs any awaited repair and returns the retry action without delegating.
 
-The loop reads the action after the waterfall settles, closes the failed turn, and opens one retry turn from durable history. It rechecks the turn signal when consuming the action, so cancellation or disposal during recovery prevents the retry even if a listener returns it afterward. A thrown recovery never produces an action.
+The loop reads the action after the waterfall settles and rechecks the turn signal before continuing the request loop inside `step()`. Each retry rebuilds the request from durable session history while retaining the same turn and step numbers; no `step/end` or `turn/end` event falls between attempts. Cancellation or disposal during recovery prevents the retry even if a listener returns it afterward. A thrown recovery never produces an action.
 
-`Agent` and `ReactLoopAgent` expose no `retry()` method. Ordinary new work enters through `followup()`, `steer()`, and `inject()`; only a handled model-request failure can open a promptless retry turn.
+`Agent` and `ReactLoopAgent` expose no `retry()` method. Ordinary new work enters through `followup()`, `steer()`, and `inject()`; only a handled model-request failure can start another promptless request attempt inside the current step.
 
 ## Alternatives considered
 
@@ -24,6 +24,6 @@ The loop reads the action after the waterfall settles, closes the failed turn, a
 
 ## Consequences
 
-Recovery ownership, asynchronous repair, and the retry decision share one typed return path. The live-agent interface and concrete loop lose the idle resummon capability and retry-window state. Callers cannot restart arbitrary failed non-request work without submitting a later prompt, while transient and context-overflow policies retain numbered retry turns, durable-history reconstruction, finite private budgets, and cancellation precedence.
+Recovery ownership, asynchronous repair, and the retry decision share one typed return path. The live-agent interface and concrete loop lose the idle resummon capability and retry-window state. Callers cannot restart arbitrary failed non-request work without submitting a later prompt, while transient and context-overflow policies retain same-turn, same-step request attempts, durable-history reconstruction, finite private budgets, and cancellation precedence.
 
-Focused agent-loop tests pin retry chaining, terminal fallthrough, recovery failure, and cancellation races. The llm-retry and compaction-basic suites pin their policy-owned action returns, and the ACP, goal-round-driver, and plan-mode integrations pin successor-turn adoption.
+Focused agent-loop tests pin multiple request attempts to one turn and step, terminal fallthrough, recovery failure, and cancellation races. The llm-retry and compaction-basic suites pin their policy-owned action returns, while the ACP, goal-round-driver, and plan-mode integrations pin recovered-prompt settlement, single Round accounting, and deferred mode changes across a same-step retry.

@@ -206,7 +206,7 @@ type StreamChunk =
 
 ## `LlmFailure`
 
-Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics.
+Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `requestBytesEstimate` is an optional positive estimate measured after adapter request conversion; it supports size-aware recovery without claiming exact wire serialization. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics.
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -217,6 +217,8 @@ interface LlmFailure {
   readonly code: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
+  /** Estimated UTF-8 bytes in the adapter-converted request content, when available. */
+  readonly requestBytesEstimate?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
   readonly providerRetryAfterMs?: number
   /** Opaque provider-issued request identifier for diagnostics. */
@@ -230,17 +232,17 @@ Every adapter MUST obey these, and every consumer may rely on them:
 
 - **`usage` before `finish`, nothing after `finish`.** Defer both to the provider's end-of-stream marker so a trailing usage-only chunk can't violate the ordering.
 - **Tool-call `arguments` stay raw JSON strings end-to-end.** Partial fragments stream via `argumentsDelta`; a provider that hands back parsed objects re-stringifies at `block-end`.
-- **Two sanctioned error paths, one `LlmFailure` type.** A failure may either THROW from `stream()` (transport/protocol errors) **or** end the stream with `finish {kind:'error'|'aborted', failure}` (provider in-band errors, for adapters that can't throw mid-stream). `LlmError.failure` carries the same `LlmFailure`. After the call selects its adapter, the stream preserves the exact thrown `Error` object and associates immutable facts plus the serving registration's immutable retry policy with that call; the agent loop closes the failed step and offers the error, facts, immutable prior-retried facts, serving policy, and turn signal to `agent/request-error`. A handling listener returns `{ kind: 'retry' }` after its awaited repair; absent recovery the structured failure becomes the turn error, and no normal assistant message or tool side effect is committed for that attempt.
-- **One adapter call is one provider attempt.** Adapters disable library retries. Agent-level recovery opens another durable numbered turn; direct `ctx.llm.stream()` callers remain single-attempt.
-- **Provider stalls are bounded at the transport.** Both shipping remote adapters expose positive finite `streamIdleTimeoutMs` with a five-minute default. The watchdog arms only while iterator `next()` is outstanding, uses one stable signal for the whole request, maps its own expiry to `TIMEOUT`, and keeps an earlier caller abort as `ABORTED`.
-- **Context overflow has one canonical code.** Both DeepSeek adapters classify explicit provider detail through `isContextWindowExceededError()` and surface `CONTEXT_WINDOW_EXCEEDED`, whether the failure arrives as a thrown HTTP `LlmError` or an in-band finish error. Consumers route on the code, never provider text.
+- **Two sanctioned error paths, one `LlmFailure` type.** A failure may either THROW from `stream()` (transport/protocol errors) **or** end the stream with `finish {kind:'error'|'aborted', failure}` (provider in-band errors, for adapters that can't throw mid-stream). `LlmError.failure` carries the same `LlmFailure`. After the call selects its adapter, the stream preserves the exact thrown `Error` object and associates immutable facts plus the serving registration's immutable retry policy with that call. While the failed request's durable turn and step remain open, the agent loop offers its failure facts, provider, serving policy, and live turn signal to `agent/request-error` before appending `step/end`. A handling listener returns `{ kind: 'retry' }` after its awaited repair; the loop then rechecks the signal and rebuilds the request from the durable surface. Absent recovery the structured failure becomes the turn error, and no normal assistant message or tool side effect is committed for that failed attempt.
+- **One adapter call is one provider attempt.** Adapters disable library retries. Agent-level recovery invokes another adapter call inside the same open durable turn and step, without an intervening `step/end`, `turn/end`, `turn/start`, or `step/start`; direct `ctx.llm.stream()` callers remain single-attempt.
+- **Provider stalls are bounded at the transport.** Both shipping remote adapters expose positive finite `streamIdleTimeoutMs` with a five-minute default. The watchdog arms only while iterator `next()` is outstanding, uses one request-local stable signal, maps its own expiry to `TIMEOUT`, keeps an earlier caller abort as `ABORTED`, and cannot abort concurrent or later requests through the same adapter.
+- **Context and request-size overflow share one recovery code.** Both DeepSeek adapters surface `CONTEXT_WINDOW_EXCEEDED` for semantic context overflow and HTTP 413 request-body rejection, whether the failure arrives as a thrown HTTP `LlmError` or an in-band finish error. `failure.status === 413` distinguishes byte pressure from semantic overflow without parsing provider text.
 - **An empty completion is a retryable error, not a silent success.** Both adapters map a terminal `stop` finish that carried no content blocks to `finish {kind:'error'}` with the canonical `EMPTY_RESPONSE` code, and `dsh-llm-retry` retries it by default; see [empty model responses are retryable](../../.agents/notes/implemented/bug-fix/2026-07-24-empty-model-response-is-retryable.md).
 - **Every provider HTTP request carries the app-attribution header.** Adapters send `attributionHeaders()` (below) - the `User-Agent` baseline - and prove it with a wire-level test.
 - **Replay state is adapter-owned; its split is shared.** A successful `finish` may carry a `ReplayEnvelope`: opaque response-level metadata plus optional per-block entries aligned with the emitted block sequence. The alignment is the harness's vocabulary — when assembly drops a block it drops the entry at the same position, so stored metadata always describes stored content. The loop stores the pruned envelope with the assembled assistant message. On a later request, `LlmRuntime` passes the state only when the historical provider and target provider are currently registered to the exact same adapter instance. That adapter validates the state and owns any cross-model or cross-provider conversion; other adapters receive the provider-neutral content plus provider/model fields without the private state. Durable content stays authoritative: a stored state the reading adapter cannot use degrades that one message to provider-neutral conversion with a diagnostic instead of failing the request.
 
 ## `ResolvedRetryPolicy`
 
-Retry configuration resolves before route registration into an immutable discriminated union. Normal mode carries `mode: 'normal'`, finite `maxRetries`, `retryableCodes`, and required `initialDelayMs`, `maxDelayMs`, `jitterRatio`, and `rateLimitDelaysMs`; always mode carries `mode: 'always'` and the same required backoff fields without a finite maximum. `rateLimitDelaysMs` is the per-attempt cooldown schedule for `RATE_LIMIT` failures (default one, three, and five minutes, three cooldown retries there): a step's RATE_LIMIT retries consume its entries in order while other retried codes share the normal budget without advancing it; the schedule caps the normal-mode RATE_LIMIT budget, an empty array opts back into exponential backoff, and jitter varies the entry while the final wait never falls below the entry or a valid provider `Retry-After`. Omitting a provider policy uses the normal default of five retries. Layered settings may retain normal-only `maxRetries` or `retryableCodes` after switching to always mode; the resolver ignores those inactive fields and captures the pure always policy. `LlmRuntime.providerRetryPolicy(provider)` returns the registered value, and `llmRetryPolicyOf(stream)` returns the value captured from the serving registration after the call selects it, so later route disposal or replacement cannot change an in-flight failure's recovery policy. The [generated config catalog](../config-catalog.md) lists the optional input fields.
+Retry configuration resolves before route registration into an immutable discriminated union. Normal mode carries `mode: 'normal'`, finite shared `maxRetries`, `retryableCodes`, immutable `maxRetriesByCode`, and required `initialDelayMs`, `maxDelayMs`, `jitterRatio`, and `rateLimitDelaysMs`; always mode carries `mode: 'always'` and the same required backoff fields without finite limits. A per-code cap applies in addition to the shared budget, and omission defaults to `{ TIMEOUT: 1 }`, preventing repeated five-minute idle deadlines from consuming all five shared retries. `rateLimitDelaysMs` is the per-attempt cooldown schedule for `RATE_LIMIT` failures (default one, three, and five minutes, three cooldown retries there): a step's RATE_LIMIT retries consume its entries in order while other retried codes share the normal budget without advancing it; the schedule caps the normal-mode RATE_LIMIT budget, an empty array opts back into exponential backoff, and jitter varies the entry while the final wait never falls below the entry or a valid provider `Retry-After`. Layered settings may retain normal-only `maxRetries`, `retryableCodes`, or `maxRetriesByCode` after switching to always mode; the resolver ignores those inactive fields and captures the pure always policy. `LlmRuntime.providerRetryPolicy(provider)` returns the registered value, and `llmRetryPolicyOf(stream)` returns the value captured from the serving registration after the call selects it, so later route disposal or replacement cannot change an in-flight failure's recovery policy. The [generated config catalog](../config-catalog.md) lists the optional input fields.
 
 ## `AppIdentity` — app attribution
 
@@ -747,7 +749,7 @@ declare abstract class LlmAdapter {
 
 ## Cordis API
 
-Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — this section is byte-identical in both language sides of the page. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
 <a id="ctxllm--llmruntime"></a>
 
@@ -873,7 +875,7 @@ async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<Prepared
 stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 ```
 
-Source: [`packages/llm/llm/src/index.ts:284`](../../packages/llm/llm/src/index.ts)
+Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
 
 <a id="llm-events"></a>
 
@@ -898,7 +900,7 @@ The provider topology changed: an adapter registered or unregistered routes, or 
 'llm/adapters-updated'(): void
 ```
 
-Source: [`packages/llm/llm/src/types.ts:23`](../../packages/llm/llm/src/types.ts)
+Source: [`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
 
 <a id="llmstream--waterfall"></a>
 
@@ -922,5 +924,5 @@ Waterfall around every streaming model call (retry, replay, routing). Bound to t
 'llm/stream'(this: LlmRuntime, options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk>
 ```
 
-Source: [`packages/llm/llm/src/index.ts:64`](../../packages/llm/llm/src/index.ts)
+Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
 <!-- END GENERATED cordis-surface -->

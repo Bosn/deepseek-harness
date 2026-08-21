@@ -13,6 +13,7 @@ import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { DEFAULT_MAX_REQUEST_IMAGE_BYTES, resolveProfiles } from '../src/config.ts'
+import { memoryAuth } from './auth-double.ts'
 import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
@@ -47,6 +48,7 @@ function adapterOf(
   return new PiAiAdapter({
     profiles: () => resolveProfiles(providers),
     resolveApiKey: () => Promise.resolve(apiKey),
+    auth: memoryAuth(),
   })
 }
 
@@ -255,6 +257,73 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
+  it('reports timeout bytes after request image offload', async () => {
+    const server = await mockServer([{ events: textEvents, delayMs: 200 }])
+    const ref: ImageAttachmentRef = {
+      ...IMAGE_REF,
+      bytes: 1_000_000,
+    }
+    const readImage = vi.fn((_ref: ImageAttachmentRef): Promise<StoredImageAttachment> =>
+      Promise.resolve({ ref, data: new Uint8Array(ref.bytes) }))
+
+    class OffloadAttachmentStore extends AttachmentStore {
+      readonly imageLimits: ImageAttachmentLimits = {
+        maxImageBytes: ref.bytes,
+        maxImagesPerMessage: 1,
+        maxMessageImageBytes: ref.bytes,
+        maxImagePixels: 1,
+        maxImageDimension: 2000,
+        mediaTypes: ['image/png'],
+      }
+
+      validateImage(_input: SaveImageAttachment): Promise<void> {
+        return Promise.reject(new Error('not used'))
+      }
+
+      saveImage(_input: SaveImageAttachment): Promise<ImageAttachmentRef> {
+        return Promise.reject(new Error('not used'))
+      }
+
+      readImage(value: ImageAttachmentRef): Promise<StoredImageAttachment> {
+        return readImage(value)
+      }
+    }
+
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: {
+          apiKeyEnv: 'PI_TEST_KEY',
+          baseURL: `${server.url}/v1`,
+          maxRequestImageBytes: 1,
+          streamIdleTimeoutMs: 20,
+        },
+      },
+    })
+    await ctx.plugin(OffloadAttachmentStore)
+
+    const result = await assemble(ctx, {
+      provider: 'openai',
+      model: 'gpt-4.1',
+      messages: [createUserMessage({
+        content: [{ type: 'image', attachment: ref }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+    })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'TIMEOUT' },
+    })
+    if (result.finish.kind !== 'error') throw new Error('expected timeout failure')
+    const requestBytesEstimate = result.finish.failure.requestBytesEstimate
+    if (requestBytesEstimate === undefined) throw new Error('expected converted request byte estimate')
+    expect(requestBytesEstimate).toBeLessThan(ref.bytes)
+    expect(readImage).not.toHaveBeenCalled()
+    expect(server.paths).toEqual(['/v1/responses'])
+  })
+
   it('forces one wire request for an SDK-retryable provider failure', async () => {
     const server = await mockServer([
       {
@@ -300,14 +369,65 @@ describe('PiAiAdapter provider routing', () => {
   it.each([
     [401, 'AUTH'],
     [400, 'INVALID_REQUEST'],
+    [413, CONTEXT_WINDOW_EXCEEDED_CODE],
     [429, 'RATE_LIMIT'],
     [500, 'SERVER'],
   ] as const)('maps HTTP %s failures to %s', async (status, code) => {
     const server = await mockServer([{ status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }])
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
-    expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code, status } })
     expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('treats quota-worded HTTP 429 as throttling when the route opts in', async () => {
+    const server = await mockServer([{
+      status: 429,
+      body: JSON.stringify({
+        error: {
+          message: 'You exceeded your current quota',
+          type: 'insufficient_quota',
+          code: 'insufficient_quota',
+        },
+      }),
+    }])
+    const ctx = await harness(server.url, { quotaWorded429IsRateLimit: true })
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: {
+        code: 'RATE_LIMIT',
+        status: 429,
+      },
+    })
+    expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('preserves OpenAI quota-worded HTTP 429 as terminal quota', async () => {
+    const server = await mockServer([{
+      status: 429,
+      body: JSON.stringify({
+        error: {
+          message: 'You exceeded your current quota',
+          type: 'insufficient_quota',
+          code: 'insufficient_quota',
+        },
+      }),
+    }])
+    const adapter = adapterOf({ openai: { baseURL: server.url } })
+    const chunks = []
+
+    for await (const chunk of adapter.stream({ provider: 'openai', model: 'gpt-5.5', messages: [] })) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'QUOTA', status: 429 } },
+    })
+    expect(server.requests).toHaveLength(1)
   })
 
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {
@@ -326,13 +446,15 @@ describe('PiAiAdapter provider routing', () => {
 
     const result = await assemble(ctx, { model: model.id, messages: [] })
 
-    expect(result.finish).toEqual({
+    expect(result.finish).toMatchObject({
       kind: 'error',
       failure: {
         message: `pi-ai detected context overflow for model "${model.id}"`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
+    if (result.finish.kind !== 'error') throw new Error('expected context overflow failure')
+    expect(result.finish.failure.requestBytesEstimate).toBeTypeOf('number')
   })
 
   it('stops the SDK request when the adapter idle watchdog expires', async () => {
@@ -350,6 +472,25 @@ describe('PiAiAdapter provider routing', () => {
 
     expect(server.paths).toEqual(['/chat/completions'])
     expect(server.closedResponses).toBe(1)
+  })
+
+  it('isolates a timed-out stream from concurrent and later requests', async () => {
+    const server = await mockServer([
+      { events: textEvents, delayMs: 200 },
+      { events: textEvents },
+      { events: textEvents },
+    ])
+    const ctx = await harness(server.url, { streamIdleTimeoutMs: 20 })
+    const stalled = assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    await vi.waitFor(() => { expect(server.requests).toHaveLength(1) })
+
+    const concurrent = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(concurrent.finish).toEqual({ kind: 'stop' })
+    expect((await stalled).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
+
+    const later = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(later.finish).toEqual({ kind: 'stop' })
+    expect(server.paths).toEqual(['/chat/completions', '/chat/completions', '/chat/completions'])
   })
 })
 
@@ -757,6 +898,28 @@ describe('provider profile lifecycle', () => {
       .toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
     expect(resolveProfiles({ openai: { maxRequestImageBytes: 1024 } }).get('openai')?.maxRequestImageBytes)
       .toBe(1024)
+    expect(resolveProfiles({ openai: {} }).get('openai')?.quotaWorded429IsRateLimit).toBe(false)
+    expect(resolveProfiles({ 'qwen-token-plan': {} }).get('qwen-token-plan')?.quotaWorded429IsRateLimit).toBe(true)
+    expect(resolveProfiles({ 'qwen-token-plan-cn': {} }).get('qwen-token-plan-cn')?.quotaWorded429IsRateLimit)
+      .toBe(true)
+    expect(resolveProfiles({
+      'qwen-token-plan': { quotaWorded429IsRateLimit: false },
+    }).get('qwen-token-plan')?.quotaWorded429IsRateLimit).toBe(false)
+    expect(resolveProfiles({
+      custom: {
+        api: 'openai-completions',
+        baseURL: 'https://example.test/v1',
+        models: [{ id: 'custom-model' }],
+      },
+    }).get('custom')?.quotaWorded429IsRateLimit).toBe(false)
+    expect(resolveProfiles({
+      custom: {
+        api: 'openai-completions',
+        baseURL: 'https://example.test/v1',
+        models: [{ id: 'custom-model' }],
+        quotaWorded429IsRateLimit: true,
+      },
+    }).get('custom')?.quotaWorded429IsRateLimit).toBe(true)
   })
 
   it.each(['maxRetries', 'maxRetryDelayMs'] as const)(
@@ -778,6 +941,7 @@ describe('provider profile lifecycle', () => {
       { streamIdleTimeoutMs: 0 },
       { streamIdleTimeoutMs: Number.NaN },
       { streamIdleTimeoutMs: MAX_TIMER_DELAY_MS + 1 },
+      { quotaWorded429IsRateLimit: 'yes' as never },
       { maxRequestImageBytes: 0 },
       { maxRequestImageBytes: 1.5 },
       { maxRequestImageBytes: Number.NaN },

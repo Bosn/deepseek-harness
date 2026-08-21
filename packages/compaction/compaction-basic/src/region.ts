@@ -16,12 +16,13 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, offloadRequestImagesUntil } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
+import type { EpochHeader, Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { frameSummary } from './summarizer.ts'
+import { estimateCompactionInstructionBytes, frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
 
 interface RegionDependencies {
@@ -43,6 +44,16 @@ interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
   readonly shadowedTokenCount: number
+  /** Estimated durable message bytes replaced by this transaction. */
+  readonly durableInputByteCount: number
+  /** Estimated post-offload message bytes summarized by this transaction. */
+  readonly summarizedInputByteCount: number
+  /** Whether the bounded summarizer projection replaced at least one image. */
+  readonly inputImagesOffloaded: boolean
+  /** Estimated header bytes shared by this and the next bounded request. */
+  readonly summarizationHeaderBytes: number
+  /** Front message count that exceeds the byte cap and compacts separately. */
+  readonly dropCount: number
   readonly input: SummarizationInput
 }
 
@@ -59,12 +70,24 @@ interface CompactionTransactionOptions {
   readonly flush?: () => Promise<void>
   /** Manual command that initiated this transaction, when present. */
   readonly sourceCommandId?: CommandId
+  /**
+   * Optional byte cap on each complete summarizer request. Oversized ranges
+   * are partitioned into balanced compaction transactions that each fit it.
+   */
+  readonly summarizationInputBytes?: number
 }
 
 interface CompactionEntryState {
   readonly openTurn: number | null
   readonly unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
   readonly latestEndSeedSeq: number | undefined
+}
+
+/** Shared owner and provider-call budget for one hierarchical region operation. */
+interface CompactionOperationState {
+  readonly expectedOwner: number | null
+  readonly transactionLimit: number
+  remainingTransactions: number
 }
 
 /**
@@ -134,12 +157,11 @@ export function selectCompactableRange(
 }
 
 /**
- * Run the single compaction transaction over one selected positional span.
- * Selection and validation are read-only. Idle/log validation and
- * `compaction/start` are synchronously adjacent, so the durable opening marker is
- * the compaction lock before summarization yields. Every later failure makes
- * exactly one `compaction/end` attempt; a failed close deliberately leaves the
- * unmatched start detectable.
+ * Compact one selected positional span through one or more bounded
+ * transactions. Each transaction revalidates the durable lock and turn owner
+ * immediately before its synchronous `compaction/start` append. Every later
+ * failure makes exactly one `compaction/end` attempt; a failed close
+ * deliberately leaves the unmatched start detectable.
  * @param dependencies - conversation meter and dynamically dispatched summarizer hook.
  * @param session - session whose surface is mutated.
  * @param start - inclusive first surface-node seq.
@@ -159,27 +181,160 @@ export async function compactSurfaceRegion(
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
   if (options.owner === null) signal?.throwIfAborted()
-  const selection = validateSurfaceRegion(session, start, end)
+  const initial = validateSurfaceRegion(session, start, end)
   const entryState = inspectCompactionEntryState(session.events)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
     'compaction',
   )
+  const owner = resolveCompactionOwner(options, entryState)
+  const operation: CompactionOperationState = {
+    expectedOwner: owner,
+    transactionLimit: initial.shadowedSeqs.length,
+    remainingTransactions: initial.shadowedSeqs.length,
+  }
 
-  let owner: number | null
+  return compactSurfaceSelection(
+    dependencies,
+    session,
+    initial,
+    agent,
+    options,
+    operation,
+    false,
+    signal,
+  )
+}
+
+/** Fold one validated selection using the outer operation's owner and call budget. */
+async function compactSurfaceSelection(
+  dependencies: RegionDependencies,
+  session: Session,
+  initial: SurfaceSelection,
+  agent: Agent,
+  options: CompactionTransactionOptions,
+  operation: CompactionOperationState,
+  checkpointWillBeReused: boolean,
+  signal?: AbortSignal,
+): Promise<CompactionResult> {
+  // Front messages outside the request cap compact in earlier transactions;
+  // every durable replacement is backed by a bounded summarizer request.
+  let remainingSeqs: readonly number[] = initial.shadowedSeqs
+  while (true) {
+    if (options.owner === null) signal?.throwIfAborted()
+    const headSeq = remainingSeqs[0]
+    const tailSeq = remainingSeqs.at(-1)
+    /* v8 ignore next 3 -- validated regions and each bounded prefix leave at least one selected event. */
+    if (headSeq === undefined || tailSeq === undefined) {
+      throw new Error('compactRegion: bounded compaction exhausted the selected region')
+    }
+    const current = validateSurfaceRegion(session, headSeq, tailSeq)
+    const prepared = prepareCompaction(
+      dependencies,
+      session,
+      current,
+      options.summarizationInputBytes,
+    )
+    if (prepared.dropCount === 0) {
+      return runCompactionTransaction(
+        dependencies,
+        session,
+        prepared,
+        agent,
+        options,
+        operation,
+        checkpointWillBeReused,
+        signal,
+      )
+    }
+    const omittedSeqs = current.shadowedSeqs.slice(0, prepared.dropCount)
+    const omittedHeadSeq = omittedSeqs[0]
+    const omittedTailSeq = omittedSeqs.at(-1)
+    /* v8 ignore next 3 -- a positive prepared drop count always selects a non-empty prefix. */
+    if (omittedHeadSeq === undefined || omittedTailSeq === undefined) {
+      throw new Error('compactRegion: bounded compaction selected an empty prefix')
+    }
+    const prefix = await compactSurfaceSelection(
+      dependencies,
+      session,
+      validateSurfaceRegion(session, omittedHeadSeq, omittedTailSeq),
+      agent,
+      options,
+      operation,
+      true,
+      signal,
+    )
+    // The replacement user message is appended immediately before the closing
+    // event. Carry it into the next bounded pass so partition summaries
+    // converge to one checkpoint instead of accumulating on the surface.
+    const checkpointSeq = prefix.endSeq - 1
+    remainingSeqs = [checkpointSeq, ...remainingSeqs.slice(prepared.dropCount)]
+  }
+}
+
+/** Resolve the transaction owner or reject a manual call inside an open turn. */
+function resolveCompactionOwner(
+  options: CompactionTransactionOptions,
+  entryState: CompactionEntryState,
+): number | null {
   if (options.owner === null) {
     if (entryState.openTurn !== null) {
       throw new ManualCompactionError('busy', 'manual compaction: the session already has an open turn')
     }
-    owner = null
-  } else {
-    if (entryState.openTurn === null) {
-      throw new Error('compactRegion: no open turn — automatic compaction events must be enclosed in a turn')
-    }
-    owner = entryState.openTurn
+    return null
   }
+  if (entryState.openTurn === null) {
+    throw new Error('compactRegion: no open turn — automatic compaction events must be enclosed in a turn')
+  }
+  return entryState.openTurn
+}
 
+/**
+ * Run the single prepared compaction transaction: open the durable lock, run
+ * the summarizer, recheck stability, and commit the replacement across the
+ * prepared span. Every failure after the opening marker makes exactly one
+ * `compaction/end` attempt; a failed close deliberately leaves the unmatched
+ * start detectable.
+ * @param dependencies - conversation meter and dynamically dispatched summarizer hook.
+ * @param session - session whose surface is mutated.
+ * @param prepared - priced selection and replay input built against the current surface.
+ * @param agent - agent used by the summarizer.
+ * @param options - bracket owner, stability rule, flush hook, and command identity.
+ * @param operation - outer owner and remaining provider-call budget.
+ * @param checkpointWillBeReused - whether a later bounded transaction consumes this checkpoint.
+ * @param signal - optional summarization cancellation signal.
+ * @returns the successful durable compaction result.
+ */
+async function runCompactionTransaction(
+  dependencies: RegionDependencies,
+  session: Session,
+  prepared: PreparedCompaction,
+  agent: Agent,
+  options: CompactionTransactionOptions,
+  operation: CompactionOperationState,
+  checkpointWillBeReused: boolean,
+  signal?: AbortSignal,
+): Promise<CompactionResult> {
+  const entryState = inspectCompactionEntryState(session.events)
+  assertCompactionInactive(
+    entryState.unmatchedCompactionStart,
+    entryState.latestEndSeedSeq,
+    'compaction',
+  )
+  const owner = resolveCompactionOwner(options, entryState)
+  if (owner !== operation.expectedOwner) {
+    throw new Error(
+      `compactRegion: open turn changed from ${operation.expectedOwner} to ${owner} during bounded compaction`,
+    )
+  }
+  if (operation.remainingTransactions === 0) {
+    throw new Error(
+      `compactRegion: bounded compaction exhausted its ${operation.transactionLimit}-transaction limit `
+      + 'before the selected region fit the summarization-input cap',
+    )
+  }
+  operation.remainingTransactions -= 1
   const compactionId = CompactionId(randomUUID())
   const lifecycle = {
     compactionId,
@@ -198,13 +353,13 @@ export async function compactSurfaceRegion(
   let stage: TransactionFailure['stage'] = 'summary'
 
   try {
-    const prepared = prepareCompaction(dependencies, session, selection)
     const summarized = await summarizeCompaction(
       dependencies,
       prepared,
       agent,
       compactionId,
       options.sourceCommandId,
+      checkpointWillBeReused,
       signal,
     )
     if (options.owner === null) signal?.throwIfAborted()
@@ -340,6 +495,7 @@ function prepareCompaction(
   dependencies: RegionDependencies,
   session: Session,
   selection: SurfaceSelection,
+  summarizationInputBytes: number | undefined,
 ): PreparedCompaction {
   const measurement = dependencies.meter.measure(session)
   const selectedNodes = measurement.nodes.slice(selection.startIdx, selection.endIdx + 1)
@@ -347,12 +503,18 @@ function prepareCompaction(
     || selectedNodes.some((node, index) => node.seq !== selection.shadowedSeqs[index])) {
     throw new SurfaceChangedError('compaction: selected surface changed before summarization began')
   }
+  const rebuilt = buildSummarizationInput(session, selection.shadowedSeqs, summarizationInputBytes)
   return {
     ...selection,
     measurement,
     selectedNodes,
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
-    input: buildSummarizationInput(session, selection.shadowedSeqs),
+    durableInputByteCount: rebuilt.durableInputByteCount,
+    summarizedInputByteCount: rebuilt.inputByteCount,
+    inputImagesOffloaded: rebuilt.imagesOffloaded,
+    summarizationHeaderBytes: rebuilt.headerBytes,
+    dropCount: rebuilt.dropCount,
+    input: rebuilt.input,
   }
 }
 
@@ -363,6 +525,7 @@ async function summarizeCompaction(
   agent: Agent,
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
+  checkpointWillBeReused: boolean,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
   const summaryResult = await dependencies.summarize(prepared.input, agent, signal)
@@ -371,10 +534,34 @@ async function summarizeCompaction(
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
-  if (framedSummaryTokenCount >= prepared.shadowedTokenCount) {
+  if (!prepared.inputImagesOffloaded
+    && framedSummaryTokenCount >= prepared.shadowedTokenCount) {
     throw new Error(
       `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`,
     )
+  }
+  if (prepared.input.maxRequestBytes !== undefined) {
+    const framedSummaryByteCount = estimateMessageBytes(checkpointMessage)
+    const nextRequestBytes = prepared.summarizationHeaderBytes
+      + estimateCompactionInstructionBytes()
+      + framedSummaryByteCount
+    if (nextRequestBytes > prepared.input.maxRequestBytes) {
+      throw new Error(
+        `summary checkpoint needs ${nextRequestBytes} estimated bytes with the replay header and instruction, `
+        + `over the ${prepared.input.maxRequestBytes}-byte summarization-input cap`,
+      )
+    }
+    if (framedSummaryByteCount >= prepared.durableInputByteCount) {
+      throw new Error(
+        `summary is not smaller than its durable input (${framedSummaryByteCount} estimated framed bytes >= ${prepared.durableInputByteCount})`,
+      )
+    }
+    if ((checkpointWillBeReused || !prepared.inputImagesOffloaded)
+      && framedSummaryByteCount >= prepared.summarizedInputByteCount) {
+      throw new Error(
+        `summary is not smaller than its post-offload input (${framedSummaryByteCount} estimated framed bytes >= ${prepared.summarizedInputByteCount})`,
+      )
+    }
   }
   return {
     ...prepared,
@@ -491,26 +678,132 @@ function completeCompaction(
  * messages in surface order. The summarizer appends only the compaction
  * instruction after this, so the call is a genuine prefix of the conversation
  * and reuses the provider's KV cache.
+ *
+ * With a byte cap set, the budget first reserves the fixed instruction
+ * message's bytes. Oldest images become the shared omission placeholder one
+ * at a time under the complete request estimate; when image offload is not
+ * enough, messages drop from the FRONT of the replayed region until header,
+ * kept messages, and instruction fit together. The returned `dropCount` tells
+ * the caller which front messages need their own earlier compaction
+ * transactions — no whole message is silently erased, and an indivisible
+ * header-plus-newest overshoot fails loud instead of replaying an oversized
+ * request.
  * @param session - session supplying the request header and per-node projection.
  * @param shadowedSeqs - the surface-node seqs, in order, being compacted.
- * @returns the replayed conversation prefix to condense.
+ * @param maxBytes - optional cap on total replay bytes (header plus messages plus instruction).
+ * @returns the replayed conversation prefix to condense and the front drop count.
  */
 function buildSummarizationInput(
   session: Session,
   shadowedSeqs: readonly number[],
-): SummarizationInput {
+  maxBytes: number | undefined,
+): {
+  input: SummarizationInput
+  dropCount: number
+  durableInputByteCount: number
+  inputByteCount: number
+  imagesOffloaded: boolean
+  headerBytes: number
+} {
   const header = session.requestHeader()
+  const headerBytes = estimateHeaderBytes(header)
   const events = session.events
-  const regionMessages = shadowedSeqs
-    // shadowedSeqs are current surface seqs, so each is a valid log index.
-    // oxlint-disable-next-line typescript/no-non-null-assertion
-    .map(seq => session.deriveEventMessage(events[seq]!))
-    .filter((message): message is Message => message !== null)
+  // shadowedSeqs are current surface seqs, so each is a valid log index of a
+  // settled message event and the projection is total.
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const messages = shadowedSeqs.map(seq => session.deriveEventMessage(events[seq]!)!)
+  const durableInputByteCount = messages
+    .reduce((total, message) => total + estimateMessageBytes(message), 0)
+  const fitted = maxBytes === undefined
+    ? { messages, dropCount: 0, imagesOffloaded: false }
+    : trimToByteCap(session, shadowedSeqs, messages, header, maxBytes)
+  const inputByteCount = fitted.messages
+    .reduce((total, message) => total + estimateMessageBytes(message), 0)
+
   return {
-    ...header?.system === undefined ? {} : { system: header.system },
-    ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages: regionMessages,
+    input: {
+      ...header?.system === undefined ? {} : { system: header.system },
+      ...header?.tools === undefined ? {} : { tools: header.tools },
+      messages: fitted.messages,
+      ...maxBytes === undefined ? {} : { maxRequestBytes: maxBytes },
+    },
+    dropCount: fitted.dropCount,
+    durableInputByteCount,
+    inputByteCount,
+    imagesOffloaded: fitted.imagesOffloaded,
+    headerBytes,
   }
+}
+
+/**
+ * Fit one balanced suffix to the complete summarizer-request cap. Oldest
+ * images offload before a whole front message is assigned to an earlier
+ * transaction, so image conversion and message partitioning use the same
+ * header-plus-message-plus-instruction estimate.
+ * @param messages - full derived message list, in surface order.
+ * @param header - the routed header whose bytes count against the cap.
+ * @param maxBytes - cap on header, kept messages, and instruction combined.
+ * @returns transient post-offload messages and the front drop count.
+ */
+function trimToByteCap(
+  session: Session,
+  shadowedSeqs: readonly number[],
+  messages: readonly Message[],
+  header: EpochHeader | undefined,
+  maxBytes: number,
+): { messages: readonly Message[]; dropCount: number; imagesOffloaded: boolean } {
+  const instructionBytes = estimateCompactionInstructionBytes()
+  const dataCap = maxBytes - instructionBytes
+  if (dataCap <= 0) {
+    throw new Error(
+      `compaction: the ${maxBytes}-byte summarization-input cap cannot accommodate `
+      + `the ${instructionBytes}-byte compaction instruction`,
+    )
+  }
+  const headerBytes = estimateHeaderBytes(header)
+  const fits = (candidate: readonly Message[]): boolean => {
+    let total = headerBytes
+    for (const message of candidate) total += estimateMessageBytes(message)
+    return total <= dataCap
+  }
+  let dropCount = 0
+  while (true) {
+    const candidate = messages.slice(dropCount)
+    const fitted = offloadRequestImagesUntil(candidate, fits)
+    if (fits(fitted)) {
+      return { messages: fitted, dropCount, imagesOffloaded: fitted !== candidate }
+    }
+    if (dropCount >= messages.length - 1) {
+      let total = headerBytes
+      for (const message of fitted) total += estimateMessageBytes(message)
+      throw new Error(
+        `compaction: summarizer input cannot fit the ${maxBytes}-byte cap: `
+        + `header and the newest message alone need ${total + instructionBytes} estimated bytes`,
+      )
+    }
+    dropCount += 1
+    while (!isBalancedPartition(session, shadowedSeqs, dropCount)) {
+      if (dropCount >= messages.length - 1) {
+        throw new Error(
+          `compaction: summarizer input cannot fit the ${maxBytes}-byte cap without splitting a tool-call/result pair`,
+        )
+      }
+      dropCount += 1
+    }
+  }
+}
+
+/** Whether a front/suffix partition preserves tool-call/result pairing. */
+function isBalancedPartition(
+  session: Session,
+  shadowedSeqs: readonly number[],
+  dropCount: number,
+): boolean {
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const left = shadowedSeqs[dropCount - 1]!
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const right = shadowedSeqs[dropCount]!
+  return toolPairingBalancedAfter(session, left) && toolPairingBalancedBefore(session, right)
 }
 
 /** Inspect open-turn, unmatched-compaction, and latest seed-boundary state independently. */

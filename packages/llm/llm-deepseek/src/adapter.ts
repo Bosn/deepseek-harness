@@ -149,13 +149,16 @@ function requestId(headers: Headers): ReturnType<typeof ProviderRequestId> | und
  * that wording for per-minute token throttling that clears by itself, so
  * retry policy owns the wait instead of failing the turn. Quota wording on a
  * non-429 status remains terminal `QUOTA`, e.g. a 402 insufficient balance.
+ * An HTTP 413 is by definition a request whose wire size the gateway refused:
+ * resending it verbatim can never work, but the compaction engine CAN rebuild
+ * a smaller request, so it routes to the context-overflow recovery path.
  * @param status - status of a non-2xx provider response.
  * @param error - parsed provider error body, when available.
  * @returns the normalized harness error code.
  */
 export function httpErrorCode(status: number, error?: WireError['error']): string {
   if (status === 401 || status === 403) return 'AUTH'
-  if (status === 413) return 'INVALID_REQUEST'
+  if (status === 413) return CONTEXT_WINDOW_EXCEEDED_CODE
   const detail = [error?.code, error?.type, error?.message].filter(Boolean).join(' ')
   if (isQuotaExceededError(detail) && status !== 429) return QUOTA_EXCEEDED_CODE
   if (status === 429) return 'RATE_LIMIT'
@@ -263,6 +266,7 @@ export class DeepSeekAdapter extends LlmAdapter {
       ? consumer.signal
       : AbortSignal.any([options.signal, consumer.signal])
     using watchdog = idleWatchdog(upstream, connection.streamIdleTimeoutMs, STREAM_IDLE_TIMEOUT_CODE)
+    let requestBytesEstimate: number | undefined
     const iterator = this.request(
       options,
       watchdog.signal,
@@ -271,6 +275,7 @@ export class DeepSeekAdapter extends LlmAdapter {
       userId,
       attachments,
       () => { watchdog.pulse() },
+      (estimate) => { requestBytesEstimate = estimate },
     )[Symbol.asyncIterator]()
     let exhausted = false
     try {
@@ -287,7 +292,10 @@ export class DeepSeekAdapter extends LlmAdapter {
         throw new LlmError(
           `DeepSeek stream idle timeout after ${connection.streamIdleTimeoutMs}ms`,
           'TIMEOUT',
-          { cause: error },
+          {
+            cause: error,
+            ...requestBytesEstimate === undefined ? {} : { requestBytesEstimate },
+          },
         )
       }
       if (options.signal?.aborted) {
@@ -315,6 +323,7 @@ export class DeepSeekAdapter extends LlmAdapter {
     userId: AnonymousUserId,
     attachments: AttachmentStore | undefined,
     onComment: () => void,
+    onRequestSerialized: (requestBytesEstimate: number) => void,
   ): AsyncIterable<StreamChunk> {
     const body = attachments === undefined
       ? serializeRequest(options, connection.defaults)
@@ -326,6 +335,8 @@ export class DeepSeekAdapter extends LlmAdapter {
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
+    const requestBytesEstimate = new TextEncoder().encode(payload).byteLength
+    onRequestSerialized(requestBytesEstimate)
     const headers = {
       'authorization': `Bearer ${apiKey}`,
       'content-type': 'application/json',
@@ -379,6 +390,7 @@ export class DeepSeekAdapter extends LlmAdapter {
       const id = requestId(response.headers)
       throw new LlmError(message, httpErrorCode(response.status, providerError), {
         status: response.status,
+        requestBytesEstimate,
         ...delay === undefined ? {} : { providerRetryAfterMs: delay },
         ...id === undefined ? {} : { requestId: id },
       })

@@ -108,6 +108,15 @@ describe('LlmRuntime', () => {
     expect(isContextWindowExceededError('input exceeds the model context window limit')).toBe(true)
   })
 
+  it('recognizes gateway request-size-cap wording (the HTTP 413 family)', () => {
+    expect(isContextWindowExceededError('Request body size exceeds maximum allowed sized')).toBe(true)
+    expect(isContextWindowExceededError('RequestTooLarge RequestTooLarge Request body size exceeds maximum allowed sized')).toBe(true)
+    expect(isContextWindowExceededError('payload size exceeds the limit')).toBe(true)
+    expect(isContextWindowExceededError('request body too large')).toBe(true)
+    expect(isContextWindowExceededError('Payload Too Large')).toBe(true)
+    expect(isContextWindowExceededError('request too large')).toBe(true)
+  })
+
   it('does not mistake unrelated input validation for context-window overflow', () => {
     expect(isContextWindowExceededError('invalid request: malformed tool arguments')).toBe(false)
     expect(isContextWindowExceededError('invalid input: temperature exceeds maximum allowed value')).toBe(false)
@@ -347,6 +356,7 @@ describe('LlmRuntime', () => {
   it('preserves structured LlmError facts in the terminal failure', async () => {
     const failure = new LlmError('provider busy', 'RATE_LIMIT', {
       status: 429,
+      requestBytesEstimate: 42_000,
       providerRetryAfterMs: 1_500,
       requestId: ProviderRequestId('req-7'),
     })
@@ -368,6 +378,7 @@ describe('LlmRuntime', () => {
           message: 'provider busy',
           code: 'RATE_LIMIT',
           status: 429,
+          requestBytesEstimate: 42_000,
           providerRetryAfterMs: 1_500,
           requestId: ProviderRequestId('req-7'),
         },
@@ -1138,6 +1149,8 @@ describe('LlmRuntime', () => {
     expect(() => new LlmError('busy', 'RATE_LIMIT', { status: 42 })).toThrow(/status/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { providerRetryAfterMs: Number.NaN }))
       .toThrow(/providerRetryAfterMs/)
+    expect(() => new LlmError('busy', 'RATE_LIMIT', { requestBytesEstimate: 0 }))
+      .toThrow(/requestBytesEstimate/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { requestId: ProviderRequestId('') })).toThrow(/requestId/)
     expect(() => new LlmError(1 as never, 'RATE_LIMIT')).toThrow(/message/)
     expect(() => new LlmError('busy', 1 as never)).toThrow(/code/)

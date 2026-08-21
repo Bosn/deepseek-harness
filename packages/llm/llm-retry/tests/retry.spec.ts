@@ -184,7 +184,10 @@ describe('provider-routed retry policy', () => {
       textResponse('done'),
     ])
     ;({ ctx: context } = await harness(adapter, {
-      mock: normalConfig({ retryableCodes: ['SERVER', 'RATE_LIMIT'] }),
+      mock: normalConfig({
+        retryableCodes: ['SERVER', 'RATE_LIMIT'],
+        maxRetriesByCode: { TIMEOUT: 1, TRANSPORT: 2 },
+      }),
     }, undefined, { random: () => 0.5 }))
     const agent = context.agentLoop.create(SessionId('retry-success'), {
       provider: 'mock',
@@ -202,7 +205,7 @@ describe('provider-routed retry policy', () => {
       step: 1,
       provider: 'mock',
       mode: 'normal',
-      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],500,10000,0,[500]]',
+      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],[["TIMEOUT",1],["TRANSPORT",2]],500,10000,0,[500]]',
       retry: 1,
       maxRetries: 2,
       delayMs: 500,
@@ -344,6 +347,122 @@ describe('provider-routed retry policy', () => {
     expect(agent.session.events.at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'error', error: { message: 'busy three', code: 'SERVER' } } },
+    })
+  })
+
+  it('caps repeated idle timeouts independently of the shared retry budget', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('idle timeout one', 'TIMEOUT'),
+      new LlmError('idle timeout two', 'TIMEOUT'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      maxRetries: 8,
+      backoff: { initialDelayMs: 1, maxDelayMs: 1 },
+    }) }))
+    const agent = context.agentLoop.create(SessionId('retry-timeout-cap'), { provider: 'mock', model: 'mock' })
+    const first = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await first).data).toMatchObject({ retry: 1, failure: { code: 'TIMEOUT' } })
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(1)
+    await idle
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(1)
+    expect(agent.session.events.at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { message: 'idle timeout two', code: 'TIMEOUT' } } },
+    })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('lets downstream specialized recovery run before normal fallback', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('large request timed out', 'TIMEOUT'),
+      textResponse('specialized recovery won'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig() }))
+    context.on('agent/request-error', async ({ agent }) => {
+      const head = agent.session.surface.nodes[0]!
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'durable specialized recovery' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }), {
+        surfaceOp: { op: 'replace', start: head, end: head },
+        sourceEventSeqs: [head],
+      })
+      return { kind: 'retry' }
+    })
+    const agent = context.agentLoop.create(SessionId('retry-normal-composition'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.surface.replaceGeneration).toBe(1)
+    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+  })
+
+  it('does not override downstream durable recovery progress with normal fallback', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('large request timed out', 'TIMEOUT'),
+      textResponse('must not run'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { initialDelayMs: 1, maxDelayMs: 1 },
+    }) }))
+    context.on('agent/request-error', async ({ agent }) => {
+      const head = agent.session.surface.nodes[0]!
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'durable specialized recovery' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }), {
+        surfaceOp: { op: 'replace', start: head, end: head },
+        sourceEventSeqs: [head],
+      })
+      return undefined
+    })
+    const agent = context.agentLoop.create(SessionId('retry-normal-durable-downstream'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.surface.replaceGeneration).toBe(1)
+    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+  })
+
+  it('does not schedule normal fallback after downstream cancellation', async () => {
+    const adapter = new ScriptedAdapter([new LlmError('large request timed out', 'TIMEOUT')])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig() }))
+    context.on('agent/request-error', ({ agent }) => {
+      agent.cancel({ kind: 'user' })
+      return Promise.resolve(undefined)
+    })
+    const agent = context.agentLoop.create(SessionId('retry-normal-downstream-cancel'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.events.at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'aborted' } },
     })
   })
 
@@ -773,7 +892,17 @@ describe('provider-routed retry policy', () => {
       textResponse('specialized recovery won'),
     ])
     ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig() }))
-    context.on('agent/request-error', async () => ({ kind: 'retry' }))
+    context.on('agent/request-error', async ({ agent }) => {
+      const head = agent.session.surface.nodes[0]!
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'durable specialized recovery' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }), {
+        surfaceOp: { op: 'replace', start: head, end: head },
+        sourceEventSeqs: [head],
+      })
+      return { kind: 'retry' }
+    })
     const agent = context.agentLoop.create(SessionId('retry-always-composition'), {
       provider: 'mock',
       model: 'mock',
@@ -784,7 +913,45 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.surface.replaceGeneration).toBe(1)
     expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+  })
+
+  it('does not override downstream durable recovery progress with always fallback', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('requires specialized recovery', 'AUTH'),
+      textResponse('must not run'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
+      initialDelayMs: 1,
+      maxDelayMs: 1,
+    }) }))
+    const warnings: string[] = []
+    context.logger.warn = ((message: string) => void warnings.push(message)) as typeof context.logger.warn
+    context.on('agent/request-error', async ({ agent }) => {
+      const head = agent.session.surface.nodes[0]!
+      agent.session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'durable specialized recovery' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }), {
+        surfaceOp: { op: 'replace', start: head, end: head },
+        sourceEventSeqs: [head],
+      })
+      throw new Error('downstream recovery failed after replacement')
+    })
+    const agent = context.agentLoop.create(SessionId('retry-always-durable-downstream'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.surface.replaceGeneration).toBe(1)
+    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(warnings).toContainEqual(expect.stringContaining('ignored a downstream recovery failure'))
   })
 
   it.each([

@@ -59,6 +59,12 @@ export const DEFAULT_CONTEXT_WINDOW = 262_144
 /** Output capability assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_MAX_TOKENS = 32_768
 
+/** Catalog routes whose quota-worded 429 responses are transient token-plan throttling. */
+const QUOTA_WORDED_429_RATE_LIMIT_PROVIDERS = new Set([
+  'qwen-token-plan',
+  'qwen-token-plan-cn',
+])
+
 /**
  * Modalities assumed for a model neither configuration nor the catalog
  * declares. Text is the floor every supported protocol certainly carries, so
@@ -157,6 +163,12 @@ export interface PiAiProviderProfile {
   /** Maximum provider idle time while one stream read is outstanding. */
   streamIdleTimeoutMs?: number
   /**
+   * Treat terminal-quota wording on an explicit HTTP 429 as transient
+   * throttling. Defaults to true for the built-in qwen token-plan routes and
+   * false for every other route; custom Model Studio gateways opt in here.
+   */
+  quotaWorded429IsRateLimit?: boolean
+  /**
    * Maximum base64-encoded image payload per request. When a request's
    * accumulated images exceed it, the oldest images are replaced by text
    * placeholders until the request fits, so a long session keeps completing
@@ -169,7 +181,10 @@ export interface PiAiProviderProfile {
 
 /** Validated profile with its route stamped and every adapter-owned default resolved. */
 export interface ResolvedPiAiProviderProfile
-  extends Omit<PiAiProviderProfile, 'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName'> {
+  extends Omit<
+    PiAiProviderProfile,
+    'apiKeyEnv' | 'retryPolicy' | 'models' | 'displayName' | 'quotaWorded429IsRateLimit'
+  > {
   /** Harness route key and the `Models` collection key (the configuration dict key). */
   provider: string
   /** Resolved display name for selectors and configuration surfaces. */
@@ -178,6 +193,8 @@ export interface ResolvedPiAiProviderProfile
   apiKeyEnv?: CredentialRef
   /** Positive finite provider-idle interval after defaulting. */
   streamIdleTimeoutMs: number
+  /** Whether this route treats quota-worded HTTP 429 responses as transient throttling. */
+  quotaWorded429IsRateLimit: boolean
   /** Positive request-level base64 image payload bound after defaulting. */
   maxRequestImageBytes: number
   /** Immutable retry policy captured with this provider route. */
@@ -311,6 +328,7 @@ const profile = z.object({
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  quotaWorded429IsRateLimit: z.boolean(),
   maxRequestImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_REQUEST_IMAGE_BYTES),
   retryPolicy: RetryPolicySchema,
 })
@@ -391,6 +409,8 @@ export function resolveProfiles(
     if (!Number.isInteger(maxRequestImageBytes) || maxRequestImageBytes <= 0) {
       throw new Error(`llm-pi-ai: provider "${provider}" maxRequestImageBytes must be a positive integer`)
     }
+    const quotaWorded429IsRateLimit = source.quotaWorded429IsRateLimit
+      ?? QUOTA_WORDED_429_RATE_LIMIT_PROVIDERS.has(provider)
     // Detached from the configuration object because pi-ai types `Model.input`
     // mutable. The schema's explicit default covers an absent key, so an empty
     // list here is always one someone typed — and unlike an entry's, nothing
@@ -415,13 +435,21 @@ export function resolveProfiles(
       defaultContextWindow: source.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
       defaultMaxTokens: source.defaultMaxTokens ?? DEFAULT_MAX_TOKENS,
     })
-    const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
+    const {
+      apiKeyEnv,
+      retryPolicy,
+      models: _models,
+      displayName: _displayName,
+      quotaWorded429IsRateLimit: _quotaWorded429IsRateLimit,
+      ...rest
+    } = source
     resolved.set(provider, {
       ...rest,
       provider,
       displayName,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
       streamIdleTimeoutMs,
+      quotaWorded429IsRateLimit,
       maxRequestImageBytes,
       retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },

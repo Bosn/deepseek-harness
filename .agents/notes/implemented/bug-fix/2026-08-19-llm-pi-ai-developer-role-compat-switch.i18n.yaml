@@ -1,6 +1,0 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-19-llm-pi-ai-developer-role-compat-switch.md
-2026-08-19-llm-pi-ai-developer-role-compat-switch.md: 809ef324b0164cc2cefa349d450c55800e683062
-2026-08-19-llm-pi-ai-developer-role-compat-switch.zh.md: a61a22caecab792a4dc120cc7de3a8e92268fee6

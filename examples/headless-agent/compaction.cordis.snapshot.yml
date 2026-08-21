@@ -1,4 +1,4 @@
-# Keyless context-overflow composition for the assembled compaction snapshot.
+# Keyless request-size recovery composition for the assembled compaction snapshot.
 - id: base
   name: '@deepseek-ai/cordis-plugin-include'
   config:

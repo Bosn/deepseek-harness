@@ -756,11 +756,25 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: rate limit' })))
       .toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: insufficient_quota' })))
-      .toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
+      .toMatchObject({ kind: 'error', failure: { code: 'QUOTA', status: 429 } })
+    expect(mapStopReason(
+      assistant({ stopReason: 'error', errorMessage: 'HTTP 429: insufficient_quota' }),
+      undefined,
+      undefined,
+      true,
+    )).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429 } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 402: insufficient_quota' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'QUOTA', status: 402 } })
+    expect(mapStopReason(
+      assistant({ stopReason: 'error', errorMessage: 'HTTP 402: insufficient_quota' }),
+      undefined,
+      undefined,
+      true,
+    )).toMatchObject({ kind: 'error', failure: { code: 'QUOTA', status: 402 } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'OpenAI API error (429): You exceeded your current quota, please check your plan and billing details.',
-    }))).toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
+    }))).toMatchObject({ kind: 'error', failure: { code: 'QUOTA', status: 429 } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 500: backend down' })))
       .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'provider timed out' })))
@@ -780,15 +794,59 @@ describe('mapStopReason / mapUsage', () => {
       errorMessage: 'HTTP 400: invalid input: temperature exceeds maximum allowed value',
     }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 413: Payload Too Large' })))
-      .toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+      .toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, status: 413 } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'Failed to buffer the request body: length limit exceeded',
-    }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '413: {"message":"Request body size exceeds maximum allowed sized","type":"RequestTooLarge","code":"RequestTooLarge"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'vector length limit exceeded',
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+  })
+
+  it.each([
+    '413 Content Too Large: gateway rejected request',
+    '413 Payload Too Large: gateway rejected request',
+  ])('retains pi-messages request metadata for %j', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), undefined, 12_345)).toEqual({
+      kind: 'error',
+      failure: {
+        message: errorMessage,
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+        status: 413,
+        requestBytesEstimate: 12_345,
+      },
+    })
+  })
+
+  it('retains pi-messages rate-limit metadata', () => {
+    const errorMessage = '429 Too Many Requests: throttled'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), undefined, 12_345)).toEqual({
+      kind: 'error',
+      failure: {
+        message: errorMessage,
+        code: 'RATE_LIMIT',
+        status: 429,
+        requestBytesEstimate: 12_345,
+      },
+    })
+  })
+
+  it('does not treat an embedded number as an HTTP status', () => {
+    const errorMessage = 'provider diagnostic 429 Too Many Requests: throttled'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), undefined, 12_345)).toEqual({
+      kind: 'error',
+      failure: {
+        message: errorMessage,
+        code: 'RATE_LIMIT',
+        requestBytesEstimate: 12_345,
+      },
+    })
   })
 
   it.each([
@@ -832,7 +890,6 @@ describe('mapStopReason / mapUsage', () => {
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
-
     const truncated = assistant({ stopReason: 'length', usage: usage(80, 0, 19) })
     expect(mapStopReason(truncated)).toEqual({ kind: 'max-tokens' })
     expect(mapStopReason(truncated, 100)).toMatchObject({

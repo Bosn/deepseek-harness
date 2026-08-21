@@ -13,10 +13,15 @@
  * way down: switching models mid-reply takes effect on the next step, never
  * inside the one in flight.
  *
- * Credentials stay outside that collection. The harness resolves a route's key
- * through its own seam and passes it as the request's `apiKey` option, which
- * pi-ai treats as the highest-priority auth override — so `Models` never holds
- * a credential store and the harness keeps its fail-loud reference semantics.
+ * A route naming a credential reference still resolves it through the harness
+ * seam and passes it as the request's `apiKey` option, which pi-ai treats as
+ * the highest-priority auth override — that is what keeps the fail-loud
+ * reference semantics. Everything that override does not cover reaches pi-ai
+ * through the collection's own auth: the credential store holds the records a
+ * login wrote and a refresh rotates, and the auth context answers the ambient
+ * questions a provider asks while resolving. Both are stable across snapshots,
+ * so a configuration change rebuilds the collection without forgetting who is
+ * signed in.
  *
  * @module dsh-llm-pi-ai/adapter
  */
@@ -24,10 +29,13 @@
 import { createModels, getSupportedThinkingLevels } from '@earendil-works/pi-ai'
 import type {
   Api,
+  AuthContext,
+  CredentialStore,
   Model,
   Models,
   ModelThinkingLevel,
   MutableModels,
+  Context as PiContext,
   SimpleStreamOptions,
   ThinkingLevel,
 } from '@earendil-works/pi-ai'
@@ -61,6 +69,18 @@ interface PiAiSnapshot {
   models: Models
 }
 
+/** Estimate the UTF-8 bytes retained after pi-ai request conversion and image offload. */
+function estimateConvertedRequestBytes(context: PiContext): number {
+  return new TextEncoder().encode(JSON.stringify(context)).byteLength
+}
+
+/** Omit an unavailable conversion estimate from a thrown failure snapshot. */
+function requestEstimateFact(
+  requestBytesEstimate: number | undefined,
+): { requestBytesEstimate?: number } {
+  return requestBytesEstimate === undefined ? {} : { requestBytesEstimate }
+}
+
 /** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
 export interface PiAiAdapterOptions {
   /** Current validated profiles by provider route; called once per operation. */
@@ -74,6 +94,15 @@ export interface PiAiAdapterOptions {
    * `MISSING_CREDENTIAL` rather than falling back.
    */
   resolveApiKey: (provider: string, profile: ResolvedPiAiProviderProfile) => Promise<string | undefined>
+  /**
+   * How every collection this adapter builds resolves auth the request-level
+   * `apiKey` override does not cover. Required rather than optional: a
+   * collection built without them gets pi-ai's in-memory default store, which
+   * is empty at every boot and discarded on every configuration change, so a
+   * route whose only method is a login would report itself unconfigured on
+   * every request no matter how often the human signed in.
+   */
+  auth: PiAiAuthInjection
   /** Resolve the optional durable attachment service at request time. */
   resolveAttachments?: () => AttachmentStore | undefined
   /**
@@ -81,6 +110,14 @@ export interface PiAiAdapterOptions {
    * conversion because its stored replay state is unusable by this build.
    */
   onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
+}
+
+/** The two auth injectables a pi-ai collection is built with. */
+export interface PiAiAuthInjection {
+  /** Durable storage for credentials pi-ai itself writes: logins, and the refreshes it runs under its own lock. */
+  credentials: CredentialStore
+  /** Ambient lookups a provider performs while resolving its own auth. */
+  authContext: AuthContext
 }
 
 /** Copy profile stream knobs into pi-ai's common option vocabulary. */
@@ -204,7 +241,7 @@ export class PiAiAdapter extends LlmAdapter {
   private current(): PiAiSnapshot {
     const profiles = this.config.profiles()
     if (this.snapshot?.profiles === profiles) return this.snapshot
-    const models: MutableModels = createModels()
+    const models: MutableModels = createModels(this.config.auth)
     for (const profile of profiles.values()) models.setProvider(profile.piProvider)
     this.snapshot = { profiles, models }
     return this.snapshot
@@ -302,6 +339,7 @@ export class PiAiAdapter extends LlmAdapter {
       : AbortSignal.any([options.signal, consumer.signal])
     const streamIdleTimeoutMs = profile.streamIdleTimeoutMs
     using watchdog = idleWatchdog(upstream, streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
+    let requestBytesEstimate: number | undefined
 
     try {
       const containsImage = options.messages.some(message => contentHasImage(message.content))
@@ -318,6 +356,7 @@ export class PiAiAdapter extends LlmAdapter {
       const context = attachments === undefined
         ? toPiContext(options, undefined, onReplayDegrade)
         : await toPiContext(options, attachments, onReplayDegrade, profile.maxRequestImageBytes)
+      requestBytesEstimate = estimateConvertedRequestBytes(context)
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
@@ -328,7 +367,12 @@ export class PiAiAdapter extends LlmAdapter {
         // Harness-owned and therefore win collisions.
         headers: requestHeaders(profile.headers),
       })
-      const iterator = toStreamChunks(events, model.contextWindow)[Symbol.asyncIterator]()
+      const iterator = toStreamChunks(
+        events,
+        model.contextWindow,
+        requestBytesEstimate,
+        profile.quotaWorded429IsRateLimit,
+      )[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {
@@ -353,10 +397,16 @@ export class PiAiAdapter extends LlmAdapter {
       }
     } catch (error: unknown) {
       if (timeoutOf(watchdog.signal, 'LLM_STREAM_IDLE_TIMEOUT') !== undefined) {
-        throw new LlmError(`pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`, 'TIMEOUT', { cause: error })
+        throw new LlmError(`pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`, 'TIMEOUT', {
+          cause: error,
+          ...requestEstimateFact(requestBytesEstimate),
+        })
       }
       if (options.signal?.aborted) {
-        throw new LlmError('pi-ai request aborted by caller', 'ABORTED', { cause: error })
+        throw new LlmError('pi-ai request aborted by caller', 'ABORTED', {
+          cause: error,
+          ...requestEstimateFact(requestBytesEstimate),
+        })
       }
       throw error
     } finally {

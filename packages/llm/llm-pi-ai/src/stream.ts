@@ -9,7 +9,7 @@
  */
 
 import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { FinishReason, LlmFailure, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
@@ -36,15 +36,34 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
-function classifyPiAiError(message: string): string {
-  if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
-  if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
-  if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
-  // A rejected request body (gateway or provider size cap): resending the
-  // same request cannot succeed, so it is invalid, not transient.
-  if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
-  if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
-  if (/\b5\d\d\b/.test(message)) return 'SERVER'
+function statusFromMessage(message: string): number | undefined {
+  const match = /\bHTTP\s*([1-5]\d{2})\b/i.exec(message)
+    ?? /\bAPI error\s*\(([1-5]\d{2})\)/i.exec(message)
+    ?? /^\s*([1-5]\d{2})(?:[ \t]+[^:\r\n]+)?[ \t]*:/.exec(message)
+  if (match?.[1] === undefined) return undefined
+  return Number(match[1])
+}
+
+function classifyPiAiError(
+  message: string,
+  status: number | undefined,
+  quotaWorded429IsRateLimit: boolean,
+): string {
+  if (status === 401 || status === 403 || /\b(?:401|403)\b/.test(message)) return 'AUTH'
+  const quotaExceeded = isQuotaExceededError(message)
+  // Qwen token-plan gateways use terminal-quota wording for transient
+  // token throttling. Other routes preserve that wording as terminal QUOTA,
+  // including OpenAI's HTTP 429 insufficient_quota response.
+  if (quotaExceeded && !(status === 429 && quotaWorded429IsRateLimit)) return QUOTA_EXCEEDED_CODE
+  if (status === 429 || /\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
+  // Request-size rejection needs a rebuilt envelope, so it enters compaction
+  // recovery instead of retrying the same bytes.
+  if (status === 413
+    || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
+    return CONTEXT_WINDOW_EXCEEDED_CODE
+  }
+  if (status === 400 || /\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
+  if ((status !== undefined && status >= 500) || /\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'
   // A stream truncated before the provider's terminal event: each pi-ai provider
   // throws its own wording when the wire closes mid-response without a terminal
@@ -64,27 +83,54 @@ function classifyPiAiError(message: string): string {
   return 'PI_AI_ERROR'
 }
 
+/** Build one serializable failure while retaining the converted request estimate. */
+function failure(
+  message: string,
+  code: string,
+  requestBytesEstimate: number | undefined,
+  status?: number,
+): LlmFailure {
+  return {
+    message,
+    code,
+    ...status === undefined ? {} : { status },
+    ...requestBytesEstimate === undefined ? {} : { requestBytesEstimate },
+  }
+}
+
 /**
  * Map a terminal pi-ai event to the harness finish reason.
  * @param message - the assistant message carried by the `done` or `error` event.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
+ * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
  *   `EMPTY_RESPONSE` error.
  */
-export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
+export function mapStopReason(
+  message: AssistantMessage,
+  contextWindow?: number,
+  requestBytesEstimate?: number,
+  quotaWorded429IsRateLimit = false,
+): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
   const harnessOverflow = message.stopReason === 'error'
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
   if (piAiOverflow || harnessOverflow) {
+    const status = message.stopReason === 'error' && message.errorMessage !== undefined
+      ? statusFromMessage(message.errorMessage)
+      : undefined
     return {
       kind: 'error',
-      failure: {
-        message: message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}"`,
-        code: CONTEXT_WINDOW_EXCEEDED_CODE,
-      },
+      failure: failure(
+        message.errorMessage ?? `pi-ai detected context overflow for model "${message.model}"`,
+        CONTEXT_WINDOW_EXCEEDED_CODE,
+        requestBytesEstimate,
+        status,
+      ),
     }
   }
 
@@ -95,10 +141,11 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
       if (message.content.length === 0) {
         return {
           kind: 'error',
-          failure: {
-            message: `model "${message.model}" returned a completed response with no content`,
-            code: EMPTY_RESPONSE_CODE,
-          },
+          failure: failure(
+            `model "${message.model}" returned a completed response with no content`,
+            EMPTY_RESPONSE_CODE,
+            requestBytesEstimate,
+          ),
         }
       }
       return { kind: 'stop' }
@@ -106,11 +153,24 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     case 'toolUse': return { kind: 'tool-calls' }
     case 'aborted': return {
       kind: 'aborted',
-      failure: { message: message.errorMessage ?? 'pi-ai stream aborted', code: 'ABORTED' },
+      failure: failure(
+        message.errorMessage ?? 'pi-ai stream aborted',
+        'ABORTED',
+        requestBytesEstimate,
+      ),
     }
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
+      const status = statusFromMessage(text)
+      return {
+        kind: 'error',
+        failure: failure(
+          text,
+          classifyPiAiError(text, status, quotaWorded429IsRateLimit),
+          requestBytesEstimate,
+          status,
+        ),
+      }
     }
   }
 }
@@ -121,12 +181,16 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
  * `finish` chunks (the harness protocol's other error-delivery style).
  * @param events - one assistant turn's pi-ai event stream.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
+ * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */
 export async function* toStreamChunks(
   events: AsyncIterable<AssistantMessageEvent>,
   contextWindow?: number,
+  requestBytesEstimate?: number,
+  quotaWorded429IsRateLimit = false,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -192,7 +256,12 @@ export async function* toStreamChunks(
         yield { type: 'usage', usage: mapUsage(event.message.usage) }
         yield {
           type: 'finish',
-          reason: mapStopReason(event.message, contextWindow),
+          reason: mapStopReason(
+            event.message,
+            contextWindow,
+            requestBytesEstimate,
+            quotaWorded429IsRateLimit,
+          ),
           replayState: toPiReplayState(event.message),
         }
         return
@@ -200,7 +269,10 @@ export async function* toStreamChunks(
         // In-stream error delivery (pi-ai's style) → error finish chunk
         // (the harness's other sanctioned error path besides throwing).
         yield { type: 'usage', usage: mapUsage(event.error.usage) }
-        yield { type: 'finish', reason: mapStopReason(event.error, contextWindow) }
+        yield {
+          type: 'finish',
+          reason: mapStopReason(event.error, contextWindow, requestBytesEstimate, quotaWorded429IsRateLimit),
+        }
         return
       // no default: AssistantMessageEvent is pi-ai's closed union; a new
       // event type should fail compilation here via tsc's exhaustiveness

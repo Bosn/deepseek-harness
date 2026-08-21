@@ -22,15 +22,29 @@ pi-ai 依据提供方 id 与 baseURL 决定每个请求的形状——系统提�
 
 三类 `compat` 键在其被写下之处遭到拒绝而非丢弃：没有任何协议声明的键、被门禁扣留的键，以及完全没有写值的键。该检查在任何协议解析之前遍历全部键，因此即便路由上的模型永远不会走到那个本会接受它的协议，笔误同样失败。它刻意读取原始键：被扣留或未声明的名字不在 schema 中，所以 schemastery 不可能物化它，写下它的必然是人。无值那一类是必须失败而不能忽略的：schemastery 会把 YAML 裸键放行为 null，照单收下就会用 null 写覆盖已安装 catalog 的值，随后 pi-ai 的 `??` 转而去够它的 baseURL 检测，catalog 这一层被整个跳过。随后再单独过滤携带值的字段，因为 schemastery 会把缺省的 dict 物化成 `{}`，于是无论有没有人写过，`chatTemplateKwargs` 都出现在每一个解析过的 profile 上。
 
+对于手工声明路由，按字段计算时模型级取值优先于路由级取值，两层均未设置的字段仍交由 pi-ai 按 baseURL 推导的检测。模型仍使用已安装 catalog 条目的协议时，已配置值合并到条目的 compat 之上，不会替换无关的厂商差异。显式 schema 也直接供 Models 设置表单渲染，因此所有开放的开关都无需客户端专用表单代码。
+
 ## Where a refusal lands
 
 所有检查都在 `resolveProfiles` 中运行，而请求路径不会重新进入它：适配器按原始快照的标识 memoize，且 `apply` 会主动预先解析一次。因此一次拒绝会以 `settings-rejected` 的形式在落盘之前抵达 `settings.mutate`，以插件挂载失败的形式抵达 `cordis.yml` 的 `config:` 块，以 `settings.register` 启动失败的形式抵达已存的 section。
 
 对 settings 文件的外部编辑是唯一无法报告的路径：提供方监听器调用 `publish()`，它捕获失败的 section、记录 `settings: keeping last good "%s"`，并让该 namespace 继续服务其先前的值。这是 settings seam 对每一种 schema 与校验器失败的既有行为，并非本次开放引入，弥合它属于那个 seam 而不属于此处。对 compat 而言改变的是失败模型而非报告方式：一个从前永远静默无效的键，如今会拦下下一次启动。
 
+## Testing
+
+`tests/catalog.spec.ts` 将已存储的 `supportsDeveloperRole: false` 从组合 settings 路径携带到序列化后的 `system` 消息，并覆盖路由级／模型级优先级、无关 catalog compat 的保留、混合协议过滤、协议特定拒绝，以及无值或未知键。编译期精确性证明与 `verify-config-catalog` 覆盖完整的开放字段集及其源自上游的值类型，而不是独立钉住某一个布尔开关。
+
 ## Alternatives considered
 
 **只补 `supportsDeveloperRole`。** 它修好了报告中的那个网关，却放任 `maxTokensField`——它塑造每一个请求，而不只是推理模型的请求——继续拖垮一整类端点，而且下一个上游新增字段依然可以静默落后。
+
+**把受影响模型声明为非推理模型。** `reasoningEfforts: false` 通过移除模型的推理能力来避开 developer 角色分支，但也会移除部署方打算保留的思考级别选择器与 `reasoning_effort` 派发。
+
+**要求使用 pi-ai 已安装 catalog 路由。** `qwen-token-plan` 等具名路由携带其厂商 compat，但自带 baseURL、模型 id 或聚合层的网关正是手工声明路由所表达的对象，无法继承这些确切条目。
+
+**等待 pi-ai 的 URL 检测对所有端点完成分类。** 上游分类可以覆盖具名公开端点，但无法描述任意私有网关，因此配置仍须声明它们的协议行为。
+
+**伪造 pi-ai 能识别的 baseURL。** 该 URL 会错误描述请求目标，并使配置耦合到可能独立变化的检测启发式。
 
 **开放全部上游字段。** pi-ai 自己的 custom-provider 文档收敛到一个小得多的集合，其旗舰示例只点名六个，其余都是其 catalog 已经设定好的厂商绑定开关。在手工声明路由上暴露 `zaiToolStream` 或 `vercelGatewayRouting`，等于提供一个「正确用法是别做手工声明路由」的旋钮。
 
@@ -44,7 +58,7 @@ pi-ai 依据提供方 id 与 baseURL 决定每个请求的形状——系统提�
 
 ## Consequences
 
-- 拒绝 `developer` 角色、`max_completion_tokens`、`store`、`stream_options` 或 `strict` 的 OpenAI 兼容网关，如今属于配置问题而非无法接入的提供方；拒绝 `temperature` 或工具 `cache_control` 的 Anthropic 兼容网关同理。
+- 拒绝 `developer` 角色、`max_completion_tokens`、`store`、`stream_options` 或 `strict` 的 OpenAI 兼容网关属于配置问题而非无法接入的提供方；拒绝 `temperature` 或工具 `cache_control` 的 Anthropic 兼容网关同理，而纠正系统提示词角色不会禁用推理选择或派发。
 - pi-ai 升级新增 compat 字段会使构建失败，直到有人为它做出分类——`chatTemplateKwargs` 与那两个 `chat-template` 格式正是因此不再是一项长期例外。
 - 未知 compat 键并入了其余所有配置错误的失败模型。相对此前静默丢弃的改善程度受 settings seam 限制：外部文件编辑仍会保留其上一个有效值并告警，因此运维拿到的信号是一次重启，而不是那次写入。
 - **搁置而非解决：** 改指 `api` 且完全未配置 compat 的路由，会经模型字面量的 `...base` 展开保留已安装条目的 `compat`，且形状属于**另一个**协议。多个 compat 类型共有的字段（`supportsLongCacheRetention`、`sendSessionAffinityHeaders`）因而会跨协议串味。它早于本面存在——其所依附的提前返回本就在那里——留给独立的一次改动处理。

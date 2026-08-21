@@ -14,6 +14,7 @@ describe('provider retry policy', () => {
       mode: 'normal',
       maxRetries: 5,
       retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+      maxRetriesByCode: { TIMEOUT: 1 },
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
@@ -22,16 +23,19 @@ describe('provider retry policy', () => {
     expect(Object.isFrozen(policy)).toBe(true)
     if (policy.mode !== 'normal') throw new Error('expected normal policy')
     expect(Object.isFrozen(policy.retryableCodes)).toBe(true)
+    expect(Object.isFrozen(policy.maxRetriesByCode)).toBe(true)
     expect(Object.isFrozen(policy.rateLimitDelaysMs)).toBe(true)
   })
 
   it('resolves and detaches a configured normal policy', () => {
     const retryableCodes = ['BUSY']
+    const maxRetriesByCode = { BUSY: 2 }
     const rateLimitDelaysMs = [30_000, 90_000]
     const config: RetryPolicyConfig = {
       mode: 'normal',
       maxRetries: 4,
       retryableCodes,
+      maxRetriesByCode,
       backoff: {
         initialDelayMs: 25,
         maxDelayMs: 100,
@@ -42,12 +46,14 @@ describe('provider retry policy', () => {
 
     const policy = resolveRetryPolicy(config, 'provider.retryPolicy')
     retryableCodes.push('LATE')
+    maxRetriesByCode.BUSY = 3
     rateLimitDelaysMs.push(1)
 
     expect(policy).toEqual({
       mode: 'normal',
       maxRetries: 4,
       retryableCodes: ['BUSY'],
+      maxRetriesByCode: { BUSY: 2 },
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0,
@@ -71,6 +77,7 @@ describe('provider retry policy', () => {
       mode: 'always',
       maxRetries: 5,
       retryableCodes: ['SERVER'],
+      maxRetriesByCode: { SERVER: 2 },
     } as unknown as RetryPolicyConfig
 
     expect(resolveRetryPolicy(layered, 'provider.retryPolicy')).toEqual({
@@ -105,6 +112,10 @@ describe('provider retry policy', () => {
     [{ mode: 'normal', retryableCodes: ['SERVER', 'SERVER'] }, /duplicates/],
     [{ mode: 'normal', retryableCodes: [''] }, /non-empty strings/],
     [{ mode: 'normal', retryableCodes: [429] }, /non-empty strings/],
+    [{ mode: 'normal', maxRetriesByCode: { TIMEOUT: -1 } }, /maxRetriesByCode\.TIMEOUT/],
+    [{ mode: 'normal', maxRetriesByCode: { TIMEOUT: 1.5 } }, /maxRetriesByCode\.TIMEOUT/],
+    [{ mode: 'normal', maxRetriesByCode: { TIMEOUT: Number.MAX_SAFE_INTEGER + 1 } }, /maxRetriesByCode\.TIMEOUT/],
+    [{ mode: 'normal', maxRetriesByCode: { '': 1 } }, /keys must be non-empty strings/],
     [{ mode: 'normal', maxRetires: 1 }, /unknown key "maxRetires"/],
     [{ mode: 'always', backoff: { initialDelay: 1 } }, /unknown key "initialDelay"/],
     [{ mode: 'normal', backoff: { rateLimitDelaysMs: [0] } }, /rateLimitDelaysMs/],

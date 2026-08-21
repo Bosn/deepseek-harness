@@ -71,6 +71,21 @@ const EXCEEDS_MODEL_CONTEXT = new RegExp(
 )
 
 /**
+ * Gateway/provider request-size-cap wording: HTTP 413 family errors whose
+ * stated cause is the request's own wire size rather than a semantic context
+ * window. The harness can never resend the same bytes successfully, but it CAN
+ * shrink the request (force compaction + image offload) and retry the rebuilt
+ * envelope, so this wording routes to the context-overflow recovery path.
+ */
+const REQUEST_SIZE_CAP_OVERFLOW = new RegExp(
+  String.raw`\b(?:RequestTooLarge|PayloadTooLarge)\b`
+  + String.raw`|\b(?:request(?:\s+body)?|payload)\s+size\s+(?:exceeds?|exceeded)\b`
+  + String.raw`|\b(?:request\s+body|payload)\s+too\s+(?:large|big)\b`
+  + String.raw`|\brequest\s+too\s+large\b`,
+  'i',
+)
+
+/**
  * Recognize the context-overflow wording used by OpenAI-compatible providers
  * and library adapters. Adapters pass all available provider code, type, and
  * message text so both thrown and in-band delivery styles share one classifier.
@@ -83,6 +98,7 @@ export function isContextWindowExceededError(detail: string): boolean {
     || TOO_LARGE_FOR_CONTEXT.test(detail)
     || /\b(?:input|prompt|request)\s+(?:is\s+)?too\s+(?:long|large)\s+for\s+(?:this|the)\s+model\b/i.test(detail)
     || EXCEEDS_MODEL_CONTEXT.test(detail)
+    || REQUEST_SIZE_CAP_OVERFLOW.test(detail)
 }
 
 /**

@@ -5,6 +5,7 @@ import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   normalizeSessionLog,
+  normalizeSessionSnapshot,
   normalizeStdout,
   refreshFixtureReplacements,
   scrubRequestHeaders,
@@ -68,6 +69,28 @@ interface JsonObject {
 interface PersistedLog {
   readonly content: string
   readonly header: JsonObject
+}
+
+/**
+ * Remove persistence envelopes before committing a refreshed replay fixture.
+ * @param rawLog - persisted or already-projected session JSONL.
+ * @returns projected session JSONL with its header line unchanged.
+ */
+function projectSessionFixture(rawLog: string): string {
+  let recordIndex = 0
+  return rawLog.split(/\r?\n/).map((line) => {
+    if (line.trim().length === 0) return line
+    const record = JSON.parse(line) as Record<string, unknown>
+    if (recordIndex++ === 0) {
+      if (record.type !== 'session') throw new Error('session fixture must start with a session header')
+      return line
+    }
+    delete record.seq
+    delete record.time
+    delete record.seq0
+    delete record.time0
+    return JSON.stringify(record)
+  }).join('\n')
 }
 
 interface DeepSeekDefaultsServer {
@@ -241,9 +264,9 @@ describe('headless stream-json snapshots', () => {
         const actual = logs[0]
         if (actual === undefined) throw new Error('the headless profile did not persist its session')
         const context = contextFromLogs([actual.content])
-        const session = scrubRequestHeaders(normalizeSessionLog(actual.content, context))
+        const session = normalizeSessionSnapshot(actual.content, context)
         if (refreshing) await writeFile(headlessSessionExpected, session)
-        expect(session).toBe(await readFile(headlessSessionExpected, 'utf8'))
+        await expect(session).toMatchFileSnapshot(headlessSessionExpected)
         expect(session).toContain(task)
         expect(session).toContain('CLI tool round trip complete: CLI_TOOL_ROUND_TRIP')
       },
@@ -315,7 +338,7 @@ describe('headless stream-json snapshots', () => {
         expect(retries[0]?.data).toMatchObject({
           provider: 'deepseek-official',
           mode: 'normal',
-          policyKey: '["normal",1,["RATE_LIMIT"],1,1,0,[1]]',
+          policyKey: '["normal",1,["RATE_LIMIT"],[["TIMEOUT",1]],1,1,0,[1]]',
           retry: 1,
           maxRetries: 1,
           delayMs: 1,
@@ -330,7 +353,7 @@ describe('headless stream-json snapshots', () => {
     expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
-  it('recovers from context overflow through an assembled compaction', async () => {
+  it('recovers from HTTP 413 request-size rejection through an assembled compaction', async () => {
     const prompt = await scenarioPrompt(compactionScenarioDir, 'compaction-recovery')
     let expectedSession = await readFile(compactionSessionFixture, 'utf8')
     let runCwd = ''
@@ -355,6 +378,22 @@ describe('headless stream-json snapshots', () => {
         if (actual === undefined) throw new Error('compaction snapshot did not persist its session')
         const records = parseJsonl(actual.content)
         const types = records.map(record => record.type)
+        const failedChunk = records.find((record) => {
+          if (record.type !== 'assistant/chunk') return false
+          const data = record.data as JsonObject | undefined
+          const chunk = data?.chunk as JsonObject | undefined
+          const reason = chunk?.reason as JsonObject | undefined
+          const failure = reason?.failure as JsonObject | undefined
+          return failure?.status === 413
+        })
+        expect(failedChunk).toBeDefined()
+        expect(failedChunk).toMatchObject({
+          data: {
+            chunk: {
+              reason: { failure: { requestBytesEstimate: 32_768 } },
+            },
+          },
+        })
         expect(types.filter(type => type === 'compaction/start')).toHaveLength(1)
         expect(types.filter(type => type === 'compaction/summary')).toHaveLength(1)
         expect(types.filter(type => type === 'compaction/end')).toHaveLength(1)
@@ -383,14 +422,14 @@ describe('headless stream-json snapshots', () => {
             content: actual.content,
           }
           const replacements = refreshFixtureReplacements([harvested], [expectedSession])
-          expectedSession = tokenizeSessionFixtureCwd(
+          expectedSession = projectSessionFixture(tokenizeSessionFixtureCwd(
             stabilizeRefreshLog(actual.content, expectedSession, replacements, actualContext),
-          )
+          ))
           await writeFile(compactionSessionFixture, expectedSession)
         }
         const expectedContext = contextFromLogs([expectedSession])
-        expect(scrubRequestHeaders(normalizeSessionLog(actual.content, actualContext)))
-          .toBe(scrubRequestHeaders(normalizeSessionLog(expectedSession, expectedContext)))
+        expect(normalizeSessionSnapshot(actual.content, actualContext))
+          .toBe(normalizeSessionSnapshot(expectedSession, expectedContext))
       },
     })
 
@@ -623,9 +662,9 @@ describe('headless stream-json snapshots', () => {
             if (existing === undefined || file === undefined) {
               throw new Error(`headless snapshot has no fixture for persisted log ${index}`)
             }
-            const stable = tokenizeSessionFixtureCwd(
+            const stable = projectSessionFixture(tokenizeSessionFixtureCwd(
               stabilizeRefreshLog(actual.content, existing, replacements, actualContext),
-            )
+            ))
             await writeFile(file, stable)
             return stable
           }))
@@ -634,8 +673,8 @@ describe('headless stream-json snapshots', () => {
         for (const [index, actual] of actualSessions.entries()) {
           const expected = expectedSessions[index]
           if (expected === undefined) throw new Error(`headless snapshot has no fixture for persisted log ${index}`)
-          expect(scrubRequestHeaders(normalizeSessionLog(actual.content, actualContext)))
-            .toBe(scrubRequestHeaders(normalizeSessionLog(expected, expectedContext)))
+          expect(normalizeSessionSnapshot(actual.content, actualContext))
+            .toBe(normalizeSessionSnapshot(expected, expectedContext))
         }
       },
     })
@@ -912,9 +951,9 @@ describe('headless stream-json snapshots', () => {
         expect(JSON.stringify(notices[0])).toContain('CHILD_RESULT')
 
         const context = contextFromLogs([parent.content, child.content])
-        const normalizedChild = scrubRequestHeaders(normalizeSessionLog(child.content, context))
+        const normalizedChild = normalizeSessionSnapshot(child.content, context)
         if (refreshing) await writeFile(childExpected, normalizedChild)
-        expect(normalizedChild).toBe(await readFile(childExpected, 'utf8'))
+        await expect(normalizedChild).toMatchFileSnapshot(childExpected)
         expect(normalizedChild).toContain('CHILD_RESULT')
         expect(normalizedChild).not.toContain('"name":"report"')
       },
@@ -966,14 +1005,14 @@ describe('headless stream-json snapshots', () => {
             content: actual.content,
           }
           const replacements = refreshFixtureReplacements([harvested], [expectedSession])
-          expectedSession = tokenizeSessionFixtureCwd(
+          expectedSession = projectSessionFixture(tokenizeSessionFixtureCwd(
             stabilizeRefreshLog(actual.content, expectedSession, replacements, actualContext),
-          )
+          ))
           await writeFile(ptySessionFixture, expectedSession)
         }
         const expectedContext = contextFromLogs([expectedSession])
-        expect(scrubRequestHeaders(normalizeSessionLog(actual.content, actualContext)))
-          .toBe(scrubRequestHeaders(normalizeSessionLog(expectedSession, expectedContext)))
+        expect(normalizeSessionSnapshot(actual.content, actualContext))
+          .toBe(normalizeSessionSnapshot(expectedSession, expectedContext))
       },
     })
 
