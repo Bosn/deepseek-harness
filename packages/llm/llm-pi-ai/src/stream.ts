@@ -39,7 +39,7 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 function statusFromMessage(message: string): number | undefined {
   const match = /\bHTTP\s*([1-5]\d{2})\b/i.exec(message)
     ?? /\bAPI error\s*\(([1-5]\d{2})\)/i.exec(message)
-    ?? /^\s*([1-5]\d{2})\s*:/.exec(message)
+    ?? /^\s*([1-5]\d{2})(?:[ \t]+[^:\r\n]+)?[ \t]*:/.exec(message)
   if (match?.[1] === undefined) return undefined
   return Number(match[1])
 }

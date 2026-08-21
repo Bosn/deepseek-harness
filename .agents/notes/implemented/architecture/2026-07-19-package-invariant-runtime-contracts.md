@@ -36,7 +36,7 @@ The current 103-package workspace has 21 executable companions and 82 justified 
 | `dsh-scope` | Scoped-event carrier presence and routed-subject consistency. |
 | `dsh-agent-loop` | Explicitly marked, frozen loop request reconstruction from the session event log. |
 | `dsh-llm` | Stream block grammar, delta type/index matching, single usage, closed blocks, and terminal finish. |
-| `dsh-llm-retry` | Durable retry records identify the open turn's latest closed step, remain unique per step, increase monotonically, and stay within retry and non-negative timer bounds. |
+| `dsh-llm-retry` | Durable retry records identify the current open turn and step, match the failed request's durable provider, remain unique per scheduled attempt, use the correct provider-policy retry number, and stay within mode-specific retry and timer bounds. |
 | `dsh-tools` | Monotonic pre/execute/post stages and immutable final execution/result snapshots. |
 | `dsh-system-prompt` | Authoritative assembly section, tool, and variable data constraints. |
 | `dsh-compaction` | Compaction start/summary/end pairing, range endpoints, token counts, and successful-summary presence. |

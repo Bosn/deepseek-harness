@@ -101,6 +101,33 @@ function requestBytes(session: Session): number {
 }
 
 /**
+ * Confirm that recovery still owns its original request boundary and no
+ * competing compaction transaction is active.
+ */
+function recoveryCanRetry(
+  session: Session,
+  turn: number,
+  step: number,
+): boolean {
+  const turnBoundary = session.events.findLast(event => (
+    event.type === 'turn/start' || event.type === 'turn/end'
+  ))
+  if (turnBoundary?.type !== 'turn/start') return false
+  if (turnBoundary.data.turn !== turn) return false
+  const stepBoundary = session.events.findLast(event => (
+    event.type === 'step/start' || event.type === 'step/end'
+  ))
+  if (stepBoundary?.type !== 'step/start') return false
+  if (`${stepBoundary.data.turn}:${stepBoundary.data.step}` !== `${turn}:${step}`) return false
+  try {
+    assertNoActiveCompaction(session, 'request recovery retry')
+  } catch (_activeCompaction) {
+    return false
+  }
+  return true
+}
+
+/**
  * Compaction policy's configured summarization-input cap combined with any
  * probe-learned request-byte budget: the summarizer request must fit the same
  * byte envelope as the conversation request it repairs.
@@ -238,7 +265,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     })
 
     ctx.on('agent/request-error', async (
-      { agent, failure, signal },
+      { agent, turn, step, failure, signal },
       next,
     ) => {
       if (signal.aborted) return next()
@@ -272,12 +299,17 @@ export class BasicCompactionEngine extends CompactionEngine {
       } catch (recoveryError: unknown) {
         const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
         const madeProgress = agent.session.surface.replaceGeneration > generation
+        const recoveryWasBusy = recoveryError instanceof ManualCompactionError
+          && recoveryError.code === 'busy'
         if (madeProgress) this.publishLearnedByteBudget(agent, target, learnedBudget)
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
         // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
-        if (!signal.aborted && madeProgress) {
+        if (!signal.aborted
+          && madeProgress
+          && !recoveryWasBusy
+          && recoveryCanRetry(agent.session, turn, step)) {
           ctx.logger.warn(
             `${label} compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
@@ -299,7 +331,8 @@ export class BasicCompactionEngine extends CompactionEngine {
       if (madeProgress) this.publishLearnedByteBudget(agent, target, learnedBudget)
       // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
       if (signal.aborted
-        || !madeProgress) return next()
+        || !madeProgress
+        || !recoveryCanRetry(agent.session, turn, step)) return next()
       if (result !== null) logResult(result, `${label} recovery`)
       this.recoveryRetries.set(agent, retries + 1)
       return { kind: 'retry' }
@@ -430,10 +463,10 @@ export class BasicCompactionEngine extends CompactionEngine {
     const byteLimit = effectiveByteLimit()
     const byteSummary = byteLimit === undefined
       ? ''
-      : `, ${requestBytes(agent.session)} estimated bytes >= ${byteLimit} byte budget`
+      : `, ${requestBytes(agent.session)} estimated bytes with byte budget ${byteLimit}`
     throw new Error(
       `compaction still above threshold after ${spec.compactionRetries + 1} compaction attempts `
-      + `(${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens}${byteSummary})`,
+      + `(${measurement.totalTokens} estimated tokens with token threshold ${spec.thresholdTokens}${byteSummary})`,
     )
   }
 

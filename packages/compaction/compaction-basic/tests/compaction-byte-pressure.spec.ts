@@ -1,6 +1,13 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, createMessage, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import {
+  createUserMessage,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  createMessage,
+  OFFLOADED_IMAGE_TEXT,
+  resolveRetryPolicy,
+} from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
@@ -12,6 +19,7 @@ import * as SessionInvariant from '@deepseek-ai/dsh-session/invariant'
 import * as AgentInvariant from '@deepseek-ai/dsh-agent/invariant'
 import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import TokenMeter, { estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
@@ -26,6 +34,7 @@ const REQUEST_TOO_LARGE_MESSAGE
 
 class RecordingCompactionEngine extends BasicCompactionEngine {
   readonly capturedInputs: SummarizationInput[] = []
+  beforeSummary: ((call: number) => Promise<void>) | undefined
 
   override async summarize(
     input: SummarizationInput,
@@ -33,6 +42,7 @@ class RecordingCompactionEngine extends BasicCompactionEngine {
     _signal?: AbortSignal,
   ): Promise<SummaryResult> {
     this.capturedInputs.push(input)
+    await this.beforeSummary?.(this.capturedInputs.length)
     return {
       summary: [{ type: 'text', text: 'CHECKPOINT SUMMARY' }],
       provider: 'mock',
@@ -129,11 +139,13 @@ async function harness(
     failureMessage?: string
     failureRequestBytesEstimate?: number
     compaction?: Partial<BasicCompactionConfig>
+    withRetry?: boolean
   },
 ): Promise<{ ctx: Context; compact: RecordingCompactionEngine; adapter: SizeGateAdapter }> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
   await mountInvariants(ctx)
+  if (options.withRetry === true) await ctx.plugin(LlmRetry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TokenMeter)
   const adapter = new SizeGateAdapter(
@@ -209,6 +221,45 @@ function sizedHistorySeed(turns: readonly { user: string; assistant: string }[])
   return [...session.events]
 }
 
+/** One routed closed turn whose large image is transiently offloaded before dispatch. */
+function imageHistorySeed(): SessionEvent[] {
+  const session = Session.create(SessionId('byte-image-history-seed'))
+  session.append('turn/start', { turn: 1 })
+  session.append('request/header', {
+    header: canonicalHeader({ config: { provider: 'mock', model: 'mock' } }),
+    reason: 'initial',
+  })
+  session.append('user/message', createUserMessage({
+    content: [
+      { type: 'text', text: 'old image' },
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: AttachmentId(`sha256:${'d'.repeat(64)}`),
+          mediaType: 'image/png',
+          bytes: 2_000_000,
+          width: 1_000,
+          height: 1_000,
+        },
+      },
+    ],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'historical response' }],
+      source: { kind: 'model', provider: 'mock', model: 'mock' },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  return [...session.events]
+}
+
 async function createSeededAgent(
   ctx: Context,
   sessionId: string,
@@ -278,6 +329,134 @@ describe('gateway request-size recovery', () => {
     }
   })
 
+  it('does not retry partial progress while a competing compaction owns the durable lock', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+    })
+    const releaseCompetitor = Promise.withResolvers<undefined>()
+    compact.beforeSummary = async (call) => {
+      if (call === 2) await releaseCompetitor.promise
+    }
+    let competing: Promise<unknown> | undefined
+    let fallbackRelease: ReturnType<typeof setTimeout> | undefined
+    let restoreAppend: (() => void) | undefined
+    try {
+      const agent = await createSeededAgent(ctx, 'competing-recovery-lock', sizedHistorySeed([
+        { user: 'a'.repeat(360 * 1024), assistant: 'historical response 1' },
+        { user: 'b'.repeat(360 * 1024), assistant: 'historical response 2' },
+      ]))
+      const append = agent.session.append.bind(agent.session)
+      let startedCompetitor = false
+      const appendSpy = vi.spyOn(agent.session, 'append').mockImplementation(((type: string, ...rest: never[]) => {
+        const event = (append as (...args: never[]) => unknown)(type as never, ...rest)
+        if (!startedCompetitor && type === 'compaction/end') {
+          startedCompetitor = true
+          const head = agent.session.surface.nodes[0]
+          if (head === undefined) throw new Error('prefix compaction left no surface node')
+          competing = compact.compactRegion(head, head, agent, new AbortController().signal)
+          // A broken short-circuit never reaches the downstream release below;
+          // keep that failure finite so the request count can expose it.
+          fallbackRelease = setTimeout(() => { releaseCompetitor.resolve(undefined) }, 25)
+        }
+        return event
+      }) as never)
+      restoreAppend = () => { appendSpy.mockRestore() }
+      let delegated = 0
+      ctx.on('agent/request-error', async (_payload, next) => {
+        delegated += 1
+        releaseCompetitor.resolve(undefined)
+        await competing?.catch(() => undefined)
+        return next()
+      })
+
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue from history' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(startedCompetitor).toBe(true)
+      expect(delegated).toBe(1)
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      releaseCompetitor.resolve(undefined)
+      if (fallbackRelease !== undefined) clearTimeout(fallbackRelease)
+      await competing?.catch(() => undefined)
+      restoreAppend?.()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not retry successful recovery after its final transaction yields the durable lock', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      omitFailureStatus: true,
+      failureCode: 'TIMEOUT',
+      failureMessage: 'stream idle timeout after a large upload',
+      failureRequestBytesEstimate: 700_000,
+      withRetry: true,
+    })
+    const releaseCompetitor = Promise.withResolvers<undefined>()
+    compact.beforeSummary = async (call) => {
+      if (call === 2) await releaseCompetitor.promise
+    }
+    let competing: Promise<unknown> | undefined
+    let fallbackRelease: ReturnType<typeof setTimeout> | undefined
+    let restoreAppend: (() => void) | undefined
+    try {
+      const agent = await createSeededAgent(ctx, 'competing-final-recovery-lock', sizedHistorySeed([
+        { user: 'a'.repeat(360 * 1024), assistant: 'historical response' },
+      ]))
+      const append = agent.session.append.bind(agent.session)
+      let startedCompetitor = false
+      const appendSpy = vi.spyOn(agent.session, 'append').mockImplementation(((type: string, ...rest: never[]) => {
+        const event = (append as (...args: never[]) => unknown)(type as never, ...rest)
+        if (!startedCompetitor && type === 'compaction/end') {
+          startedCompetitor = true
+          const head = agent.session.surface.nodes[0]
+          if (head === undefined) throw new Error('recovery compaction left no surface node')
+          competing = compact.compactRegion(head, head, agent, new AbortController().signal)
+          fallbackRelease = setTimeout(() => { releaseCompetitor.resolve(undefined) }, 25)
+        }
+        return event
+      }) as never)
+      restoreAppend = () => { appendSpy.mockRestore() }
+      let delegated = 0
+      ctx.on('agent/request-error', async (_payload, next) => {
+        delegated += 1
+        releaseCompetitor.resolve(undefined)
+        await competing?.catch(() => undefined)
+        return next()
+      })
+
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue from history' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(startedCompetitor).toBe(true)
+      expect(delegated).toBe(1)
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      releaseCompetitor.resolve(undefined)
+      if (fallbackRelease !== undefined) clearTimeout(fallbackRelease)
+      await competing?.catch(() => undefined)
+      restoreAppend?.()
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('applies a confirmed 413 budget below the proactive usefulness floor to its recovery', async () => {
     const rejectedBytes = 60 * 1024
     const recoveryBudget = Math.floor(rejectedBytes * 0.75)
@@ -302,6 +481,37 @@ describe('gateway request-size recovery', () => {
       for (const input of compact.capturedInputs) {
         expect(input.maxRequestBytes).toBe(recoveryBudget)
       }
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('uses a post-offload 413 budget to summarize image history after full-envelope offload', async () => {
+    const rejectedBytes = 100_000
+    const recoveryBudget = Math.floor(rejectedBytes * 0.75)
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      failureRequestBytesEstimate: rejectedBytes,
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'post-offload-image-413', imageHistorySeed())
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue after the image' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(adapter.conversationRequests).toHaveLength(2)
+      expect(compact.capturedInputs).toHaveLength(1)
+      expect(compact.capturedInputs[0]?.maxRequestBytes).toBe(recoveryBudget)
+      const replay = JSON.stringify(compact.capturedInputs[0]?.messages)
+      expect(replay).toContain(OFFLOADED_IMAGE_TEXT)
+      expect(replay).not.toContain('"type":"image"')
       expect([...agent.session.events].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },

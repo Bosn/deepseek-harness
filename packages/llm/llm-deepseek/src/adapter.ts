@@ -390,6 +390,7 @@ export class DeepSeekAdapter extends LlmAdapter {
       const id = requestId(response.headers)
       throw new LlmError(message, httpErrorCode(response.status, providerError), {
         status: response.status,
+        requestBytesEstimate,
         ...delay === undefined ? {} : { providerRetryAfterMs: delay },
         ...id === undefined ? {} : { requestId: id },
       })

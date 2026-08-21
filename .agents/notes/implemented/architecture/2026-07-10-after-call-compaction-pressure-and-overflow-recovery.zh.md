@@ -22,9 +22,9 @@ Compact-basic 会在每个拟议请求之前包装 `agent/pre-step`。在续步�
 
 ### 请求恢复只覆盖最终模型边界
 
-`agent/request-error` 表示来自最终适配器边界的终止失败。适配器选择、分发、iterator 构造与迭代抛出会在 agent loop（智能体循环）消费前成为终止 `error` 或 `aborted` finish；适配器直接发出的终止 finish 进入同一路径。提示词装配、请求 middleware、请求日志、结果处理、工具、step 监听器与清理仍属于普通失败。[LLM（大语言模型）流的终止失败](2026-07-29-terminal-llm-stream-failures.md)规定这一规范化边界。
+`agent/request-error` 表示来自最终适配器边界的终止失败。适配器选择、分发、iterator 构造与迭代抛出会在 agent loop（智能体循环）消费前成为终止 `error` 或 `aborted` finish；适配器直接发出的终止 finish 进入同一路径。提示词装配、请求 middleware、请求日志、结果处理、工具、step 监听器与清理仍属于普通失败。[LLM（大语言模型）流的终止失败](2026-07-29-terminal-llm-stream-failures.zh.md)规定这一规范化边界。
 
-恢复运行前，失败 step 已经关闭。负责处理的监听器修复持久状态、返回 `{ kind: 'retry' }`，并停止 waterfall（瀑布式事件）委托。循环随后关闭失败 turn，并从持久日志开启一个重试 turn，中间不发布空闲通知。重试策略与尝试计数由插件自己拥有；compaction-basic 在链路到达终态 `agent/settled` 时清除对应 agent 的恢复计数。DeepSeek 与 pi-ai 都把识别出的上下文限制和 HTTP 413 失败规范化为 `CONTEXT_WINDOW_EXCEEDED`，并在可用时保留显式状态码。[重试动作决策](../simplification/2026-07-27-request-error-retry-action.md)规定这一返回边界。
+恢复运行时，失败请求仍处于开放 step 内。负责处理的监听器修复持久状态、返回 `{ kind: 'retry' }`，并停止 waterfall（瀑布式事件）委托。循环随后会在同一开放 turn 和 step 内重建并重复请求。重试策略与尝试计数由插件自己拥有；成功的 `assistant/message` 开始新序列或 `agent/status` 进入 `idle` 时，compaction-basic 会清除对应 agent 的恢复计数。DeepSeek 与 pi-ai 都把识别出的上下文限制和 HTTP 413 失败规范化为 `CONTEXT_WINDOW_EXCEEDED`，并在可用时保留显式状态码。[重试动作决策](../simplification/2026-07-27-request-error-retry-action.zh.md)规定这一返回边界。
 
 如果取消发生在 assistant 工具调用已经持久化之后、所有调用完成分发之前，循环会为每个尚未分发的调用记录一对合成的 `tool/call` 与 aborted `tool/result`，随后进入正常中止路径。因此，表层不会仅因取消赢得竞态而留下孤立的持久工具调用。
 
@@ -34,7 +34,7 @@ Compact-basic 会在每个拟议请求之前包装 `agent/pre-step`。在续步�
 
 对于 `pressure`，compaction-basic 先解析持久提供方/模型目标对应适配器所维护的容量与精确目标策略，再把得到的阈值与保留尾部预算应用到一次统一的 `ctx.tokenMeter.measure()` 结果。未达到压力阈值时直接返回，不执行剪枝。压力达到条件后，可选的 `ctx.toolResultPruner` 会改写当前表层中过大的工具结果，compaction-basic 再通过同一个 meter 重新计量；若压力已降至安全水平则跳过模型调用，否则从已剪枝表层选择范围并生成摘要。范围定价、引用的源事件计量、被遮蔽 token 数与非缩小摘要拒绝也由同一个单例 meter 完成。通用默认值保持为阈值比例 `0.8`、保留历史比例 `0.16`、摘要提供方/模型 `''`、`maxTokens: 8192`、`compactionRetries: 1` 与 `auto: true`；可选 `modelPolicies` 项可以按精确提供方/模型组合覆盖这些值。
 
-对于语义上下文溢出和请求大小恢复，compaction-basic 不要求容量元数据，并绕过标量压力与普通保留 token 预算。HTTP 413 总会选择请求大小恢复；`TIMEOUT` 只有超过配置的估算字节阈值时才选择该路径。恢复会先执行剪枝，再在保留最新不可分割单元的同时选择最大的工具配对平衡头部范围；存在范围时，才在同一 signal 下尝试缩小摘要压缩。请求大小恢复会限制每个完整摘要请求，并且只在平衡边界拆分大范围。自动监听器先对 `session.surface.replaceGeneration` 建立快照，剪枝或摘要让 generation 增加时就返回 `{ kind: 'retry' }`。即使剪枝先落盘而后续摘要工作抛错，这条规则仍然成立；取消依然优先。后端若只返回结果但没有替换表层，不能授权重试；只有剪枝取得进展时，即使没有 `CompactionResult` 也可以授权重试。请求大小启发式与字节默认值由[请求大小恢复决策](../bug-fix/2026-08-21-request-size-timeout-recovery.md)负责。
+对于语义上下文溢出和请求大小恢复，compaction-basic 不要求容量元数据，并绕过标量压力与普通保留 token 预算。HTTP 413 总会选择请求大小恢复；`TIMEOUT` 只有超过配置的估算字节阈值时才选择该路径。恢复会先执行剪枝，再在保留最新不可分割单元的同时选择最大的工具配对平衡头部范围；存在范围时，才在同一 signal 下尝试缩小摘要压缩。请求大小恢复会限制每个完整摘要请求，并且只在平衡边界拆分大范围。自动监听器先对 `session.surface.replaceGeneration` 建立快照，剪枝或摘要让 generation 增加时就返回 `{ kind: 'retry' }`。即使剪枝先落盘而后续摘要工作抛错，这条规则仍然成立；取消依然优先。后端若只返回结果但没有替换表层，不能授权重试；只有剪枝取得进展时，即使没有 `CompactionResult` 也可以授权重试。请求大小启发式与字节默认值由[请求大小恢复决策](../bug-fix/2026-08-21-request-size-timeout-recovery.zh.md)负责。
 
 `maxOverflowRetries` 可选且默认为 `1`；`0` 会禁用语义溢出与请求大小恢复，但不会禁用压力检查。`auto: false` 不注册任何自动监听器。无关错误、尝试耗尽、已经中止的 signal、缺失路由模型、没有安全范围、generation 未变化，以及在任何替换之前恢复抛错，都会委托给下一个监听器。若没有后续恢复，循环报告原始提供方错误对象与代码。generation 增加后的恢复抛错会基于持久进展授权重试；即使恢复工作并发完成，取消或 dispose（资源释放）仍具有最终优先级。
 
@@ -42,12 +42,12 @@ Compact-basic 会在每个拟议请求之前包装 `agent/pre-step`。在续步�
 
 ## 测试
 
-单元测试覆盖最终适配器规范化边界、已关闭 turn 的重试编号与重置、取消与 dispose、step 边界顺序、已路由信封压力、压力门控剪枝、剪枝独立解除压力、从已剪枝输入生成摘要、平衡失败请求缩减、后续失败前已落盘的剪枝进展、generation 证明、上限、委托与辅助调用路由。真实循环测试覆盖抛出式与带内上下文溢出、HTTP 413 和符合条件的大请求 TIMEOUT 经剪枝或摘要压缩后重建重试请求的过程。
+单元测试覆盖最终适配器规范化边界、同一 turn 和 step 内的重试序列与重置、取消与 dispose、step 边界顺序、已路由信封压力、压力门控剪枝、剪枝独立解除压力、从已剪枝输入生成摘要、平衡失败请求缩减、后续失败前已落盘的剪枝进展、generation 证明、上限、委托与辅助调用路由。真实循环测试覆盖抛出式与带内上下文溢出、HTTP 413 和符合条件的大请求 TIMEOUT 经剪枝或摘要压缩后重建重试请求的过程。
 
 ## 考虑过的替代方案
 
 - **向 pre-step 增加压缩专用字段**——不予采纳，因为规范持久会话与 token meter 已拥有计量输入；通用生命周期不需要携带第二份信封。
-- **重试相同编号的 step**——不予采纳，因为恢复会在失败边界之后追加持久事件。新 step 保持平衡嵌套与可重建性。
+- **在请求恢复前关闭 step**——不予采纳，因为提供方尝试是一个模型请求 step 内部的过程。保持 step 开放，可让已调度重试、重建请求和最终结果共用同一个持久 turn 与 step 身份。
 - **只要 `compactIfNeeded` 返回结果就重试**——不予采纳，因为自定义后端可能报告成功却没有改变模型可见状态。`replaceGeneration` 才是权威证明。
 - **让 compaction-basic 解析提供方措辞**——不予采纳，因为分类属于适配器，而且必须同时覆盖抛出式与带内交付。
 - **没有持久路由时回退到 `AgentOptions.model`**——不予采纳，因为自动策略必须描述已完成且已记录的请求。没有请求头的压力检查与恢复会原样委托。
@@ -58,4 +58,4 @@ Compact-basic 会在每个拟议请求之前包装 `agent/pre-step`。在续步�
 
 代价是在共享 pre-step waterfall 中执行压力工作，并需要适配器持续维护溢出分类。提供方措辞与启发式字符密度仍是维护风险。表层压缩依然无法修复仅信封本身就超出窗口的情况，也不能拆分不可分割的非工具节点，或修复不可剪枝的剩余部分仍然过大的工具单元。若可移除的文本工具结果是主要体积，可选剪枝器仍可修复原本不可分割的工具配对。
 
-[已领取 pre-step 生命周期](2026-07-31-claimed-pre-step-inbox-lifecycle.md)取代了本记录原先的 post-step 触发方式。服务拆分、独立 token meter、平衡范围约定、日志中记录的锁、摘要替换与唯一 `summarize()` 子类 hook 均保持不变。
+[已领取 pre-step 生命周期](2026-07-31-claimed-pre-step-inbox-lifecycle.zh.md)取代了本记录原先的 post-step 触发方式。服务拆分、独立 token meter、平衡范围约定、日志中记录的锁、摘要替换与唯一 `summarize()` 子类 hook 均保持不变。

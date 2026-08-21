@@ -67,6 +67,12 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
   for await (const _chunk of stream) { /* drain */ }
 }
 
+function serializedRequestBytes(request: unknown): number {
+  const payload = JSON.stringify(request)
+  if (payload === undefined) throw new Error('expected a serializable request body')
+  return Buffer.byteLength(payload, 'utf8')
+}
+
 const imageRef: ImageAttachmentRef = {
   attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
   mediaType: 'image/png',
@@ -118,10 +124,7 @@ describe('DeepSeekAdapter against a mock server', () => {
         return Promise.resolve({ ref, data: Uint8Array.of(1, 2, 3) })
       }),
     } as unknown as AttachmentStore
-    const adapter = adapterOf({
-      baseURL: server.url,
-      models: [{ id: 'deepseek-v4-flash-vision-exp', inputModalities: ['text', 'image'] }],
-    }, attachments)
+    const adapter = adapterOf({ baseURL: server.url }, attachments)
 
     await drain(adapter.stream({
       provider: 'deepseek-official',
@@ -392,7 +395,12 @@ describe('DeepSeekAdapter against a mock server', () => {
     const result = await assemble(ctx,{ model: 'deepseek-v4-flash', messages: [] })
     expect(result.finish).toEqual({
       kind: 'error',
-      failure: { message: `failed with ${status}`, code, status },
+      failure: {
+        message: `failed with ${status}`,
+        code,
+        status,
+        requestBytesEstimate: serializedRequestBytes(server.requests[0]),
+      },
     })
   })
 
@@ -431,6 +439,7 @@ describe('DeepSeekAdapter against a mock server', () => {
         message: 'slow down',
         code: 'RATE_LIMIT',
         status: 429,
+        requestBytesEstimate: serializedRequestBytes(server.requests[0]),
         providerRetryAfterMs: 2_000,
         requestId: ProviderRequestId('req-429'),
       },
@@ -458,6 +467,7 @@ describe('DeepSeekAdapter against a mock server', () => {
           message: 'come back later',
           code: 'SERVER',
           status: 503,
+          requestBytesEstimate: serializedRequestBytes(server.requests[0]),
           providerRetryAfterMs: 3_000,
           requestId: ProviderRequestId('deepseek-503'),
         },
@@ -485,7 +495,12 @@ describe('DeepSeekAdapter against a mock server', () => {
       const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
       expect(result.finish).toEqual({
         kind: 'error',
-        failure: { message: 'retry later', code: 'RATE_LIMIT', status: 429 },
+        failure: {
+          message: 'retry later',
+          code: 'RATE_LIMIT',
+          status: 429,
+          requestBytesEstimate: serializedRequestBytes(server.requests[0]),
+        },
       })
     }
   })
@@ -505,6 +520,54 @@ describe('DeepSeekAdapter against a mock server', () => {
       type: 'RequestTooLarge',
       message: 'Request body size exceeds maximum allowed sized',
     })).toBe(CONTEXT_WINDOW_EXCEEDED_CODE)
+  })
+
+  it('reports exact post-offload request bytes for a Vision HTTP 413', async () => {
+    let payload = ''
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected a serialized string request body')
+      payload = init.body
+      return Promise.resolve(new Response(JSON.stringify({
+        error: { message: 'request body too large' },
+      }), { status: 413 }))
+    })
+    const ref: ImageAttachmentRef = { ...imageRef, bytes: 1_000_000 }
+    const readImage = vi.fn((value: ImageAttachmentRef) =>
+      Promise.resolve({ ref: value, data: Uint8Array.of(1, 2, 3) }))
+    const attachments = { readImage } as unknown as AttachmentStore
+    const adapter = adapterOf({
+      baseURL: 'https://example.invalid',
+      maxRequestImageBytes: 3,
+      models: [{ id: 'vision', inputModalities: ['text', 'image'] }],
+    }, attachments)
+
+    try {
+      const error = await drain(adapter.stream({
+        provider: 'deepseek-official',
+        model: 'vision',
+        messages: [createUserMessage({
+          content: [{ type: 'image', attachment: ref }],
+          source: { kind: 'user' },
+        })],
+      })).then(
+        () => undefined,
+        (failure: unknown) => failure,
+      )
+      expect(error).toBeInstanceOf(LlmError)
+      if (!(error instanceof LlmError)) throw new Error('expected LlmError')
+      const requestBytesEstimate = Buffer.byteLength(payload, 'utf8')
+      expect(error.failure).toEqual({
+        message: 'request body too large',
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+        status: 413,
+        requestBytesEstimate,
+      })
+      expect(requestBytesEstimate).toBeLessThan(ref.bytes)
+      expect(payload).toContain('[image omitted to keep the request within its image limit;')
+      expect(readImage).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
   })
 
   it('classifies every HTTP 429 as throttling and reserves terminal QUOTA for non-429 quota wording', () => {
@@ -866,6 +929,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
       { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', inputModalities: ['text', 'image'] },
     ])
     await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash'))
       .resolves.toMatchObject({
@@ -883,6 +947,15 @@ describe('plugin registration and config', () => {
           ],
           defaultEffort: ReasoningEffortId('high'),
         },
+      })
+    await expect(ctx.llm.resolveModelInfo('deepseek-official', 'deepseek-v4-flash-vision-exp'))
+      .resolves.toMatchObject({
+        provider: 'deepseek-official',
+        id: 'deepseek-v4-flash-vision-exp',
+        name: 'DeepSeek-V4-Flash-Vision-Exp',
+        inputModalities: ['text', 'image'],
+        context: { contextWindow: 1_000_000 },
+        defaultMaxTokens: 256_000,
       })
   })
 
@@ -963,6 +1036,7 @@ describe('plugin registration and config', () => {
     await expect(ctx.llm.listModels('deepseek-official')).resolves.toEqual([
       { provider: 'deepseek-official', id: 'deepseek-v4-flash', name: 'DeepSeek-V4-Flash', inputModalities: ['text'] },
       { provider: 'deepseek-official', id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro', inputModalities: ['text'] },
+      { provider: 'deepseek-official', id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek-V4-Flash-Vision-Exp', inputModalities: ['text', 'image'] },
     ])
   })
 
@@ -1179,7 +1253,7 @@ describe('plugin registration and config', () => {
     // First-boot onboarding: the route registers so models stay discoverable;
     // only the request itself needs a key.
     expect(ctx.llm.listProviders()).toEqual([{ id: 'deepseek-official', name: 'DeepSeek' }])
-    await expect(ctx.llm.listModels('deepseek-official')).resolves.toHaveLength(2)
+    await expect(ctx.llm.listModels('deepseek-official')).resolves.toHaveLength(3)
     const first = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(first.finish).toMatchObject({ kind: 'error', failure: { code: 'MISSING_CREDENTIAL' } })
     // The guidance leads with the managed credential store.
@@ -1267,7 +1341,7 @@ describe('plugin registration and config', () => {
     expect(adapter).toBeInstanceOf(DeepSeekAdapter)
     // Direct embedding shares the plugin's one resolve step, so it advertises
     // the same default catalog instead of a divergent empty one.
-    await expect(adapter.listModels('deepseek-official')).resolves.toHaveLength(2)
+    await expect(adapter.listModels('deepseek-official')).resolves.toHaveLength(3)
   })
 
   it('resolves connection facts and the credential exactly once per stream call', async () => {

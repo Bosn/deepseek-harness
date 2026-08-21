@@ -6,7 +6,7 @@ English | [中文](2026-07-25-scriptable-llm-wire-fault-server.zh.md)
 
 ## Problem
 
-Adapter unit tests use local HTTP servers to classify individual provider failures, while retry tests use an in-process scripted `LlmAdapter` to prove closed-step recovery. Neither boundary provides a reusable server for running the shipping HTTP adapter, agent loop, and retry policy together, and neither lets a developer point an existing app at deterministic transport faults by changing only its base URL and API key.
+Adapter unit tests use local HTTP servers to classify individual provider failures, while retry tests use an in-process scripted `LlmAdapter` to prove recovery inside the same open turn and step. Neither boundary provides a reusable server for running the shipping HTTP adapter, agent loop, and retry policy together, and neither lets a developer point an existing app at deterministic transport faults by changing only its base URL and API key.
 
 Connection refusal, a reset before the first event, clean EOF without `[DONE]`, a valid content-less completion, and a reset after partial output have different adapter and recovery outcomes. Treating them as one generic mock failure hides whether the provider boundary preserved the distinction and whether failed chunks remained outside committed model history.
 
@@ -22,7 +22,7 @@ The server reports wire facts only and does not classify retryability. Real-comp
 
 ## Verification
 
-Package tests exercise every request behavior, split UTF-8 request decoding, HTTP validation without script consumption, script exhaustion/repetition, stalled-connection teardown, CLI parsing and delay bounds, IPv6 base URLs, random seed reproducibility, weight validation, single-result telemetry, lifecycle cleanup, and the invariant companion under the per-file coverage gate. The retry integration suite proves exact request counts, numbered retry steps, request-body identity, failed partial-chunk isolation, semantic-empty recovery, clean-EOF classification, timeout recovery, true refused-connection recovery after delayed listener startup, and bounded exhaustion through the real HTTP/SSE adapter.
+Package tests exercise every request behavior, split UTF-8 request decoding, HTTP validation without script consumption, script exhaustion/repetition, stalled-connection teardown, CLI parsing and delay bounds, IPv6 base URLs, random seed reproducibility, weight validation, single-result telemetry, lifecycle cleanup, and the invariant companion under the per-file coverage gate. The retry integration suite proves exact request counts, same-turn and same-step retry attempts, request-body identity, failed partial-chunk isolation, semantic-empty recovery, clean-EOF classification, timeout recovery, true refused-connection recovery after delayed listener startup, and bounded exhaustion through the real HTTP/SSE adapter.
 
 ## Alternatives considered
 

@@ -13,7 +13,7 @@ import {
   resolveTargetPolicy,
 } from '@deepseek-ai/dsh-compaction-basic/src/config.ts'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
-import LlmRuntime, { createUserMessage, CallId, CONTEXT_WINDOW_EXCEEDED_CODE, createToolResultMessage, LlmAdapter , createMessage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, CallId, CONTEXT_WINDOW_EXCEEDED_CODE, createToolResultMessage, LlmAdapter , createMessage, OFFLOADED_IMAGE_TEXT } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   GenerateOptions,
@@ -188,6 +188,14 @@ function toolConversation(): Session {
   return session
 }
 
+/** Complete-request cap that retains the selected derived-message suffix. */
+function summarizationCapForSuffix(session: Session, startIndex: number): number {
+  return estimateCompactionInstructionBytes()
+    + estimateHeaderBytes(session.requestHeader())
+    + session.deriveMessages().slice(startIndex)
+      .reduce((total, message) => total + estimateMessageBytes(message), 0)
+}
+
 /** One closed routed tool step followed by an open turn for rewrite events. */
 function oversizedToolResult(chars = 3_000, withCompactablePrompt = false): Session {
   const session = Session.create(SessionId(`oversized-tool-${chars}`))
@@ -235,6 +243,7 @@ function oversizedToolResult(chars = 3_000, withCompactablePrompt = false): Sess
 
 class TestCompactionEngine extends BasicCompactionEngine {
   summary: ContentBlock[] = [{ type: 'text', text: 'small checkpoint' }]
+  summaryForCall: ((input: SummarizationInput, index: number) => ContentBlock[]) | undefined
   rawOutput: ContentBlock[] | undefined
   usage: TokenUsage | undefined
   summaryProvider = 'summary-provider'
@@ -255,11 +264,12 @@ class TestCompactionEngine extends BasicCompactionEngine {
     maxTokens?: number
     usage?: TokenUsage
   }> {
+    const callIndex = this.calls.length
     this.calls.push({ input, signal })
     this.mutateDuringSummary?.()
     if (this.error !== undefined) throw this.error
     return {
-      summary: this.summary,
+      summary: this.summaryForCall?.(input, callIndex) ?? this.summary,
       ...this.rawOutput === undefined ? {} : { rawOutput: this.rawOutput },
       provider: this.summaryProvider,
       model: this.summaryModel,
@@ -274,6 +284,22 @@ function service(
   ctx = createContext(),
 ): TestCompactionEngine {
   return new TestCompactionEngine(ctx, config)
+}
+
+/** Observe the first durable bounded transaction closing without delaying it. */
+function observeFirstCompactionEnd(session: Session): { closed: Promise<void>; restore(): void } {
+  const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<undefined>()
+  const append = session.append.bind(session)
+  let observed = false
+  const spy = vi.spyOn(session, 'append').mockImplementation(((type: string, ...rest: never[]) => {
+    const event = (append as (...args: never[]) => unknown)(type as never, ...rest)
+    if (!observed && type === 'compaction/end') {
+      observed = true
+      resolveClosed(undefined)
+    }
+    return event
+  }) as never)
+  return { closed, restore: () => { spy.mockRestore() } }
 }
 
 async function compactIfNeeded(
@@ -709,6 +735,20 @@ describe('pressure measurement and retention', () => {
       .rejects.toThrow(/still above threshold after 1 compaction attempts/)
   })
 
+  it('reports the byte budget when retained content stays above byte pressure', async () => {
+    const compact = service({
+      auto: false,
+      compactionRetries: 0,
+      thresholdRatio: 0.99,
+      retainTokens: 1_000,
+      maxRequestBytes: 4_000,
+    }, createContext(1_000_000))
+    compact.summary = [{ type: 'text', text: 'tiny checkpoint' }]
+
+    await expect(compactIfNeeded(compact, conversation(4, 'byte pressure '.repeat(80))))
+      .rejects.toThrow(/estimated bytes with byte budget 4000/)
+  })
+
   it('rounds a retention cut head-ward to preserve tool-call/result pairing', async () => {
     const compact = service({
       auto: false,
@@ -906,14 +946,11 @@ describe('compaction region transaction', () => {
 
   it('applies the configured cap to explicit regions and partitions only at balanced tool boundaries', async () => {
     const session = toolConversation()
-    const messages = session.deriveMessages()
-    const summarizationInputBytes = estimateCompactionInstructionBytes()
-      + estimateHeaderBytes(session.requestHeader())
-      + messages.reduce((total, message) => total + estimateMessageBytes(message), 0)
-      - estimateMessageBytes(messages[0]!)
-      - estimateMessageBytes(messages[1]!)
+    const summarizationInputBytes = summarizationCapForSuffix(session, 2)
     const compact = service({ auto: false, summarizationInputBytes })
+    compact.summary = [{ type: 'text', text: '多字节检查点 🧭' }]
     const nodes = session.surface.nodes
+    const transactionLimit = nodes.length
 
     await compact.compactRegion(
       nodes[0]!,
@@ -934,9 +971,296 @@ describe('compaction region transaction', () => {
         }
       }
       expect(openCalls).toEqual(new Set())
-      if (index > 0) expect(summarizedText(input)).toContain('small checkpoint')
+      if (index > 0) expect(summarizedText(input)).toContain('多字节检查点 🧭')
     }
+    expect(compact.calls.length).toBeLessThanOrEqual(transactionLimit)
     expect(session.deriveMessages()).toHaveLength(1)
+  })
+
+  it('rejects a token-shrinking multibyte checkpoint that does not shrink wire bytes', async () => {
+    const compact = service({ auto: false })
+    compact.summary = [{ type: 'text', text: '界'.repeat(900) }]
+    const session = conversation(1, 'a'.repeat(3_000))
+    const nodes = session.surface.nodes
+    const firstMessageBytes = estimateMessageBytes(session.deriveMessages()[0]!)
+    const cap = estimateCompactionInstructionBytes()
+      + estimateHeaderBytes(session.requestHeader())
+      + firstMessageBytes
+      + 5_000
+
+    await expect(compact.compactRegion(
+      nodes[0]!,
+      nodes[0]!,
+      agent(session, MODEL),
+      SIGNAL,
+      cap,
+    )).rejects.toThrow(/estimated framed bytes/)
+
+    expect(compact.calls).toHaveLength(1)
+    expect(session.surface.replaceGeneration).toBe(0)
+    expect(session.events.some(event => event.type === 'compaction/summary')).toBe(false)
+  })
+
+  it('offloads an image when image plus text exceeds the full cap before rejecting an oversized checkpoint', async () => {
+    const compact = service({ auto: false })
+    compact.summary = [{ type: 'text', text: '界'.repeat(26_000) }]
+    const session = Session.create(SessionId('capped-image-checkpoint'))
+    session.append('turn/start', { turn: 1 })
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL } },
+      reason: 'initial',
+    })
+    session.append('user/message', createUserMessage({
+      content: [
+        { type: 'text', text: 'a'.repeat(30_000) },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: AttachmentId(`sha256:${'d'.repeat(64)}`),
+            mediaType: 'image/png',
+            bytes: 45_000,
+            width: 1_000,
+            height: 1_000,
+          },
+        },
+      ],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const onlyNode = session.surface.nodes[0]!
+    const cap = estimateCompactionInstructionBytes()
+      + estimateHeaderBytes(session.requestHeader())
+      + 75_000
+
+    await expect(compact.compactRegion(
+      onlyNode,
+      onlyNode,
+      agent(session, MODEL),
+      SIGNAL,
+      cap,
+    )).rejects.toThrow(/summary checkpoint needs .* over the .*summarization-input cap/)
+
+    expect(compact.calls).toHaveLength(1)
+    expect(summarizedText(compact.calls[0]!.input)).toContain(OFFLOADED_IMAGE_TEXT)
+    expect(compact.calls[0]!.input.messages[0]!.content.some(block => block.type === 'image')).toBe(false)
+    expect(session.surface.replaceGeneration).toBe(0)
+  })
+
+  it('accepts a final image checkpoint that shrinks durable bytes despite larger placeholder metadata', async () => {
+    const ctx = createContext()
+    const compact = service({ auto: false }, ctx)
+    const session = Session.create(SessionId('capped-final-image-checkpoint'))
+    session.append('turn/start', { turn: 1 })
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL } },
+      reason: 'initial',
+    })
+    session.append('user/message', createUserMessage({
+      content: [
+        { type: 'text', text: 'old image' },
+        {
+          type: 'image',
+          attachment: {
+            attachmentId: AttachmentId(`sha256:${'e'.repeat(64)}`),
+            mediaType: 'image/png',
+            bytes: 2_000_000,
+            width: 1_000,
+            height: 1_000,
+          },
+        },
+      ],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const onlyNode = session.surface.nodes[0]!
+    const durableMessage = session.deriveMessages()[0]!
+    const durableBytes = estimateMessageBytes(durableMessage)
+    const cap = estimateCompactionInstructionBytes()
+      + estimateHeaderBytes(session.requestHeader())
+      + 75_000
+
+    const result = await compact.compactRegion(
+      onlyNode,
+      onlyNode,
+      agent(session, MODEL),
+      SIGNAL,
+      cap,
+    )
+
+    expect(compact.calls).toHaveLength(1)
+    expect(summarizedText(compact.calls[0]!.input)).toContain(OFFLOADED_IMAGE_TEXT)
+    const summarizedInputBytes = compact.calls[0]!.input.messages
+      .reduce((total, message) => total + estimateMessageBytes(message), 0)
+    const checkpoint = session.deriveMessages()[0]!
+    expect(estimateMessageBytes(checkpoint)).toBeGreaterThan(summarizedInputBytes)
+    expect(estimateMessageBytes(checkpoint)).toBeLessThan(durableBytes)
+    expect(ctx.tokenMeter.estimateMessage(checkpoint)).toBeGreaterThan(result.shadowedTokenCount)
+    expect(session.surface.replaceGeneration).toBe(1)
+  })
+
+  it('rejects an image-offloaded prefix checkpoint that would not shrink the next bounded pass', async () => {
+    const compact = service({ auto: false })
+    const session = Session.create(SessionId('capped-prefix-image-checkpoint'))
+    session.append('turn/start', { turn: 1 })
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL } },
+      reason: 'initial',
+    })
+    session.append('user/message', createUserMessage({
+      content: [{
+        type: 'image',
+        attachment: {
+          attachmentId: AttachmentId(`sha256:${'f'.repeat(64)}`),
+          mediaType: 'image/png',
+          bytes: 2_000_000,
+          width: 1_000,
+          height: 1_000,
+        },
+      }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'b'.repeat(50_000) }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const nodes = session.surface.nodes
+    const newestMessageBytes = estimateMessageBytes(session.deriveMessages()[1]!)
+    const cap = estimateCompactionInstructionBytes()
+      + estimateHeaderBytes(session.requestHeader())
+      + newestMessageBytes
+      + 64
+
+    await expect(compact.compactRegion(
+      nodes[0]!,
+      nodes[1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      cap,
+    )).rejects.toThrow(/post-offload input/)
+
+    expect(compact.calls).toHaveLength(1)
+    expect(summarizedText(compact.calls[0]!.input)).toContain(OFFLOADED_IMAGE_TEXT)
+    expect(session.surface.replaceGeneration).toBe(0)
+  })
+
+  it('bounds repeated multibyte checkpoint folds by the original message count', async () => {
+    const compact = service({ auto: false })
+    compact.summaryForCall = (_input, index) => [{
+      type: 'text',
+      text: '界'.repeat(1_600 - index * 4),
+    }]
+    const session = conversation(1, 'a'.repeat(6_000))
+    const nodes = session.surface.nodes
+    const cap = estimateCompactionInstructionBytes()
+      + estimateHeaderBytes(session.requestHeader())
+      + 6_500
+
+    await expect(compact.compactRegion(
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      cap,
+    )).rejects.toThrow(/exhausted its 2-transaction limit/)
+
+    expect(compact.calls).toHaveLength(2)
+    expect(session.events.filter(event => event.type === 'compaction/summary')).toHaveLength(2)
+  })
+
+  it('rechecks the durable lock before the final bounded transaction', async () => {
+    const compact = service({ auto: false })
+    const session = toolConversation()
+    const nodes = session.surface.nodes
+    const observer = observeFirstCompactionEnd(session)
+    const operation = compact.compactRegion(
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      summarizationCapForSuffix(session, 2),
+    )
+    await observer.closed
+    const surfaceAfterPrefix = [...session.surface.nodes]
+    const takeoverSeq = session.append('compaction/start', {
+      compactionId: CompactionId('concurrent-compaction'),
+      turn: 4,
+    }).seq
+
+    try {
+      await expect(operation).rejects.toThrow(/compaction already in progress/)
+    } finally {
+      observer.restore()
+    }
+    expect(compact.calls).toHaveLength(1)
+    expect(session.surface.nodes).toEqual(surfaceAfterPrefix)
+    expect(session.events.filter(event => event.seq > takeoverSeq)).toEqual([])
+  })
+
+  it('rechecks a closed turn inside nested bounded compaction', async () => {
+    const control = service({ auto: false })
+    const controlSession = toolConversation()
+    const controlNodes = controlSession.surface.nodes
+    const summarizationInputBytes = summarizationCapForSuffix(controlSession, 5)
+    await control.compactRegion(
+      controlNodes[0]!,
+      controlNodes[controlNodes.length - 1]!,
+      agent(controlSession, MODEL),
+      SIGNAL,
+      summarizationInputBytes,
+    )
+    expect(control.calls).toHaveLength(3)
+
+    const compact = service({ auto: false })
+    const session = toolConversation()
+    const nodes = session.surface.nodes
+    const observer = observeFirstCompactionEnd(session)
+    const operation = compact.compactRegion(
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      summarizationInputBytes,
+    )
+    await observer.closed
+    const surfaceAfterPrefix = [...session.surface.nodes]
+    const turnEndSeq = session.append('turn/end', {
+      turn: 4,
+      reason: { kind: 'completed' },
+    }).seq
+
+    try {
+      await expect(operation).rejects.toThrow(/no open turn/)
+    } finally {
+      observer.restore()
+    }
+    expect(compact.calls).toHaveLength(1)
+    expect(session.surface.nodes).toEqual(surfaceAfterPrefix)
+    expect(session.events.filter(event => event.seq > turnEndSeq)).toEqual([])
+  })
+
+  it('rejects a replacement turn before the next bounded transaction', async () => {
+    const compact = service({ auto: false })
+    const session = toolConversation()
+    const nodes = session.surface.nodes
+    const observer = observeFirstCompactionEnd(session)
+    const operation = compact.compactRegion(
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      SIGNAL,
+      summarizationCapForSuffix(session, 5),
+    )
+    await observer.closed
+    const surfaceAfterPrefix = [...session.surface.nodes]
+    session.append('turn/end', { turn: 4, reason: { kind: 'completed' } })
+    const replacementTurnSeq = session.append('turn/start', { turn: 5 }).seq
+
+    try {
+      await expect(operation).rejects.toThrow(/open turn changed from 4 to 5/)
+    } finally {
+      observer.restore()
+    }
+    expect(compact.calls).toHaveLength(1)
+    expect(session.surface.nodes).toEqual(surfaceAfterPrefix)
+    expect(session.events.filter(event => event.seq > replacementTurnSeq)).toEqual([])
   })
 
   it('supports an uncapped direct region transaction', async () => {
@@ -1542,6 +1866,11 @@ describe('automatic listener and loader composition', () => {
     ).then(action => action?.kind === 'retry')
   }
 
+  function openRequestStep(session: Session): void {
+    const turn = session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 1
+    session.append('step/start', { turn, step: 1 })
+  }
+
   function overflow(message = 'provider overflow'): Error & { code: string } {
     return Object.assign(new Error(message), { code: CONTEXT_WINDOW_EXCEEDED_CODE })
   }
@@ -1665,6 +1994,7 @@ describe('automatic listener and loader composition', () => {
       retainTokens: 900,
     })
     const session = conversation(3)
+    openRequestStep(session)
     const beforeGeneration = session.surface.replaceGeneration
     const retainedSeq = session.surface.nodes.at(-1)!
     const threshold = 10_000
@@ -1684,6 +2014,7 @@ describe('automatic listener and loader composition', () => {
       retainTokens: 50,
     })
     const session = conversation(3, 'x'.repeat(30_000))
+    openRequestStep(session)
     const owner = agent(session, MODEL)
     const learningAttempt = vi.spyOn(compact, 'compactIfNeeded').mockImplementationOnce(() => {
       const head = session.surface.nodes[0]!
@@ -1746,6 +2077,7 @@ describe('automatic listener and loader composition', () => {
       retainTokens: 900,
     })
     const session = oversizedToolResult()
+    openRequestStep(session)
 
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(true)
     expect(session.surface.replaceGeneration).toBe(1)
@@ -1765,6 +2097,7 @@ describe('automatic listener and loader composition', () => {
       retainTokens: 900,
     })
     const session = toolConversation()
+    openRequestStep(session)
 
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(true)
     expect(session.events.some(event => event.type === 'compaction/summary')).toBe(true)
@@ -1787,6 +2120,7 @@ describe('automatic listener and loader composition', () => {
     })
     compact.error = new Error('summary unavailable after prune')
     const session = oversizedToolResult(3_000, true)
+    session.append('step/start', { turn: 2, step: 1 })
 
     expect(await recover(ctx, agent(session, MODEL), overflow())).toBe(true)
     expect(session.surface.replaceGeneration).toBe(1)
@@ -1794,6 +2128,58 @@ describe('automatic listener and loader composition', () => {
     expect(session.events.findLast(event => event.type === 'compaction/end')?.data)
       .toMatchObject({ error: 'summary unavailable after prune' })
     expect(warnings).toContainEqual(expect.stringContaining('retrying from the replacement surface'))
+  })
+
+  type RequestBoundaryMutation = (session: Session, turn: number, step: number) => void
+
+  it.each<[string, RequestBoundaryMutation]>([
+    ['its turn closes', (session, turn, step) => {
+      session.append('step/end', { turn, step })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    }],
+    ['a replacement turn starts', (session, turn, step) => {
+      session.append('step/end', { turn, step })
+      session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      session.append('turn/start', { turn: turn + 1 })
+    }],
+    ['its step closes', (session, turn, step) => {
+      session.append('step/end', { turn, step })
+    }],
+    ['a replacement step starts', (session, turn, step) => {
+      session.append('step/end', { turn, step })
+      session.append('step/start', { turn, step: step + 1 })
+    }],
+  ])('does not retry partial progress after %s', async (_state, mutateBoundary) => {
+    const ctx = createContext(10_000)
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 1,
+      retainTokens: 900,
+    })
+    const session = conversation(2)
+    const turn = 3
+    const step = 1
+    session.append('step/start', { turn, step })
+    vi.spyOn(compact, 'compactIfNeeded').mockImplementationOnce(() => {
+      const head = session.surface.nodes[0]!
+      session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'durable partial recovery' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }), {
+        surfaceOp: { op: 'replace', start: head, end: head },
+        sourceEventSeqs: [head],
+      })
+      mutateBoundary(session, turn, step)
+      throw new Error('recovery lost its request boundary')
+    })
+    let delegated = 0
+
+    expect(await recover(ctx, agent(session, MODEL), overflow(), SIGNAL, () => {
+      delegated += 1
+      return Promise.resolve(undefined)
+    })).toBe(false)
+
+    expect(delegated).toBe(1)
+    expect(session.surface.replaceGeneration).toBe(1)
   })
 
   it('lets cancellation win when summary throws after a durable prune', async () => {
@@ -1823,6 +2209,7 @@ describe('automatic listener and loader composition', () => {
       retainTokens: 90,
     })
     const session = toolConversation()
+    openRequestStep(session)
     const newestAssistant = session.surface.nodes.at(-2)!
     const newestResult = session.surface.nodes.at(-1)!
 
@@ -1925,6 +2312,7 @@ describe('automatic listener and loader composition', () => {
       header: { config: { provider: 'unknown-routed-provider', model: 'unknown-routed-model' } },
       reason: 'resume',
     })
+    openRequestStep(session)
     expect(await recover(ctx, agent(session, MODEL), overflow('unlisted-model overflow')))
       .toBe(true)
   })
@@ -1945,6 +2333,7 @@ describe('automatic listener and loader composition', () => {
     const compact = new TestCompactionEngine(ctx, { maxOverflowRetries: 1 })
     const compactSpy = vi.spyOn(compact, 'compactIfNeeded')
     const owner = agent(conversation(3), MODEL)
+    openRequestStep(owner.session)
     expect(await recover(ctx, owner, Object.assign(new Error('rate limit'), { code: 'RATE_LIMIT' })))
       .toBe(false)
     expect(await recover(ctx, owner, overflow())).toBe(true)
@@ -1965,6 +2354,7 @@ describe('automatic listener and loader composition', () => {
     })
     const compactSpy = vi.spyOn(compact, 'compactIfNeeded')
     const owner = agent(conversation(3), MODEL)
+    openRequestStep(owner.session)
 
     expect(await recover(ctx, owner, overflow())).toBe(true)
     compactSpy.mockClear()

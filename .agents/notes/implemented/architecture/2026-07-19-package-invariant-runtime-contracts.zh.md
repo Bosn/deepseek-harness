@@ -36,7 +36,7 @@ Status: implemented
 | `dsh-scope` | 作用域事件必须携带 carrier，且路由 subject 保持一致。 |
 | `dsh-agent-loop` | 从会话事件日志重建带显式标记的冻结 loop 请求。 |
 | `dsh-llm` | 流中块的文法、delta 类型/索引匹配、单次 usage、块闭合和终止 finish。 |
-| `dsh-llm-retry` | 持久化重试记录指向当前打开轮次中最近关闭的步骤；每个步骤的记录保持唯一，重试次数单调递增，并且重试次数和非负的定时器延迟均保持在边界内。 |
+| `dsh-llm-retry` | 持久化重试记录指向当前打开的轮次和步骤，与失败请求的持久化提供方一致；每次已调度尝试的记录保持唯一，使用正确的提供方策略重试序号，并且符合不同模式的重试次数与定时器边界。 |
 | `dsh-tools` | pre/execute/post 阶段单调推进，以及最终 execution/result 快照不可变。 |
 | `dsh-system-prompt` | 权威 assembly 中 section、工具和 variable 的数据约束。 |
 | `dsh-compaction` | 压缩（compaction）start/summary/end 配对、范围端点、token 数量和成功时必须存在 summary。 |

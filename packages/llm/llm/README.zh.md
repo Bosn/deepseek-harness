@@ -55,6 +55,8 @@
 
 `Message` 是投递、持久历史和模型请求共享的不可变值。每条消息从创建起都必须具有 `MessageId`、角色、内容和带类型的来源。`createMessage(input)` 生成标识，并返回与输入分离且深度冻结的值；`createUserMessage({ content, source })` 固定 user 角色；`createAssistantMessage({ content, source })` 固定 assistant 角色与模型来源类别；`createToolResultMessage({ callId, content, isError })` 固定 user 角色，并将工具来源与其结果块耦合；`freezeMessage(message)` 导入已有标识，绝不将其替换。改写消息时会保留标识，并产生另一个冻结值。浏览器端代码会从依赖最少的 `@deepseek-ai/dsh-llm/message` 入口导入这些值构造函数，而不是从包含服务的包根入口导入。
 
+支持图片的消费方共享两种不修改原消息的请求投影。`offloadRequestImages(messages, maxRequestImageBytes)` 会依次替换最旧图片，直到累计 base64 payload 满足适配器拥有的图片预算。`offloadRequestImagesUntil(messages, fits)` 会先把原始消息交给纯完整请求判定，再逐张替换最旧图片，并在每次替换后重新检查；如果无图片投影仍不满足条件，则返回该最终候选项，由调用方继续执行非图片溢出策略。两者都保留持久消息，并使用 `OFFLOADED_IMAGE_TEXT` 作为每张被替换图片的占位符。
+
 消息内容是类型化内容块数组：`text`、`reasoning`、`tool-call`、`tool-result`。联合从可合并扩展的 `ContentBlockMap` 派生，因此插件可以通过 declaration merging 添加块类型。assistant 消息使用模型来源，其中携带生成该消息的提供方和模型，以及可选的适配器私有回放状态。dispatch 前，`LlmRuntime` 只在历史提供方路由与目标提供方路由当前由完全相同的适配器实例拥有时才保留该状态；随后由适配器判定能否在模型／提供方间恢复或转换该状态。核心块集只包含每条已发布路径都支持的块。多模态内容（图像、音频等）没有核心块类型；需要它的功能会通过 map 添加，并一并添加相应的适配器／UI／压缩（compaction）支持。
 
 流式输出是原始分片协议（`block-start`、`text-delta`、`reasoning-delta`、`tool-call-delta`、`block-end`、`usage`、`finish`）。每个适配器结果都以一个终止 `finish` 到达消费方；运行故障使用 `error` 或 `aborted` 作为结束原因，而不会跨流 API 抛出。`BlockAssembler` 是将分片组装为块／消息的唯一共享实现。成功的 `finish` 可以携带 `ReplayEnvelope`——不透明的响应级回放元数据，加上与发射块序列对齐的可选逐块条目。组装对内容与元数据只做一次保留/丢弃决定：`max-tokens` 结束会丢弃可能被截断的工具调用，数据在每个被丢弃的位置同步失去对应条目，因此存储的元数据始终描述存储的内容。
@@ -63,9 +65,11 @@
 
 `LlmCallConfig` 记录一个会话的模型请求所使用的提供方、模型、由适配器定义的可选推理强度，以及采样参数（`provider`、`model`、`reasoningEffort`、`temperature`、`maxTokens`、`stop`，分别与同名 `GenerateOptions` 字段一一对应）。它是作为请求标头一部分记录在会话日志中的每会话状态（见 dsh-session `request/header` 事件），绝不是可静默调整的每次调用旋钮：`agent/request` waterfall 会提议替换，`prepareCall()` 在轮次 signal 控制下校验它并填入适配器默认值，loop 随后记录生效值以及标明哪些字段由适配器默认值填入的标记，再使用已准备调用中与注册绑定的流。下一次提议会省略带标记的默认值，使变更后的路由解析自身的值；未带标记的显式字段会保留。`callConfigEquals(a, b)` 是逐字段真实变更检测器；`deepFreeze(value)` 是 loop 使用的请求所有权辅助函数：每个构造完成的请求都会在分发前深度冻结；`llm/stream` 监听器和适配器只能读取，绝不能改写。`markAgentLoopRequest()` 将该精确对象标记为由进程本地 agent loop 创建，`isAgentLoopRequest()` 让观测方可以将其与同样可能冻结并关联会话、但独立记录的辅助调用区分。`GenerateOptions.purpose` 会对已记录的辅助压缩和会话标题调用进行分类，使适配器可以按调用目的应用不同的传输策略，而不改变普通会话请求。
 
+<a id="app-attribution-attributionts"></a>
+
 ### 应用归因（`attribution.ts`）
 
-每个产品适配器都会在提供方 HTTP 请求上发送应用身份。`attributionHeaders(identity?)` 构建标准 `User-Agent`，默认为公开 `APP_IDENTITY`；白标部署可以替换它，但不能抑制它。适配器会直接验证 wire 标头，或通过自身库 hook 验证。详见 [归因 Agent Note](../../../.agents/notes/implemented/architecture/2026-06-21-mandatory-app-attribution-headers.md)。
+每个产品适配器都会在提供方 HTTP 请求上发送应用身份。`attributionHeaders(identity?)` 构建标准 `User-Agent`，默认为公开 `APP_IDENTITY`；白标部署可以替换它，但不能抑制它。适配器会直接验证 wire 标头，或通过自身库 hook 验证。详见 [归因 Agent Note](../../../.agents/notes/implemented/architecture/2026-06-21-mandatory-app-attribution-headers.zh.md)。
 
 ### API 密钥校验（`api-key.ts`）
 
@@ -85,7 +89,7 @@
 
 ### 真实适配器
 
-两个适配器使用不同内部机制实现 `LlmAdapter`：[`@deepseek-ai/dsh-llm-deepseek`](../llm-deepseek) 针对 `deepseek-official` 路由使用直接 fetch 加 `eventsource-parser` SSE（Server-Sent Events）分帧，[`@deepseek-ai/dsh-llm-pi-ai`](../llm-pi-ai) 则通过 `@earendil-works/pi-ai` 动态解析已配置提供方／模型对。两者都遵循 `types.ts` 中的 `StreamChunk` 约定：usage 先于 finish，工具参数保持原始字符串。适配器实现在内部可以抛出异常或发出失败 finish；`LlmRuntime` 会将两者都暴露为终止失败 finish。适配器理由见[双 LLM 适配器](../../../.agents/notes/implemented/architecture/2026-06-13-twin-llm-adapters.md)，服务边界见[终止失败决策](../../../.agents/notes/implemented/architecture/2026-07-29-terminal-llm-stream-failures.md)。
+两个适配器使用不同内部机制实现 `LlmAdapter`：[`@deepseek-ai/dsh-llm-deepseek`](../llm-deepseek) 针对 `deepseek-official` 路由使用直接 fetch 加 `eventsource-parser` SSE（Server-Sent Events）分帧，[`@deepseek-ai/dsh-llm-pi-ai`](../llm-pi-ai) 则通过 `@earendil-works/pi-ai` 动态解析已配置提供方／模型对。两者都遵循 `types.ts` 中的 `StreamChunk` 约定：usage 先于 finish，工具参数保持原始字符串。适配器实现在内部可以抛出异常或发出失败 finish；`LlmRuntime` 会将两者都暴露为终止失败 finish。适配器理由见[双 LLM 适配器](../../../.agents/notes/implemented/architecture/2026-06-13-twin-llm-adapters.zh.md)，服务边界见[终止失败决策](../../../.agents/notes/implemented/architecture/2026-07-29-terminal-llm-stream-failures.zh.md)。
 
 ## 模型体验
 
@@ -94,6 +98,8 @@
 #### KV Cache 影响
 
 透传；注册表保留已组装请求前缀，cache 复用与路由边界属于所选适配器和提供方。
+
+<a id="known-limitations-and-deferred-work"></a>
 
 ## 已知限制与暂缓事项
 

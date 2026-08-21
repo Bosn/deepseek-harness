@@ -798,6 +798,46 @@ describe('mapStopReason / mapUsage', () => {
   })
 
   it.each([
+    '413 Content Too Large: gateway rejected request',
+    '413 Payload Too Large: gateway rejected request',
+  ])('retains pi-messages request metadata for %j', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), undefined, 12_345)).toEqual({
+      kind: 'error',
+      failure: {
+        message: errorMessage,
+        code: CONTEXT_WINDOW_EXCEEDED_CODE,
+        status: 413,
+        requestBytesEstimate: 12_345,
+      },
+    })
+  })
+
+  it('retains pi-messages rate-limit metadata', () => {
+    const errorMessage = '429 Too Many Requests: throttled'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), undefined, 12_345)).toEqual({
+      kind: 'error',
+      failure: {
+        message: errorMessage,
+        code: 'RATE_LIMIT',
+        status: 429,
+        requestBytesEstimate: 12_345,
+      },
+    })
+  })
+
+  it('does not treat an embedded number as an HTTP status', () => {
+    const errorMessage = 'provider diagnostic 429 Too Many Requests: throttled'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), undefined, 12_345)).toEqual({
+      kind: 'error',
+      failure: {
+        message: errorMessage,
+        code: 'RATE_LIMIT',
+        requestBytesEstimate: 12_345,
+      },
+    })
+  })
+
+  it.each([
     'other side closed',
     'HTTP2 request did not get a response',
     'WebSocket closed unexpectedly',

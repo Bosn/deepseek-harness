@@ -22,15 +22,29 @@ Protocol applicability is per field, and grouping follows the compat *type* rath
 
 Three kinds of `compat` key are refused where they are written rather than dropped: one no protocol declares, one a gate withholds, and one written with no value. The check runs over every key before any protocol resolves, so a misspelling fails even on a route whose models never reach the protocol that would have taken it. It reads raw keys deliberately: a withheld or undeclared name is absent from the schema, so schemastery cannot have materialized it and a person wrote it. The valueless case is the one that has to fail rather than be ignored — schemastery passes a YAML bare key through as null, and carrying it forward writes null over the installed catalog's value, leaving pi-ai's `??` reaching for its baseURL detection with the catalog layer skipped entirely. Fields carrying a value are then filtered separately, because schemastery materializes an absent dict as `{}` and `chatTemplateKwargs` is present on every parsed profile whether or not anyone wrote one.
 
+For a hand-declared route, a model-level value wins over the route value field by field, and a field neither level sets remains available to pi-ai's baseURL-derived detection. When the model still speaks its installed catalog entry's protocol, configured values merge over that entry's compat instead of replacing unrelated vendor quirks. The explicit schema also supplies the Models settings form, so every offered switch is available without client-specific form code.
+
 ## Where a refusal lands
 
 Every check runs in `resolveProfiles`, which no request path re-enters: the adapter memoizes by raw-snapshot identity and `apply` resolves once eagerly. A refusal therefore reaches `settings.mutate` as `settings-rejected` before persistence, a `cordis.yml` `config:` block as a failed plugin mount, and a stored section as a failed `settings.register` at startup.
 
 An external edit to the settings file is the one path that cannot report: the provider watcher calls `publish()`, which catches a failing section, logs `settings: keeping last good "%s"`, and leaves the namespace serving its previous value. That is the settings seam's behavior for every schema and validator failure, not something this surface introduces, and closing it belongs to that seam rather than here. What changes for compat is the failure model, not the reporting: a key that formerly stayed inert forever now stops the next start.
 
+## Testing
+
+`tests/catalog.spec.ts` carries stored `supportsDeveloperRole: false` through the composed settings path to a serialized `system` message, and exercises route/model precedence, preservation of unrelated catalog compat, mixed-protocol filtering, protocol-specific refusals, and valueless or unknown keys. The compile-time exactness proofs and `verify-config-catalog` cover the complete offered field set and its upstream-derived value types rather than pinning one boolean switch independently.
+
 ## Alternatives considered
 
 **Add `supportsDeveloperRole` alone.** It fixes the reported gateway and leaves `maxTokensField` — which shapes every request, not only a reasoning model's — breaking a whole class of endpoints, with the next upstream addition free to lag silently again.
+
+**Declare affected models non-reasoning.** `reasoningEfforts: false` avoids the developer-role branch by removing the model's reasoning capability, but also removes the thinking-level selector and `reasoning_effort` dispatch that the deployment intends to keep.
+
+**Require an installed pi-ai catalog route.** Named routes such as `qwen-token-plan` carry their vendor compat, but a gateway with its own baseURL, model ids, or aggregation layer is exactly what a hand-declared route represents and cannot inherit those exact entries.
+
+**Wait for pi-ai's URL detection to classify every endpoint.** Upstream classification helps named public endpoints but cannot describe arbitrary private gateways, so configuration still has to state their wire behavior.
+
+**Spoof a baseURL that pi-ai recognizes.** The URL would misdescribe the request target and couple configuration to a detection heuristic that may change independently.
 
 **Offer every upstream field.** pi-ai's own custom-provider documentation converges on a far smaller set, its flagship example naming six, and the remainder are vendor-bound switches its catalog already sets. Exposing `zaiToolStream` or `vercelGatewayRouting` on a hand-declared route offers a knob whose correct use is to not be a hand-declared route.
 
@@ -44,7 +58,7 @@ An external edit to the settings file is the one path that cannot report: the pr
 
 ## Consequences
 
-- An OpenAI-compatible gateway that rejects the `developer` role, `max_completion_tokens`, `store`, `stream_options`, or `strict` is now configuration rather than an unreachable provider, and the same holds for an Anthropic-compatible gateway rejecting `temperature` or tool `cache_control`.
+- An OpenAI-compatible gateway that rejects the `developer` role, `max_completion_tokens`, `store`, `stream_options`, or `strict` is configuration rather than an unreachable provider, and the same holds for an Anthropic-compatible gateway rejecting `temperature` or tool `cache_control`; correcting the system-prompt role does not disable reasoning selection or dispatch.
 - A pi-ai upgrade that adds a compat field fails the build until someone classifies it, which is how `chatTemplateKwargs` and the `chat-template` formats stopped being a standing exception.
 - Unknown compat keys join every other configuration error's failure model. The improvement over the previous silent drop is bounded by the settings seam: an external file edit still keeps its last good value and warns, so the operator's signal is a restart rather than the write.
 - **Deferred, not closed:** a route that repoints `api` and configures no compat at all keeps the installed entry's `compat` through the model literal's `...base` spread, in the *other* protocol's shape. Fields several compat types share (`supportsLongCacheRetention`, `sendSessionAffinityHeaders`) therefore cross protocols. It predates this surface — the early return it rides existed before — and is left for its own change.

@@ -3,7 +3,10 @@
  * recovery extension point. Each scheduled retry is durable before its
  * cancellable wait. `RATE_LIMIT` failures wait out the policy's configured
  * cooldown schedule (default one, three, and five minutes) instead of the
- * fast exponential backoff, so gateway 429 throttling has time to clear.
+ * fast exponential backoff, so gateway 429 throttling has time to clear. A
+ * downstream durable surface replacement owns recovery unless it explicitly
+ * authorizes another request, preventing either retry mode from racing that
+ * specialized repair.
  *
  * @module @deepseek-ai/dsh-llm-retry
  */
@@ -216,19 +219,21 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     if (policy.mode === 'always') {
       if (signal.aborted || lifetime.signal.aborted) return
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
+      const replacementGeneration = agent.session.surface.replaceGeneration
       // The loop and plugin lifetime stay open until delegated recovery settles.
       // An abort then wins before the decision or fallback can mutate later state.
       const downstream = await settleDownstream(next)
       if (fusedSignal.aborted) return
+      if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
+        return downstream.decision
+      }
       if (downstream.type === 'error') {
         ctx.logger.warn(
           `llm-retry: provider "${provider}" always policy ignored a downstream recovery failure: %o`,
           downstream.error,
         )
       }
-      if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
-        return downstream.decision
-      }
+      if (agent.session.surface.replaceGeneration > replacementGeneration) return
     } else {
       if (!policy.retryableCodes.includes(failure.code)) return next()
       if (signal.aborted || lifetime.signal.aborted) return
@@ -236,9 +241,11 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       // compaction after a large-request timeout). Generic repetition only
       // runs when no downstream listener owns that repair.
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
+      const replacementGeneration = agent.session.surface.replaceGeneration
       const downstream = await next()
       if (fusedSignal.aborted) return
       if (downstream?.kind === 'retry') return downstream
+      if (agent.session.surface.replaceGeneration > replacementGeneration) return
     }
 
     const policyKey = retryPolicyKey(policy)

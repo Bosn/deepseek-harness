@@ -3,4 +3,4 @@
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-18-request-image-payload-bound.md
 2026-08-18-request-image-payload-bound.md: cb9cd8f28908447ae4afa321f8f5cac8a40e62e6
-2026-08-18-request-image-payload-bound.zh.md: 65c148d4475bc5dc49c097ce055cdb10715a51a4
+2026-08-18-request-image-payload-bound.zh.md: 6dfba70c1eeacba51d380821117324ebe54d0b5b
