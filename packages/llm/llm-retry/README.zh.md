@@ -6,7 +6,7 @@
 
 每个提供方适配器都拥有可选的嵌套 `retryPolicy`；路由在 `ctx.llm` 上注册时会捕获该策略，任何到达该注册最终适配器边界的调用都会携带它。如果之后释放或替换路由，进行中的失败仍会保留当时为其提供服务的策略；在选中任何最终适配器前发生的失败没有提供方策略，会继续委托。省略策略时使用 normal mode：为 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 和 `TRANSPORT` 重试五次，并采用从 500 ms 到 10 秒的有界指数退避与 10% jitter。`EMPTY_RESPONSE` 是适配器对未产生任何持久内容的退化提供方完成所作的分类，因此可安全重复。normal 策略可以更改其有限预算、符合条件的 code 和退避配置。always mode 会先请求下游恢复，再无次数上限地重试每个模型请求失败；成功、取消或插件 dispose（资源释放）会在活跃的委托恢复完全停稳后终止它。
 
-`RATE_LIMIT` 失败不使用快速指数退避，而是依次等待冷却调度：`backoff.rateLimitDelaysMs` 为每次尝试列出一个等待时长（默认 `[60000, 180000, 300000]`），因此默认行为是三次分别等待一、三、五分钟的冷却重试，让网关 429 限流——包括 qwen Model Studio `insufficient_quota` 这类带 quota 措辞的 429——有时间恢复。该调度就是 `RATE_LIMIT` 的尝试预算：normal mode 下有效上限为 `min(maxRetries, 调度长度)`；空数组关闭该调度、退回指数退避；always mode 在调度耗尽后继续使用指数退避。有效的提供方 `Retry-After` 只会抬高冷却等待,而且抖动绝不会把最终等待压到调度项或该提供方提示以下;超出定时器范围的值则被忽略、改用调度项。
+`RATE_LIMIT` 失败不使用快速指数退避，而是依次等待冷却调度：`backoff.rateLimitDelaysMs` 按顺序列出一次 step 中 RATE_LIMIT 重试依次消耗的等待时长（默认 `[60000, 180000, 300000]`），因此默认行为是三次分别等待一、三、五分钟的冷却重试，让网关 429 限流——包括 qwen Model Studio `insufficient_quota` 这类带 quota 措辞的 429——有时间恢复。其他 code 的重试共用 normal 预算，不会推进该调度。该调度就是 `RATE_LIMIT` 的尝试预算：normal 模式下有效上限为 `min(maxRetries, 调度长度)`；空数组关闭该调度、退回指数退避；always 模式在调度耗尽后继续使用指数退避。有效的提供方 `Retry-After` 只会抬高冷却等待,而且抖动绝不会把最终等待压到调度项或该提供方提示以下;超出定时器范围的值则被忽略、改用调度项。
 
 其他失败仍使用两种 mode 共有的带对称 jitter 有界指数退避。有效 `providerRetryAfterMs` 不超过 `maxDelayMs` 时会替换本地退避，并且不加 jitter。超出上限的提供方延迟会使 normal mode 继续委托；always mode 则改用已配置的本地退避，避免该指令终止重试。
 

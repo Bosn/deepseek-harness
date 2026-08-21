@@ -1233,6 +1233,87 @@ describe('provider-routed retry policy', () => {
       expect(entryFloor.requests).toHaveLength(2)
     })
 
+    it('advances the cooldown schedule only on RATE_LIMIT failures', async () => {
+      vi.useFakeTimers()
+      const leadServer = new ScriptedAdapter([
+        new LlmError('transient server', 'SERVER'),
+        new LlmError('first throttle', 'RATE_LIMIT', { status: 429 }),
+        textResponse('mixed lead recovery'),
+      ])
+      ;({ ctx: context } = await harness(leadServer, { mock: cooldownConfig() }))
+      const leadAgent = context.agentLoop.create(SessionId('cooldown-mixed-lead'), { provider: 'mock', model: 'mock' })
+      const leadFirst = waitForRetry(context, leadAgent, 1)
+      leadAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await leadFirst).data.delayMs).toBe(500)
+      const leadSecond = waitForRetry(context, leadAgent, 2)
+      await vi.advanceTimersByTimeAsync(500)
+      // The first 429 owns the first entry: 60 s, not the 180 s a total-count index would give.
+      expect((await leadSecond).data.delayMs).toBe(60_000)
+      const leadIdle = waitForIdle(context, leadAgent)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await leadIdle
+      expect(leadServer.requests).toHaveLength(3)
+
+      await context.fiber.dispose()
+      const interleaved = new ScriptedAdapter([
+        new LlmError('throttle one', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('transient server', 'SERVER'),
+        new LlmError('throttle two', 'RATE_LIMIT', { status: 429 }),
+        textResponse('interleaved recovery'),
+      ])
+      ;({ ctx: context } = await harness(interleaved, { mock: cooldownConfig() }))
+      const interleavedAgent = context.agentLoop.create(SessionId('cooldown-interleaved'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const interleavedFirst = waitForRetry(context, interleavedAgent, 1)
+      interleavedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await interleavedFirst).data.delayMs).toBe(60_000)
+      const interleavedSecond = waitForRetry(context, interleavedAgent, 2)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect((await interleavedSecond).data.delayMs).toBe(1_000)
+      const interleavedThird = waitForRetry(context, interleavedAgent, 3)
+      await vi.advanceTimersByTimeAsync(1_000)
+      // The SERVER retry did not advance the schedule: the second 429 owns the
+      // second entry, 180 s.
+      expect((await interleavedThird).data.delayMs).toBe(180_000)
+      const interleavedIdle = waitForIdle(context, interleavedAgent)
+      await vi.advanceTimersByTimeAsync(180_000)
+      await interleavedIdle
+      expect(interleaved.requests).toHaveLength(4)
+
+      await context.fiber.dispose()
+      const lateThrottle = new ScriptedAdapter([
+        new LlmError('server one', 'SERVER'),
+        new LlmError('server two', 'SERVER'),
+        new LlmError('server three', 'SERVER'),
+        new LlmError('first throttle', 'RATE_LIMIT', { status: 429 }),
+        textResponse('late throttle recovery'),
+      ])
+      ;({ ctx: context } = await harness(lateThrottle, { mock: cooldownConfig() }))
+      const lateAgent = context.agentLoop.create(SessionId('cooldown-late-first-throttle'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const lateFirst = waitForRetry(context, lateAgent, 1)
+      lateAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await lateFirst).data.delayMs).toBe(500)
+      const lateSecond = waitForRetry(context, lateAgent, 2)
+      await vi.advanceTimersByTimeAsync(500)
+      expect((await lateSecond).data.delayMs).toBe(1_000)
+      const lateThird = waitForRetry(context, lateAgent, 3)
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect((await lateThird).data.delayMs).toBe(2_000)
+      const lateFourth = waitForRetry(context, lateAgent, 4)
+      await vi.advanceTimersByTimeAsync(2_000)
+      // The first 429 still owns the first entry instead of being delegated.
+      expect((await lateFourth).data.delayMs).toBe(60_000)
+      const lateIdle = waitForIdle(context, lateAgent)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await lateIdle
+      expect(lateThrottle.requests).toHaveLength(5)
+    })
+
     it('caps normal-mode RATE_LIMIT retries at the shorter schedule length', async () => {
       vi.useFakeTimers()
       const adapter = new ScriptedAdapter([

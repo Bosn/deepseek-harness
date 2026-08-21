@@ -73,25 +73,27 @@ function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => nu
 /**
  * Resolve the configured `RATE_LIMIT` cooldown wait for one retry, or
  * `undefined` when the schedule does not cover this attempt (a non-rate-limit
- * failure, an empty schedule, or every entry consumed). A positive provider
- * `Retry-After` within timer range raises the wait — throttling advice can only
- * extend the cooldown — while an out-of-range value is ignored in favor of the
- * schedule entry. Jitter varies the schedule entry, and the final wait never
- * falls below the entry or a valid provider hint.
+ * failure, an empty schedule, or every entry consumed). The schedule advances
+ * only on RATE_LIMIT retries within this step's recovery sequence, so other
+ * retried codes share the normal budget without consuming cooldown entries. A
+ * positive provider `Retry-After` within timer range raises the wait —
+ * throttling advice can only extend the cooldown — while an out-of-range value
+ * is ignored in favor of the schedule entry. Jitter varies the schedule entry,
+ * and the final wait never falls below the entry or a valid provider hint.
  * @param policy - the serving registration's resolved per-provider policy.
- * @param retry - one-based retry number about to be waited out.
+ * @param rateLimitAttempt - zero-based count of prior RATE_LIMIT retries in this step's recovery sequence.
  * @param failure - the classified model-request failure being recovered.
  * @param random - jitter sample source.
  * @returns the cooldown delay in milliseconds when the schedule applies.
  */
 function cooldownDelay(
   policy: ResolvedRetryPolicy,
-  retry: number,
+  rateLimitAttempt: number,
   failure: LlmFailure,
   random: () => number,
 ): number | undefined {
   if (failure.code !== 'RATE_LIMIT') return undefined
-  const entry = policy.rateLimitDelaysMs[retry - 1]
+  const entry = policy.rateLimitDelaysMs[rateLimitAttempt]
   if (entry === undefined) return undefined
   let floor = entry
   const providerMs = failure.providerRetryAfterMs
@@ -230,18 +232,22 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     }
 
     const policyKey = retryPolicyKey(policy)
-    const priorPolicyRetry = agent.session.events.findLast((event): event is SessionEvent<'llm/retry'> =>
-      event.type === 'llm/retry'
-      && event.data.turn === turn
-      && event.data.step === step
-      && event.data.provider === provider
-      && event.data.policyKey === policyKey,
-    )
+    let priorPolicyRetry: SessionEvent<'llm/retry'> | undefined
+    let priorRateLimitRetries = 0
+    for (const event of agent.session.events) {
+      if (event.type !== 'llm/retry'
+        || event.data.turn !== turn
+        || event.data.step !== step
+        || event.data.provider !== provider
+        || event.data.policyKey !== policyKey) continue
+      priorPolicyRetry = event
+      if (event.data.failure.code === 'RATE_LIMIT') priorRateLimitRetries += 1
+    }
     const previousRetry = priorPolicyRetry?.data.retry ?? 0
     if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
     const retry = previousRetry + 1
     const retryId = priorPolicyRetry?.data.retryId ?? RetryId(randomUUID())
-    const scheduledCooldownMs = cooldownDelay(policy, retry, failure, random)
+    const scheduledCooldownMs = cooldownDelay(policy, priorRateLimitRetries, failure, random)
     if (policy.mode === 'normal'
       && failure.code === 'RATE_LIMIT'
       && policy.rateLimitDelaysMs.length > 0

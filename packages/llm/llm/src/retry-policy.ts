@@ -40,9 +40,11 @@ export interface BackoffConfig {
   jitterRatio?: number
   /**
    * Per-retry cooldown waits in milliseconds applied to `RATE_LIMIT` failures
-   * (default `[60000, 180000, 300000]`); retry N waits entry N-1, so the
-   * default delivers three one-, three-, and five-minute cooldown retries.
-   * The effective `RATE_LIMIT` retry budget is the schedule length (capped by
+   * (default `[60000, 180000, 300000]`): the Nth RATE_LIMIT retry of one
+   * step's recovery sequence waits entry N-1, and other retried codes share
+   * the normal budget without advancing the schedule, so the default delivers
+   * three one-, three-, and five-minute cooldown retries. The effective
+   * `RATE_LIMIT` retry budget is the schedule length (capped by
    * `maxRetries` in normal mode); an empty array disables the schedule and
    * falls back to the exponential backoff.
    */
