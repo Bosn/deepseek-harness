@@ -40,9 +40,14 @@ function classifyPiAiError(message: string): string {
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
-  // A rejected request body (gateway or provider size cap): resending the
-  // same request cannot succeed, so it is invalid, not transient.
-  if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'
+  // A rejected request body (gateway or provider byte cap): resending the
+  // same bytes cannot succeed, but rerouting to the context-overflow recovery
+  // CAN — the compaction engine force-compacts the surface and retries the
+  // rebuilt, smaller request. Permanently failing the turn would brick the
+  // session exactly like the 413 dead loop it came from.
+  if (/\b413\b|failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
+    return CONTEXT_WINDOW_EXCEEDED_CODE
+  }
   if (/\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if (/\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'

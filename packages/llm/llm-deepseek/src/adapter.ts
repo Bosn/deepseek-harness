@@ -149,13 +149,16 @@ function requestId(headers: Headers): ReturnType<typeof ProviderRequestId> | und
  * that wording for per-minute token throttling that clears by itself, so
  * retry policy owns the wait instead of failing the turn. Quota wording on a
  * non-429 status remains terminal `QUOTA`, e.g. a 402 insufficient balance.
+ * An HTTP 413 is by definition a request whose wire size the gateway refused:
+ * resending it verbatim can never work, but the compaction engine CAN rebuild
+ * a smaller request, so it routes to the context-overflow recovery path.
  * @param status - status of a non-2xx provider response.
  * @param error - parsed provider error body, when available.
  * @returns the normalized harness error code.
  */
 export function httpErrorCode(status: number, error?: WireError['error']): string {
   if (status === 401 || status === 403) return 'AUTH'
-  if (status === 413) return 'INVALID_REQUEST'
+  if (status === 413) return CONTEXT_WINDOW_EXCEEDED_CODE
   const detail = [error?.code, error?.type, error?.message].filter(Boolean).join(' ')
   if (isQuotaExceededError(detail) && status !== 429) return QUOTA_EXCEEDED_CODE
   if (status === 429) return 'RATE_LIMIT'

@@ -22,6 +22,21 @@ const DEFAULT_THRESHOLD_RATIO = 0.8
 /** Default verbatim-tail fraction for every routed model. */
 const DEFAULT_RETAIN_RATIO = 0.16
 
+/**
+ * Default cap on the summarizer's replayed input bytes. The summarization
+ * call is itself an ordinary model request, so it must fit the same gateway
+ * request-size limits as the conversation it is condensing; dropping the
+ * oldest input beyond this cap keeps overflow recovery deterministic.
+ */
+export const DEFAULT_SUMMARIZATION_INPUT_BYTES = 512 * 1024
+
+/**
+ * Probe-learned request-byte budgets below this floor no longer drive
+ * pressure compaction; the surface left would be too small to be useful, so
+ * overflow recovery alone keeps the session alive.
+ */
+export const MIN_USEFUL_REQUEST_BYTES = 64 * 1024
+
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
   'thresholdRatio',
@@ -32,6 +47,8 @@ const POLICY_CONFIG_KEYS = [
   'maxTokens',
   'compactionRetries',
   'maxOverflowRetries',
+  'maxRequestBytes',
+  'summarizationInputBytes',
 ] as const
 
 /** Complete public top-level configuration key set. */
@@ -91,6 +108,8 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     maxTokens: config.maxTokens ?? 8192,
     compactionRetries: config.compactionRetries ?? 1,
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
+    ...config.maxRequestBytes === undefined ? {} : { maxRequestBytes: config.maxRequestBytes },
+    summarizationInputBytes: config.summarizationInputBytes ?? DEFAULT_SUMMARIZATION_INPUT_BYTES,
     modelPolicies,
     auto: config.auto ?? true,
   })
@@ -121,6 +140,10 @@ export function resolveTargetPolicy(
     maxTokens: override?.maxTokens ?? config.maxTokens,
     compactionRetries: override?.compactionRetries ?? config.compactionRetries,
     maxOverflowRetries: override?.maxOverflowRetries ?? config.maxOverflowRetries,
+    ...((override?.maxRequestBytes ?? config.maxRequestBytes) === undefined
+      ? {}
+      : { maxRequestBytes: override?.maxRequestBytes ?? config.maxRequestBytes }),
+    summarizationInputBytes: override?.summarizationInputBytes ?? config.summarizationInputBytes,
   })
 }
 
@@ -163,6 +186,8 @@ export function resolveCompactSpec(
     maxTokens: policy.maxTokens,
     compactionRetries: policy.compactionRetries,
     maxOverflowRetries: policy.maxOverflowRetries,
+    ...policy.maxRequestBytes === undefined ? {} : { maxRequestBytes: policy.maxRequestBytes },
+    summarizationInputBytes: policy.summarizationInputBytes,
   })
 }
 
@@ -246,6 +271,12 @@ function validatePolicy(
   }
   if (maxOverflowRetries !== undefined) {
     assertNonNegativeInteger(`${name}.maxOverflowRetries`, maxOverflowRetries)
+  }
+  if (config.maxRequestBytes !== undefined) {
+    assertPositiveInteger(`${name}.maxRequestBytes`, config.maxRequestBytes)
+  }
+  if (config.summarizationInputBytes !== undefined) {
+    assertPositiveInteger(`${name}.summarizationInputBytes`, config.summarizationInputBytes)
   }
 
   validateSummarizationPair(config, name)

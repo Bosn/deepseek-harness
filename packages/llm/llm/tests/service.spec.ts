@@ -108,6 +108,15 @@ describe('LlmRuntime', () => {
     expect(isContextWindowExceededError('input exceeds the model context window limit')).toBe(true)
   })
 
+  it('recognizes gateway request-size-cap wording (the HTTP 413 family)', () => {
+    expect(isContextWindowExceededError('Request body size exceeds maximum allowed sized')).toBe(true)
+    expect(isContextWindowExceededError('RequestTooLarge RequestTooLarge Request body size exceeds maximum allowed sized')).toBe(true)
+    expect(isContextWindowExceededError('payload size exceeds the limit')).toBe(true)
+    expect(isContextWindowExceededError('request body too large')).toBe(true)
+    expect(isContextWindowExceededError('Payload Too Large')).toBe(true)
+    expect(isContextWindowExceededError('request too large')).toBe(true)
+  })
+
   it('does not mistake unrelated input validation for context-window overflow', () => {
     expect(isContextWindowExceededError('invalid request: malformed tool arguments')).toBe(false)
     expect(isContextWindowExceededError('invalid input: temperature exceeds maximum allowed value')).toBe(false)

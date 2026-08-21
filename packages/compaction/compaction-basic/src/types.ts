@@ -24,6 +24,20 @@ export interface CompactionPolicyConfig {
   compactionRetries?: number
   /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
+  /**
+   * Optional bound on the estimated wire-byte size of the routed model request.
+   * Gateways answer oversized bodies with HTTP 413, which token pressure on a
+   * mega-context model can never predict; when set, pressure compaction also
+   * fires at this byte bound. Unset by default (token pressure only).
+   */
+  maxRequestBytes?: number
+  /**
+   * Optional cap on the estimated wire bytes of the summarizer's replayed
+   * input. Older messages drop out of the summarization input (with a marker)
+   * beyond this cap, so the summarizer request itself can never trip a gateway
+   * byte cap. Defaults to `512 * 1024`.
+   */
+  summarizationInputBytes?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -55,6 +69,9 @@ interface ResolvedPolicyFields {
   readonly maxTokens: number
   readonly compactionRetries: number
   readonly maxOverflowRetries: number
+  /** Absent until a request-byte bound is configured. */
+  readonly maxRequestBytes?: number
+  readonly summarizationInputBytes: number
 }
 
 /** Validated immutable config whose target-specific defaults remain unresolved. */

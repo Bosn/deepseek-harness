@@ -24,6 +24,13 @@ import { estimateContent, estimateHeader, estimateMessage, ROLE_OVERHEAD } from 
 import { foldSurfaceTokens } from './surface-fold.ts'
 
 export type * from './types.ts'
+// Byte-priced estimation re-exports: request-size pressure (the gateway 413
+// family) prices wire bytes instead of tokens.
+export {
+  estimateContentBytes,
+  estimateHeaderBytes,
+  estimateMessageBytes,
+} from './estimate.ts'
 
 interface MeasurementAnchor {
   readonly header: EpochHeader | undefined

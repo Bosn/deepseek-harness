@@ -85,3 +85,66 @@ export function estimateToolsTokens(header: EpochHeader | undefined): number {
 export function estimateHeader(header: EpochHeader | undefined): number {
   return estimateSystemTokens(header) + estimateToolsTokens(header)
 }
+
+/** Deterministic UTF-8 wire length for a JavaScript string. */
+function utf8Length(text: string): number {
+  return Buffer.byteLength(text, 'utf8')
+}
+
+/**
+ * Price content blocks under the fixed byte heuristic: the approximate
+ * encoded wire size of the model-visible payload. Image blocks price their
+ * real base64 payload; text prices UTF-8 bytes. This is the number an HTTP
+ * gateway caps with its request-size limit (the 413 family), which token
+ * pressure alone cannot predict.
+ * @param blocks - content blocks to price without mutation.
+ * @returns heuristic wire bytes including per-block structural overhead.
+ */
+export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
+  let bytes = 0
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'text':
+      case 'reasoning':
+        bytes += utf8Length(block.text) + BLOCK_OVERHEAD
+        break
+      case 'tool-call':
+        bytes += utf8Length(block.name) + utf8Length(block.arguments) + BLOCK_OVERHEAD
+        break
+      case 'tool-result':
+        bytes += estimateContentBytes(block.content) + BLOCK_OVERHEAD
+        break
+      case 'image':
+        bytes += Math.ceil(block.attachment.bytes / 3) * 4 + BLOCK_OVERHEAD
+        break
+      default:
+        // ContentBlockMap is merge-extensible; unknown blocks retain a
+        // conservative wire JSON price, byte-priced like the token heuristic.
+        bytes += utf8Length(JSON.stringify(block)) + BLOCK_OVERHEAD
+    }
+  }
+  return bytes
+}
+
+/**
+ * Heuristically price one model-visible message in estimated wire bytes.
+ * @param message - message to price without mutation.
+ * @returns content and role-framing bytes under the fixed heuristic.
+ */
+export function estimateMessageBytes(message: Message): number {
+  return estimateContentBytes(message.content) + ROLE_OVERHEAD
+}
+
+/**
+ * Price the complete non-surface request envelope in estimated wire bytes.
+ * @param header - canonical envelope, or undefined before any request.
+ * @returns heuristic system plus tool-schema bytes.
+ */
+export function estimateHeaderBytes(header: EpochHeader | undefined): number {
+  let bytes = 0
+  if (header?.system !== undefined) bytes += utf8Length(header.system) + ROLE_OVERHEAD
+  if (header?.tools !== undefined && header.tools.length > 0) {
+    bytes += utf8Length(JSON.stringify(header.tools)) + BLOCK_OVERHEAD
+  }
+  return bytes
+}

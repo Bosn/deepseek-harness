@@ -37,12 +37,16 @@ Every setting is optional. Top-level policy fields are defaults for every routed
 | `maxTokens` | no (default `8192`) | Provider generation cap for the summarization call; may include reasoning tokens. |
 | `compactionRetries` | no (default `1`) | Extra attempts after the first when pressure remains above threshold. |
 | `maxOverflowRetries` | no (default `1`) | Maximum retries after canonical context-window overflow; `0` disables recovery only. |
+| `maxRequestBytes` | no | Optional bound on the estimated wire-byte size of the routed model request. Gateways answer oversized bodies with HTTP 413, which token pressure alone cannot predict on mega-context models; when set, pressure compaction also fires at this byte bound. |
+| `summarizationInputBytes` | no (default `524288`) | Cap on the summarizer's replayed input bytes. Older messages drop out of the summarization input (with a marker) beyond this cap, so the summarizer request itself can never trip a gateway byte cap. |
 | `modelPolicies` | no (default `[]`) | Exact `{ provider, model, ...partialPolicy }` overrides; matching uses both fields and does not depend on `listModels()`. |
 | `auto` | no (default `true`) | Register step-boundary pressure and overflow-recovery listeners. Set `false` for manual-only. |
 
 Every `modelPolicies` entry accepts the policy fields above except `auto` and `modelPolicies` itself. If an entry supplies either retention field, it replaces the default policy's retention choice; otherwise retention is inherited. Summarization provider/model remain a pair inside each entry.
 
 An adapter may return no capacity for a valid dynamic route, and resolved capacity may expose an invalid absolute retention budget. Manual pressure checks then throw a target-specific configuration error; the automatic listener warns once for that exact target and continues with full history. Unrelated operational failures remain independently visible. Canonical provider overflow still attempts recovery because the provider has already established that compaction is necessary.
+
+A rejected request body (gateway `413 RequestTooLarge` family, including wording like "Request body size exceeds maximum allowed size") classifies as a recoverable context overflow: the engine force-compacts the surface with a byte-bounded summarizer input and retries the reconstructed request. If the very first rejected request lands successfully recovered, its measured byte size probes a leaner pressure budget (≈3/4 of the rejected size) that later turns compact against before the gateway rejects again.
 
 ## Usage
 

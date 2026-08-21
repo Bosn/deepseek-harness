@@ -19,6 +19,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
+import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { frameSummary } from './summarizer.ts'
@@ -59,6 +60,13 @@ interface CompactionTransactionOptions {
   readonly flush?: () => Promise<void>
   /** Manual command that initiated this transaction, when present. */
   readonly sourceCommandId?: CommandId
+  /**
+   * Optional byte cap on the summarizer's replayed input. Beyond it the oldest
+   * messages drop out of the summarization input (with a marker) so the
+   * summarizer request itself can never exceed a gateway request-size limit;
+   * the durable replacement still covers the full shadowed range.
+   */
+  readonly summarizationInputBytes?: number
 }
 
 interface CompactionEntryState {
@@ -198,7 +206,12 @@ export async function compactSurfaceRegion(
   let stage: TransactionFailure['stage'] = 'summary'
 
   try {
-    const prepared = prepareCompaction(dependencies, session, selection)
+    const prepared = prepareCompaction(
+      dependencies,
+      session,
+      selection,
+      options.summarizationInputBytes,
+    )
     const summarized = await summarizeCompaction(
       dependencies,
       prepared,
@@ -340,6 +353,7 @@ function prepareCompaction(
   dependencies: RegionDependencies,
   session: Session,
   selection: SurfaceSelection,
+  summarizationInputBytes: number | undefined,
 ): PreparedCompaction {
   const measurement = dependencies.meter.measure(session)
   const selectedNodes = measurement.nodes.slice(selection.startIdx, selection.endIdx + 1)
@@ -352,7 +366,7 @@ function prepareCompaction(
     measurement,
     selectedNodes,
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
-    input: buildSummarizationInput(session, selection.shadowedSeqs),
+    input: buildSummarizationInput(session, selection.shadowedSeqs, summarizationInputBytes),
   }
 }
 
@@ -491,25 +505,55 @@ function completeCompaction(
  * messages in surface order. The summarizer appends only the compaction
  * instruction after this, so the call is a genuine prefix of the conversation
  * and reuses the provider's KV cache.
+ *
+ * With a byte cap set, messages drop from the FRONT of the replayed region
+ * until the envelope fits the cap (the newest message always stays), and a
+ * marker message records the omission. The durable replacement still covers
+ * the entire shadowed region: the cap only shapes what the summarizer reads,
+ * so a compaction can never be blocked by the same gateway request-size limit
+ * that overflowed the conversation itself.
  * @param session - session supplying the request header and per-node projection.
  * @param shadowedSeqs - the surface-node seqs, in order, being compacted.
+ * @param maxBytes - optional cap on total replay bytes (header plus messages).
  * @returns the replayed conversation prefix to condense.
  */
 function buildSummarizationInput(
   session: Session,
   shadowedSeqs: readonly number[],
+  maxBytes: number | undefined,
 ): SummarizationInput {
   const header = session.requestHeader()
   const events = session.events
-  const regionMessages = shadowedSeqs
+  let messages = shadowedSeqs
     // shadowedSeqs are current surface seqs, so each is a valid log index.
     // oxlint-disable-next-line typescript/no-non-null-assertion
     .map(seq => session.deriveEventMessage(events[seq]!))
     .filter((message): message is Message => message !== null)
+
+  if (maxBytes !== undefined) {
+    let total = estimateHeaderBytes(header)
+    for (const message of messages) total += estimateMessageBytes(message)
+    let dropCount = 0
+    while (total > maxBytes && dropCount < messages.length - 1) {
+      // oxlint-disable-next-line typescript/no-non-null-assertion
+      total -= estimateMessageBytes(messages[dropCount]!)
+      dropCount += 1
+    }
+    if (dropCount > 0) {
+      messages = [createUserMessage({
+        content: [{
+          type: 'text',
+          text: `[${dropCount} older conversation message(s) omitted from this summarization input to keep it within a request-size budget; summarize the remaining span only.]`,
+        }],
+        source: { kind: 'user' },
+      }), ...messages.slice(dropCount)]
+    }
+  }
+
   return {
     ...header?.system === undefined ? {} : { system: header.system },
     ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages: regionMessages,
+    messages,
   }
 }
 

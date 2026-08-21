@@ -780,11 +780,15 @@ describe('mapStopReason / mapUsage', () => {
       errorMessage: 'HTTP 400: invalid input: temperature exceeds maximum allowed value',
     }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 413: Payload Too Large' })))
-      .toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+      .toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'Failed to buffer the request body: length limit exceeded',
-    }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '413: {"message":"Request body size exceeds maximum allowed sized","type":"RequestTooLarge","code":"RequestTooLarge"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
     expect(mapStopReason(assistant({
       stopReason: 'error',
       errorMessage: 'vector length limit exceeded',

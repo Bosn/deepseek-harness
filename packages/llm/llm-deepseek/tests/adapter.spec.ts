@@ -494,7 +494,16 @@ describe('DeepSeekAdapter against a mock server', () => {
       .toBe(CONTEXT_WINDOW_EXCEEDED_CODE)
     expect(httpErrorCode(400, { message: 'invalid input: temperature exceeds maximum allowed value' }))
       .toBe('INVALID_REQUEST')
-    expect(httpErrorCode(413, { code: 'context_length_exceeded' })).toBe('INVALID_REQUEST')
+  })
+
+  it('classifies every HTTP 413 as a recoverable request-size overflow', () => {
+    expect(httpErrorCode(413, { code: 'context_length_exceeded' }))
+      .toBe(CONTEXT_WINDOW_EXCEEDED_CODE)
+    expect(httpErrorCode(413, {
+      code: 'RequestTooLarge',
+      type: 'RequestTooLarge',
+      message: 'Request body size exceeds maximum allowed sized',
+    })).toBe(CONTEXT_WINDOW_EXCEEDED_CODE)
   })
 
   it('classifies every HTTP 429 as throttling and reserves terminal QUOTA for non-429 quota wording', () => {

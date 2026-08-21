@@ -9,6 +9,7 @@ import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
+import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, assertNever } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
@@ -17,6 +18,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import {
+  MIN_USEFUL_REQUEST_BYTES,
   resolveCompactSpec,
   resolveConfig,
   resolveTargetPolicy,
@@ -70,6 +72,43 @@ function conversationTarget(
   return { provider: agent.options.provider, model: agent.options.model }
 }
 
+/**
+ * Estimate the wire-byte size of the current surfaced request envelope:
+ * the routed header (system + tool schemas) plus every surface node's
+ * derived message. This is the number an HTTP gateway caps with its
+ * `RequestTooLarge` (413) family, which token pressure alone cannot predict
+ * on mega-context models.
+ * @param session - session supplying the request header and surface nodes.
+ * @returns heuristic total request bytes (non-decreasing while the surface grows).
+ */
+function requestBytes(session: Session): number {
+  let bytes = estimateHeaderBytes(session.requestHeader())
+  const events = session.events
+  for (const seq of session.surface.nodes) {
+    const event = events[seq]
+    if (event === undefined) continue
+    const message = session.deriveEventMessage(event)
+    if (message !== null) bytes += estimateMessageBytes(message)
+  }
+  return bytes
+}
+
+/**
+ * Compaction policy's configured summarization-input cap combined with any
+ * probe-learned request-byte budget: the summarizer request must fit the same
+ * byte envelope as the conversation request it repairs.
+ */
+function summarizerBudget(
+  spec: { readonly summarizationInputBytes: number; readonly maxRequestBytes?: number },
+  learned: number | undefined,
+): number {
+  return Math.min(
+    spec.summarizationInputBytes,
+    spec.maxRequestBytes ?? spec.summarizationInputBytes,
+    learned === undefined ? Number.POSITIVE_INFINITY : learned,
+  )
+}
+
 const thresholdRatioSchema = z.number()
 const retainRatioSchema = z.number()
 const retainTokensSchema = z.number().step(1).min(0)
@@ -78,6 +117,8 @@ const summarizationModelSchema = z.string()
 const maxTokensSchema = z.number().step(1).min(1)
 const compactionRetriesSchema = z.number().step(1).min(0)
 const maxOverflowRetriesSchema = z.number().step(1).min(0)
+const maxRequestBytesSchema = z.number().step(1).min(1)
+const summarizationInputBytesSchema = z.number().step(1).min(1)
 
 const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   provider: z.string().required(),
@@ -90,6 +131,8 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   maxTokens: maxTokensSchema,
   compactionRetries: compactionRetriesSchema,
   maxOverflowRetries: maxOverflowRetriesSchema,
+  maxRequestBytes: maxRequestBytesSchema,
+  summarizationInputBytes: summarizationInputBytesSchema,
 })
 
 /**
@@ -112,6 +155,8 @@ export class BasicCompactionEngine extends CompactionEngine {
     maxTokens: maxTokensSchema,
     compactionRetries: compactionRetriesSchema,
     maxOverflowRetries: maxOverflowRetriesSchema,
+    maxRequestBytes: maxRequestBytesSchema,
+    summarizationInputBytes: summarizationInputBytesSchema,
     modelPolicies: z.array(modelPolicy),
     auto: z.boolean(),
   })
@@ -122,6 +167,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly warnedPressureConfigTargets = new Set<string>()
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
+  /** Per-agent byte budgets learned from gateway 413 rejections (pressure probe). */
+  private readonly learnedByteBudgets = new WeakMap<Agent, number>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -187,6 +234,17 @@ export class BasicCompactionEngine extends CompactionEngine {
       const policy = resolveTargetPolicy(this.config, target)
       const retries = this.overflowRetries.get(agent) ?? 0
       if (retries >= policy.maxOverflowRetries) return next()
+
+      // The request failed on wire size: shrink the probe-learned pressure
+      // budget so later turns compact BEFORE the gateway rejects again.
+      const failedBytes = requestBytes(agent.session)
+      const learned = Math.floor(failedBytes * 3 / 4)
+      if (learned >= MIN_USEFUL_REQUEST_BYTES) {
+        const current = this.learnedByteBudgets.get(agent)
+        if (current === undefined || learned < current) {
+          this.learnedByteBudgets.set(agent, learned)
+        }
+      }
 
       const generation = agent.session.surface.replaceGeneration
       let result: CompactionResult | null
@@ -287,7 +345,10 @@ export class BasicCompactionEngine extends CompactionEngine {
       }
       const range = selectCompactableRange(agent.session, measurement, 0)
       if (range === null) return null
-      return this.compactRegion(range.start, range.end, agent, signal)
+      // The compaction's own summarizer request must survive the same gateway
+      // byte cap that overflowed the conversation: replay only a bounded head.
+      const inputCap = summarizerBudget(policy, this.learnedByteBudgets.get(agent))
+      return this.compactRegion(range.start, range.end, agent, signal, inputCap)
     }
 
     const context = (await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)).context
@@ -301,7 +362,22 @@ export class BasicCompactionEngine extends CompactionEngine {
       )
     }
     const spec = resolveCompactSpec(policy, context.contextWindow)
-    if (measurement.totalTokens < spec.thresholdTokens) return null
+    const learnedBudget = this.learnedByteBudgets.get(agent)
+    const effectiveByteLimit = (): number | undefined => {
+      // An explicitly configured budget is authoritative. A gateway-probe
+      // budget is an estimate, so only values above the usefulness floor count.
+      const learned = learnedBudget !== undefined && learnedBudget >= MIN_USEFUL_REQUEST_BYTES
+        ? learnedBudget
+        : undefined
+      if (spec.maxRequestBytes === undefined) return learned
+      return learned === undefined ? spec.maxRequestBytes : Math.min(spec.maxRequestBytes, learned)
+    }
+    const pressureQualifies = (): boolean => {
+      const byteLimit = effectiveByteLimit()
+      return measurement.totalTokens >= spec.thresholdTokens
+        || (byteLimit !== undefined && requestBytes(agent.session) >= byteLimit)
+    }
+    if (!pressureQualifies()) return null
 
     // Once pressure qualifies, land the model-free pass before choosing a
     // summary range, then remeasure through the singleton replay fold.
@@ -309,8 +385,9 @@ export class BasicCompactionEngine extends CompactionEngine {
       prune.pruneSession(agent.session)
       measurement = meter.measure(agent.session)
     }
-    if (measurement.totalTokens < spec.thresholdTokens) return null
+    if (!pressureQualifies()) return null
 
+    const inputCap = summarizerBudget(spec, learnedBudget)
     let result: CompactionResult | null = null
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {
       const range = selectCompactableRange(agent.session, measurement, spec.retainTokens)
@@ -320,14 +397,18 @@ export class BasicCompactionEngine extends CompactionEngine {
         /* v8 ignore next -- paired with the defensive post-success branch above. */
         break
       }
-      result = await this.compactRegion(range.start, range.end, agent, signal)
+      result = await this.compactRegion(range.start, range.end, agent, signal, inputCap)
       measurement = meter.measure(agent.session)
-      if (measurement.totalTokens < spec.thresholdTokens) return result
+      if (!pressureQualifies()) return result
     }
 
+    const byteLimit = effectiveByteLimit()
+    const byteSummary = byteLimit === undefined
+      ? ''
+      : `, ${requestBytes(agent.session)} estimated bytes >= ${byteLimit} byte budget`
     throw new Error(
       `compaction still above threshold after ${spec.compactionRetries + 1} compaction attempts `
-      + `(${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens})`,
+      + `(${measurement.totalTokens} estimated tokens >= threshold ${spec.thresholdTokens}${byteSummary})`,
     )
   }
 
@@ -345,6 +426,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     end: number,
     agent: Agent,
     signal?: AbortSignal,
+    summarizationInputBytes?: number,
   ): Promise<CompactionResult> {
     return compactSurfaceRegion(
       this.regionDependencies(),
@@ -352,7 +434,13 @@ export class BasicCompactionEngine extends CompactionEngine {
       start,
       end,
       agent,
-      { owner: 'current-turn', stability: 'whole-surface' },
+      {
+        owner: 'current-turn',
+        stability: 'whole-surface',
+        ...summarizationInputBytes === undefined
+          ? {}
+          : { summarizationInputBytes },
+      },
       signal,
     )
   }
