@@ -255,6 +255,73 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
+  it('reports timeout bytes after request image offload', async () => {
+    const server = await mockServer([{ events: textEvents, delayMs: 200 }])
+    const ref: ImageAttachmentRef = {
+      ...IMAGE_REF,
+      bytes: 1_000_000,
+    }
+    const readImage = vi.fn((_ref: ImageAttachmentRef): Promise<StoredImageAttachment> =>
+      Promise.resolve({ ref, data: new Uint8Array(ref.bytes) }))
+
+    class OffloadAttachmentStore extends AttachmentStore {
+      readonly imageLimits: ImageAttachmentLimits = {
+        maxImageBytes: ref.bytes,
+        maxImagesPerMessage: 1,
+        maxMessageImageBytes: ref.bytes,
+        maxImagePixels: 1,
+        maxImageDimension: 2000,
+        mediaTypes: ['image/png'],
+      }
+
+      validateImage(_input: SaveImageAttachment): Promise<void> {
+        return Promise.reject(new Error('not used'))
+      }
+
+      saveImage(_input: SaveImageAttachment): Promise<ImageAttachmentRef> {
+        return Promise.reject(new Error('not used'))
+      }
+
+      readImage(value: ImageAttachmentRef): Promise<StoredImageAttachment> {
+        return readImage(value)
+      }
+    }
+
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        openai: {
+          apiKeyEnv: 'PI_TEST_KEY',
+          baseURL: `${server.url}/v1`,
+          maxRequestImageBytes: 1,
+          streamIdleTimeoutMs: 20,
+        },
+      },
+    })
+    await ctx.plugin(OffloadAttachmentStore)
+
+    const result = await assemble(ctx, {
+      provider: 'openai',
+      model: 'gpt-4.1',
+      messages: [createUserMessage({
+        content: [{ type: 'image', attachment: ref }],
+        source: { kind: 'plugin', plugin: 'test' },
+      })],
+    })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'TIMEOUT' },
+    })
+    if (result.finish.kind !== 'error') throw new Error('expected timeout failure')
+    const requestBytesEstimate = result.finish.failure.requestBytesEstimate
+    if (requestBytesEstimate === undefined) throw new Error('expected converted request byte estimate')
+    expect(requestBytesEstimate).toBeLessThan(ref.bytes)
+    expect(readImage).not.toHaveBeenCalled()
+    expect(server.paths).toEqual(['/v1/responses'])
+  })
+
   it('forces one wire request for an SDK-retryable provider failure', async () => {
     const server = await mockServer([
       {
@@ -352,13 +419,15 @@ describe('PiAiAdapter provider routing', () => {
 
     const result = await assemble(ctx, { model: model.id, messages: [] })
 
-    expect(result.finish).toEqual({
+    expect(result.finish).toMatchObject({
       kind: 'error',
       failure: {
         message: `pi-ai detected context overflow for model "${model.id}"`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
+    if (result.finish.kind !== 'error') throw new Error('expected context overflow failure')
+    expect(result.finish.failure.requestBytesEstimate).toBeTypeOf('number')
   })
 
   it('stops the SDK request when the adapter idle watchdog expires', async () => {

@@ -356,6 +356,7 @@ describe('LlmRuntime', () => {
   it('preserves structured LlmError facts in the terminal failure', async () => {
     const failure = new LlmError('provider busy', 'RATE_LIMIT', {
       status: 429,
+      requestBytesEstimate: 42_000,
       providerRetryAfterMs: 1_500,
       requestId: ProviderRequestId('req-7'),
     })
@@ -377,6 +378,7 @@ describe('LlmRuntime', () => {
           message: 'provider busy',
           code: 'RATE_LIMIT',
           status: 429,
+          requestBytesEstimate: 42_000,
           providerRetryAfterMs: 1_500,
           requestId: ProviderRequestId('req-7'),
         },
@@ -1147,6 +1149,8 @@ describe('LlmRuntime', () => {
     expect(() => new LlmError('busy', 'RATE_LIMIT', { status: 42 })).toThrow(/status/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { providerRetryAfterMs: Number.NaN }))
       .toThrow(/providerRetryAfterMs/)
+    expect(() => new LlmError('busy', 'RATE_LIMIT', { requestBytesEstimate: 0 }))
+      .toThrow(/requestBytesEstimate/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { requestId: ProviderRequestId('') })).toThrow(/requestId/)
     expect(() => new LlmError(1 as never, 'RATE_LIMIT')).toThrow(/message/)
     expect(() => new LlmError('busy', 1 as never)).toThrow(/code/)

@@ -53,6 +53,9 @@ describe('adapter failure normalization', () => {
     malformed.code = 'FOREIGN'
     expect(normalizeLlmFailure(malformed)).toEqual({ message: 'provider failed', code: 'UNKNOWN' })
 
+    malformed.failure = { message: 'provider failed', code: 'FOREIGN', requestBytesEstimate: 0 }
+    expect(normalizeLlmFailure(malformed)).toEqual({ message: 'provider failed', code: 'UNKNOWN' })
+
     const accessorBacked = new Error('provider failed') as Error & { failure: unknown }
     accessorBacked.failure = Object.defineProperty({}, 'message', {
       get() { throw new Error('failure getter failed') },

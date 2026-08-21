@@ -67,11 +67,14 @@ function failureSnapshot(value: unknown): LlmFailure | undefined {
     const message = candidate.message
     const code = candidate.code
     const status = candidate.status
+    const requestBytesEstimate = candidate.requestBytesEstimate
     const providerRetryAfterMs = candidate.providerRetryAfterMs
     const requestId = candidate.requestId
     if (typeof message !== 'string' || message.length === 0
       || typeof code !== 'string' || code.length === 0
       || (status !== undefined && (!Number.isInteger(status) || status < 100 || status > 599))
+      || (requestBytesEstimate !== undefined
+        && (!Number.isInteger(requestBytesEstimate) || requestBytesEstimate <= 0))
       || (providerRetryAfterMs !== undefined
         && (!Number.isFinite(providerRetryAfterMs) || providerRetryAfterMs <= 0))
       || (requestId !== undefined && (typeof requestId !== 'string' || requestId.length === 0))) return undefined
@@ -79,6 +82,7 @@ function failureSnapshot(value: unknown): LlmFailure | undefined {
       message,
       code,
       ...status === undefined ? {} : { status },
+      ...requestBytesEstimate === undefined ? {} : { requestBytesEstimate },
       ...providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs },
       ...requestId === undefined ? {} : { requestId },
     })

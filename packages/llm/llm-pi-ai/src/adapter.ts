@@ -28,6 +28,7 @@ import type {
   Models,
   ModelThinkingLevel,
   MutableModels,
+  Context as PiContext,
   SimpleStreamOptions,
   ThinkingLevel,
 } from '@earendil-works/pi-ai'
@@ -59,6 +60,18 @@ interface PiAiSnapshot {
   profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
   /** Providers for exactly those profiles; never mutated once published. */
   models: Models
+}
+
+/** Estimate the UTF-8 bytes retained after pi-ai request conversion and image offload. */
+function estimateConvertedRequestBytes(context: PiContext): number {
+  return new TextEncoder().encode(JSON.stringify(context)).byteLength
+}
+
+/** Omit an unavailable conversion estimate from a thrown failure snapshot. */
+function requestEstimateFact(
+  requestBytesEstimate: number | undefined,
+): { requestBytesEstimate?: number } {
+  return requestBytesEstimate === undefined ? {} : { requestBytesEstimate }
 }
 
 /** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
@@ -302,6 +315,7 @@ export class PiAiAdapter extends LlmAdapter {
       : AbortSignal.any([options.signal, consumer.signal])
     const streamIdleTimeoutMs = profile.streamIdleTimeoutMs
     using watchdog = idleWatchdog(upstream, streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
+    let requestBytesEstimate: number | undefined
 
     try {
       const containsImage = options.messages.some(message => contentHasImage(message.content))
@@ -318,6 +332,7 @@ export class PiAiAdapter extends LlmAdapter {
       const context = attachments === undefined
         ? toPiContext(options, undefined, onReplayDegrade)
         : await toPiContext(options, attachments, onReplayDegrade, profile.maxRequestImageBytes)
+      requestBytesEstimate = estimateConvertedRequestBytes(context)
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
@@ -328,7 +343,11 @@ export class PiAiAdapter extends LlmAdapter {
         // Harness-owned and therefore win collisions.
         headers: requestHeaders(profile.headers),
       })
-      const iterator = toStreamChunks(events, model.contextWindow)[Symbol.asyncIterator]()
+      const iterator = toStreamChunks(
+        events,
+        model.contextWindow,
+        requestBytesEstimate,
+      )[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {
@@ -353,10 +372,16 @@ export class PiAiAdapter extends LlmAdapter {
       }
     } catch (error: unknown) {
       if (timeoutOf(watchdog.signal, 'LLM_STREAM_IDLE_TIMEOUT') !== undefined) {
-        throw new LlmError(`pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`, 'TIMEOUT', { cause: error })
+        throw new LlmError(`pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`, 'TIMEOUT', {
+          cause: error,
+          ...requestEstimateFact(requestBytesEstimate),
+        })
       }
       if (options.signal?.aborted) {
-        throw new LlmError('pi-ai request aborted by caller', 'ABORTED', { cause: error })
+        throw new LlmError('pi-ai request aborted by caller', 'ABORTED', {
+          cause: error,
+          ...requestEstimateFact(requestBytesEstimate),
+        })
       }
       throw error
     } finally {

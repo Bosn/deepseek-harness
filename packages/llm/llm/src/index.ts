@@ -70,6 +70,8 @@ declare module '@deepseek-ai/cordis' {
 export interface LlmErrorOptions extends ErrorOptions {
   /** Valid HTTP status observed at the provider boundary. */
   status?: number
+  /** Positive integer estimate of adapter-converted request-content bytes. */
+  requestBytesEstimate?: number
   /** Positive finite provider-requested delay in milliseconds. */
   providerRetryAfterMs?: number
   /** Non-empty opaque provider request id. */
@@ -100,6 +102,10 @@ export class LlmError extends HarnessError {
       && (!Number.isFinite(options.providerRetryAfterMs) || options.providerRetryAfterMs <= 0)) {
       throw new Error('LlmError providerRetryAfterMs must be a positive finite number')
     }
+    if (options?.requestBytesEstimate !== undefined
+      && (!Number.isInteger(options.requestBytesEstimate) || options.requestBytesEstimate <= 0)) {
+      throw new Error('LlmError requestBytesEstimate must be a positive integer')
+    }
     if (options?.requestId !== undefined
       && (typeof options.requestId !== 'string' || options.requestId.length === 0)) {
       throw new Error('LlmError requestId must be a non-empty string')
@@ -110,6 +116,9 @@ export class LlmError extends HarnessError {
       message,
       code,
       ...options?.status === undefined ? {} : { status: options.status },
+      ...options?.requestBytesEstimate === undefined
+        ? {}
+        : { requestBytesEstimate: options.requestBytesEstimate },
       ...options?.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: options.providerRetryAfterMs },
       ...options?.requestId === undefined ? {} : { requestId: options.requestId },
     })

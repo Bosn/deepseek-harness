@@ -57,6 +57,7 @@ class SizeGateAdapter extends LlmAdapter {
     private readonly failureStatus?: number,
     private readonly failureCode: string = CONTEXT_WINDOW_EXCEEDED_CODE,
     private readonly failureMessage: string = REQUEST_TOO_LARGE_MESSAGE,
+    private readonly failureRequestBytesEstimate?: number,
   ) {
     super()
   }
@@ -96,6 +97,9 @@ class SizeGateAdapter extends LlmAdapter {
             message: this.failureMessage,
             code: this.failureCode,
             ...this.failureStatus === undefined ? {} : { status: this.failureStatus },
+            ...this.failureRequestBytesEstimate === undefined
+              ? {}
+              : { requestBytesEstimate: this.failureRequestBytesEstimate },
           },
         },
       }
@@ -123,6 +127,7 @@ async function harness(
     omitFailureStatus?: boolean
     failureCode?: string
     failureMessage?: string
+    failureRequestBytesEstimate?: number
     compaction?: Partial<BasicCompactionConfig>
   },
 ): Promise<{ ctx: Context; compact: RecordingCompactionEngine; adapter: SizeGateAdapter }> {
@@ -137,6 +142,7 @@ async function harness(
     options.omitFailureStatus === true ? undefined : options.failureStatus ?? 413,
     options.failureCode,
     options.failureMessage,
+    options.failureRequestBytesEstimate,
   )
   ctx.llm.registerAdapter(['mock'], adapter)
   ctx.tools.register(defineContentToolFixture({
@@ -504,6 +510,36 @@ describe('gateway request-size recovery', () => {
     try {
       const agent = await createSeededAgent(ctx, 'small-timeout', sizedHistorySeed([
         { user: 'small history', assistant: 'historical response' },
+      ]))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(adapter.conversationRequests).toHaveLength(1)
+      expect(compact.capturedInputs).toHaveLength(0)
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'error' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('uses the adapter-converted size for timeout recovery after image offload', async () => {
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      omitFailureStatus: true,
+      failureCode: 'TIMEOUT',
+      failureMessage: 'pi-ai stream idle timeout after 300000ms',
+      failureRequestBytesEstimate: 16 * 1024,
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'offloaded-image-timeout', sizedHistorySeed([
+        { user: 'pre-conversion attachment bytes '.repeat(30_000), assistant: 'historical response' },
       ]))
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: 'continue' }],

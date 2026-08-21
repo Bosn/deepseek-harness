@@ -245,7 +245,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       const target = routedTarget(agent.session)
       if (target === undefined) return next()
       const policy = resolveTargetPolicy(this.config, target)
-      const failedBytes = requestBytes(agent.session)
+      const failedBytes = failure.requestBytesEstimate ?? requestBytes(agent.session)
       const requestSizeFailure = failure.status === 413
         || (failure.code === 'TIMEOUT' && failedBytes >= policy.timeoutRecoveryBytes)
       if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE && !requestSizeFailure) return next()
