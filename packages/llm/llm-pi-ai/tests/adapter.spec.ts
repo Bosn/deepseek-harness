@@ -380,7 +380,7 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
-  it('treats quota-worded HTTP 429 as throttling', async () => {
+  it('treats quota-worded HTTP 429 as throttling when the route opts in', async () => {
     const server = await mockServer([{
       status: 429,
       body: JSON.stringify({
@@ -391,7 +391,7 @@ describe('PiAiAdapter provider routing', () => {
         },
       }),
     }])
-    const ctx = await harness(server.url)
+    const ctx = await harness(server.url, { quotaWorded429IsRateLimit: true })
 
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
 
@@ -403,6 +403,31 @@ describe('PiAiAdapter provider routing', () => {
       },
     })
     expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('preserves OpenAI quota-worded HTTP 429 as terminal quota', async () => {
+    const server = await mockServer([{
+      status: 429,
+      body: JSON.stringify({
+        error: {
+          message: 'You exceeded your current quota',
+          type: 'insufficient_quota',
+          code: 'insufficient_quota',
+        },
+      }),
+    }])
+    const adapter = adapterOf({ openai: { baseURL: server.url } })
+    const chunks = []
+
+    for await (const chunk of adapter.stream({ provider: 'openai', model: 'gpt-5.5', messages: [] })) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'QUOTA', status: 429 } },
+    })
+    expect(server.requests).toHaveLength(1)
   })
 
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {
@@ -873,6 +898,28 @@ describe('provider profile lifecycle', () => {
       .toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
     expect(resolveProfiles({ openai: { maxRequestImageBytes: 1024 } }).get('openai')?.maxRequestImageBytes)
       .toBe(1024)
+    expect(resolveProfiles({ openai: {} }).get('openai')?.quotaWorded429IsRateLimit).toBe(false)
+    expect(resolveProfiles({ 'qwen-token-plan': {} }).get('qwen-token-plan')?.quotaWorded429IsRateLimit).toBe(true)
+    expect(resolveProfiles({ 'qwen-token-plan-cn': {} }).get('qwen-token-plan-cn')?.quotaWorded429IsRateLimit)
+      .toBe(true)
+    expect(resolveProfiles({
+      'qwen-token-plan': { quotaWorded429IsRateLimit: false },
+    }).get('qwen-token-plan')?.quotaWorded429IsRateLimit).toBe(false)
+    expect(resolveProfiles({
+      custom: {
+        api: 'openai-completions',
+        baseURL: 'https://example.test/v1',
+        models: [{ id: 'custom-model' }],
+      },
+    }).get('custom')?.quotaWorded429IsRateLimit).toBe(false)
+    expect(resolveProfiles({
+      custom: {
+        api: 'openai-completions',
+        baseURL: 'https://example.test/v1',
+        models: [{ id: 'custom-model' }],
+        quotaWorded429IsRateLimit: true,
+      },
+    }).get('custom')?.quotaWorded429IsRateLimit).toBe(true)
   })
 
   it.each(['maxRetries', 'maxRetryDelayMs'] as const)(
@@ -894,6 +941,7 @@ describe('provider profile lifecycle', () => {
       { streamIdleTimeoutMs: 0 },
       { streamIdleTimeoutMs: Number.NaN },
       { streamIdleTimeoutMs: MAX_TIMER_DELAY_MS + 1 },
+      { quotaWorded429IsRateLimit: 'yes' as never },
       { maxRequestImageBytes: 0 },
       { maxRequestImageBytes: 1.5 },
       { maxRequestImageBytes: Number.NaN },

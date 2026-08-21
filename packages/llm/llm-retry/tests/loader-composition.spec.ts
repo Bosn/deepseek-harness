@@ -208,6 +208,7 @@ describe('real Loader composition', () => {
       '      qwen-test:',
       '        apiKeyEnv: PI_AI_LOADER_TEST_KEY',
       '        api: openai-completions',
+      '        quotaWorded429IsRateLimit: true',
       `        baseURL: '${mockServer.baseURL}'`,
       '        models:',
       '          - id: qwen-test-model',
@@ -246,6 +247,59 @@ describe('real Loader composition', () => {
     expect(agent.session.deriveMessages().at(-1)).toMatchObject({
       role: 'assistant',
       source: { provider: 'qwen-test', model: 'qwen-test-model' },
+    })
+  })
+
+  it('does not retry a quota-worded HTTP 429 on an OpenAI route', { timeout: 60_000 }, async () => {
+    vi.stubEnv('PI_AI_LOADER_TEST_KEY', 'test-key')
+    mockServer = await startMockLlmServer({ sequence: ['quota_exceeded', 'success'] })
+    const loaded = await loadYaml([
+      "- name: '@deepseek-ai/dsh-llm'",
+      "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-system-prompt'",
+      "- name: '@deepseek-ai/dsh-tools'",
+      "- name: '@deepseek-ai/dsh-agent'",
+      "- name: '@deepseek-ai/dsh-llm-pi-ai'",
+      '  config:',
+      '    providers:',
+      '      openai:',
+      '        apiKeyEnv: PI_AI_LOADER_TEST_KEY',
+      '        api: openai-completions',
+      `        baseURL: '${mockServer.baseURL}'`,
+      '        models:',
+      '          - id: openai-test-model',
+      '            contextWindow: 1000000',
+      '            maxTokens: 32768',
+      '        retryPolicy:',
+      '          mode: normal',
+      '          maxRetries: 3',
+      '          retryableCodes: [RATE_LIMIT]',
+      '          backoff:',
+      '            initialDelayMs: 1',
+      '            maxDelayMs: 25',
+      '            jitterRatio: 0',
+      '            rateLimitDelaysMs: [25]',
+      "- name: '@deepseek-ai/dsh-llm-retry'",
+      "- name: '@deepseek-ai/dsh-agent-loop'",
+    ])
+    const agent = loaded.agentLoop.create(SessionId('loader-openai-quota'), {
+      provider: 'openai',
+      model: 'openai-test-model',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'stop' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(mockServer.requests.map(request => request.scriptBehavior)).toEqual(['quota_exceeded'])
+    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(0)
+    expect(agent.session.events.at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { code: 'QUOTA', status: 429 },
+        },
+      },
     })
   })
 

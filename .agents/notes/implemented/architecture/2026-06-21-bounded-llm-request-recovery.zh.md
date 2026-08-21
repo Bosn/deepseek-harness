@@ -46,7 +46,7 @@ agent loop（智能体循环）会将终止 finish 的 `LlmFailure` 传给 `agen
 
 适配器会先提取结构化事实，再回退到消息检查。它们会验证 HTTP 状态，将 `Retry-After` 的秒数或日期解析为正的有限毫秒延迟，在提供方公开请求 id 时将其品牌化，并区分自身超时与调用方中止。提供方专用 code 和消息可以细化映射，但恢复监听器不会解析它们。
 
-共享的暂时性 code 集有意保持很小：适配器针对 `RATE_LIMIT` 和 `SERVER` 的映射，远程失败使用的显式 `TIMEOUT` 和 `TRANSPORT` code，以及提供方响应已完成却没有内容块时使用的 `EMPTY_RESPONSE`。两个适配器都会把最后一种情况归类为错误 finish；详见[空模型响应可重试](../bug-fix/2026-07-24-empty-model-response-is-retryable.zh.md)。两个适配器都把每个显式 HTTP 429——无论是否带 quota 措辞——归类为 `RATE_LIMIT`，`QUOTA` 只留给非 429 状态上的 quota 措辞（例如 402 余额不足）；分类与分钟级等待都由[冷却决策](../bug-fix/2026-08-21-rate-limit-cooldown-retry.zh.md)负责。身份验证、无效请求、语义上下文溢出、协议、中止和未知失败都保留不同的稳定 code，且默认不属于暂时性失败。HTTP 413 使用上下文溢出 code 选择重建请求压缩，归[请求大小恢复决策](../bug-fix/2026-08-21-request-size-timeout-recovery.zh.md)负责。新增 code 需要适配器 fixture（测试前置数据）和已记录的策略决策；无需扩展第二个失败类枚举。
+共享的暂时性 code 集有意保持很小：适配器针对 `RATE_LIMIT` 和 `SERVER` 的映射，远程失败使用的显式 `TIMEOUT` 和 `TRANSPORT` code，以及提供方响应已完成却没有内容块时使用的 `EMPTY_RESPONSE`。两个适配器都会把最后一种情况归类为错误 finish；详见[空模型响应可重试](../bug-fix/2026-07-24-empty-model-response-is-retryable.zh.md)。直连 DeepSeek 适配器把每个显式 HTTP 429 归类为 `RATE_LIMIT`。Pi-ai 对普通 429 采用同样分类，但 quota 措辞保持终态 `QUOTA`；只有显式 429 出现在已配置为瞬态 quota 措辞的路由上时例外。内建 qwen token-plan 路由默认开启该行为，OpenAI 与未知路由则不会。所有路由上的非 429 quota 措辞都保持终态。分类与分钟级等待由[冷却决策](../bug-fix/2026-08-21-rate-limit-cooldown-retry.zh.md)负责。身份验证、无效请求、语义上下文溢出、协议、中止和未知失败都保留不同的稳定 code，且默认不属于暂时性失败。HTTP 413 使用上下文溢出 code 选择重建请求压缩，归[请求大小恢复决策](../bug-fix/2026-08-21-request-size-timeout-recovery.zh.md)负责。新增 code 需要适配器 fixture（测试前置数据）和已记录的策略决策；无需扩展第二个失败类枚举。
 
 ### 将重试策略放在现有失败步骤扩展点上
 
@@ -136,5 +136,5 @@ agent-spine 演示组合包加载该插件，因此共享的 stdio/TUI、一次�
 - [超时 deadline 库](../../implemented/architecture/2026-07-06-timeout-deadline-library.zh.md)将共享的 deadline 分类与能力自身拥有的终止操作分开。
 - [调用后压缩压力与失败请求恢复](../../implemented/architecture/2026-07-10-after-call-compaction-pressure-and-overflow-recovery.zh.md)负责当前开放步骤的请求恢复扩展点与有界压缩重试。
 - [提供方路由的 LLM 适配器](../../implemented/architecture/2026-07-14-provider-routed-llm-adapters.zh.md)负责显式提供方／模型路由与每个提供方仅有一个适配器的不变量。
-- [RATE_LIMIT 冷却重试](../../implemented/bug-fix/2026-08-21-rate-limit-cooldown-retry.zh.md)负责一／三／五分钟冷却调度与带 quota 措辞的 429 分类。
+- [RATE_LIMIT 冷却重试](../../implemented/bug-fix/2026-08-21-rate-limit-cooldown-retry.zh.md)负责一／三／五分钟冷却调度与按路由区分的 quota 措辞 429 分类。
 - [Terminal turn errors survive same-turn retry history](../bug-fix/2026-08-20-turn-error-survives-same-turn-retry-history.zh.md)负责移除曾藏掉耗尽恢复终态错误行的 Web 重试历史抑制。

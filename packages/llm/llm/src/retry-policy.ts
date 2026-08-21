@@ -26,8 +26,8 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
 const DEFAULT_MAX_RETRIES_BY_CODE = Object.freeze({ TIMEOUT: 1 })
 /**
  * Default per-retry cooldown waits for `RATE_LIMIT` failures: one, three, and
- * five minutes. Gateway 429 throttling (including quota-worded 429s such as
- * qwen Model Studio `insufficient_quota`) clears on a minute scale, too slow
+ * five minutes. Gateway 429 throttling (including quota-worded 429s that a
+ * provider route classifies as transient) clears on a minute scale, too slow
  * for the ten-second exponential ceiling.
  */
 const DEFAULT_RATE_LIMIT_DELAYS_MS = Object.freeze([60_000, 180_000, 300_000])

@@ -44,12 +44,18 @@ function statusFromMessage(message: string): number | undefined {
   return Number(match[1])
 }
 
-function classifyPiAiError(message: string, status: number | undefined): string {
+function classifyPiAiError(
+  message: string,
+  status: number | undefined,
+  quotaWorded429IsRateLimit: boolean,
+): string {
   if (status === 401 || status === 403 || /\b(?:401|403)\b/.test(message)) return 'AUTH'
-  // HTTP 429 is transient throttling even when its body says
-  // `insufficient_quota`; non-429 quota/balance failures remain terminal.
+  const quotaExceeded = isQuotaExceededError(message)
+  // Qwen token-plan gateways use terminal-quota wording for transient
+  // token throttling. Other routes preserve that wording as terminal QUOTA,
+  // including OpenAI's HTTP 429 insufficient_quota response.
+  if (quotaExceeded && !(status === 429 && quotaWorded429IsRateLimit)) return QUOTA_EXCEEDED_CODE
   if (status === 429 || /\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
-  if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   // Request-size rejection needs a rebuilt envelope, so it enters compaction
   // recovery instead of retrying the same bytes.
   if (status === 413
@@ -97,6 +103,7 @@ function failure(
  * @param message - the assistant message carried by the `done` or `error` event.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
  * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
+ * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
@@ -106,6 +113,7 @@ export function mapStopReason(
   message: AssistantMessage,
   contextWindow?: number,
   requestBytesEstimate?: number,
+  quotaWorded429IsRateLimit = false,
 ): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
   const harnessOverflow = message.stopReason === 'error'
@@ -156,7 +164,12 @@ export function mapStopReason(
       const status = statusFromMessage(text)
       return {
         kind: 'error',
-        failure: failure(text, classifyPiAiError(text, status), requestBytesEstimate, status),
+        failure: failure(
+          text,
+          classifyPiAiError(text, status, quotaWorded429IsRateLimit),
+          requestBytesEstimate,
+          status,
+        ),
       }
     }
   }
@@ -169,6 +182,7 @@ export function mapStopReason(
  * @param events - one assistant turn's pi-ai event stream.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
  * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
+ * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */
@@ -176,6 +190,7 @@ export async function* toStreamChunks(
   events: AsyncIterable<AssistantMessageEvent>,
   contextWindow?: number,
   requestBytesEstimate?: number,
+  quotaWorded429IsRateLimit = false,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -241,7 +256,12 @@ export async function* toStreamChunks(
         yield { type: 'usage', usage: mapUsage(event.message.usage) }
         yield {
           type: 'finish',
-          reason: mapStopReason(event.message, contextWindow, requestBytesEstimate),
+          reason: mapStopReason(
+            event.message,
+            contextWindow,
+            requestBytesEstimate,
+            quotaWorded429IsRateLimit,
+          ),
           replayState: toPiReplayState(event.message),
         }
         return
@@ -249,7 +269,10 @@ export async function* toStreamChunks(
         // In-stream error delivery (pi-ai's style) → error finish chunk
         // (the harness's other sanctioned error path besides throwing).
         yield { type: 'usage', usage: mapUsage(event.error.usage) }
-        yield { type: 'finish', reason: mapStopReason(event.error, contextWindow, requestBytesEstimate) }
+        yield {
+          type: 'finish',
+          reason: mapStopReason(event.error, contextWindow, requestBytesEstimate, quotaWorded429IsRateLimit),
+        }
         return
       // no default: AssistantMessageEvent is pi-ai's closed union; a new
       // event type should fail compilation here via tsc's exhaustiveness

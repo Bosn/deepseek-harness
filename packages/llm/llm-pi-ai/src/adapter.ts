@@ -371,6 +371,7 @@ export class PiAiAdapter extends LlmAdapter {
         events,
         model.contextWindow,
         requestBytesEstimate,
+        profile.quotaWorded429IsRateLimit,
       )[Symbol.asyncIterator]()
       let exhausted = false
       try {
