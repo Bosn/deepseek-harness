@@ -14,6 +14,7 @@ import type {
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
 import type { LlmRetryEventData } from '@deepseek-ai/dsh-llm-retry/types'
+import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -132,6 +133,9 @@ function normalConfig(
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0,
+      // Pin a 500 ms schedule so the suite's RATE_LIMIT cases keep their
+      // baseline speed; cooldown-specific tests configure the real defaults.
+      rateLimitDelaysMs: [500],
       ...backoff,
     },
   }
@@ -198,7 +202,7 @@ describe('provider-routed retry policy', () => {
       step: 1,
       provider: 'mock',
       mode: 'normal',
-      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],500,10000,0]',
+      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],500,10000,0,[500]]',
       retry: 1,
       maxRetries: 2,
       delayMs: 500,
@@ -364,7 +368,7 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests).toHaveLength(2)
   })
 
-  it('uses a bounded provider Retry-After verbatim and delegates an over-cap instruction', async () => {
+  it('uses a bounded provider Retry-After verbatim when the cooldown schedule does not say more', async () => {
     vi.useFakeTimers()
     const accepted = new ScriptedAdapter([
       new LlmError('wait', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
@@ -372,10 +376,11 @@ describe('provider-routed retry policy', () => {
     ])
     ;({ ctx: context } = await harness(accepted, { mock: normalConfig({
       backoff: { jitterRatio: 1 },
-    }) }))
+    }) }, undefined, { random: () => 0.5 }))
     const acceptedAgent = context.agentLoop.create(SessionId('retry-after-accepted'), { provider: 'mock', model: 'mock' })
     const scheduled = waitForRetry(context, acceptedAgent, 1)
     acceptedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    // The pinned 500 ms schedule is the floor; the 2 s provider hint raises it.
     expect((await scheduled).data.delayMs).toBe(2_000)
     const acceptedIdle = waitForIdle(context, acceptedAgent)
     await vi.advanceTimersByTimeAsync(2_000)
@@ -383,16 +388,54 @@ describe('provider-routed retry policy', () => {
     expect(accepted.requests).toHaveLength(2)
 
     await context.fiber.dispose()
-    const rejected = new ScriptedAdapter([
+    const raised = new ScriptedAdapter([
       new LlmError('wait too long', 'RATE_LIMIT', { providerRetryAfterMs: 10_001 }),
+      textResponse('done'),
     ])
-    ;({ ctx: context } = await harness(rejected))
-    const rejectedAgent = context.agentLoop.create(SessionId('retry-after-rejected'), { provider: 'mock', model: 'mock' })
-    const rejectedIdle = waitForIdle(context, rejectedAgent)
-    rejectedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    await rejectedIdle
-    expect(rejected.requests).toHaveLength(1)
-    expect(rejectedAgent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    ;({ ctx: context } = await harness(raised, { mock: normalConfig() }))
+    const raisedAgent = context.agentLoop.create(SessionId('retry-after-raised'), { provider: 'mock', model: 'mock' })
+    const raisedScheduled = waitForRetry(context, raisedAgent, 1)
+    raisedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    // The cooldown path floors at the schedule entry and keeps the provider
+    // hint even past the exponential ceiling, instead of giving up.
+    expect((await raisedScheduled).data.delayMs).toBe(10_001)
+    const raisedIdle = waitForIdle(context, raisedAgent)
+    await vi.advanceTimersByTimeAsync(10_001)
+    await raisedIdle
+    expect(raised.requests).toHaveLength(2)
+  })
+
+  it('uses a bounded non-rate-limit provider Retry-After verbatim', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('wait', 'SERVER', { providerRetryAfterMs: 2_000 }),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig() }))
+    const agent = context.agentLoop.create(SessionId('retry-after-server-accepted'), { provider: 'mock', model: 'mock' })
+    const scheduled = waitForRetry(context, agent, 1)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await scheduled).data.delayMs).toBe(2_000)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(2_000)
+    await idle
+    expect(adapter.requests).toHaveLength(2)
+  })
+
+  it('delegates a non-rate-limit over-cap provider Retry-After in normal mode', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('wait too long', 'SERVER', { providerRetryAfterMs: 10_001 }),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig() }))
+    const agent = context.agentLoop.create(SessionId('retry-after-server-over-cap'), { provider: 'mock', model: 'mock' })
+    const idle = waitForIdle(context, agent)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('uses local jittered backoff when always mode receives an over-cap Retry-After', async () => {
@@ -1020,6 +1063,242 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests).toHaveLength(1)
     expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(1)
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  describe('RATE_LIMIT cooldown schedule', () => {
+    function cooldownConfig(
+      overrides: Partial<Omit<NormalRetryPolicyConfig, 'mode'>> = {},
+    ): NormalRetryPolicyConfig {
+      const { backoff, ...policy } = overrides
+      return {
+        mode: 'normal',
+        maxRetries: 5,
+        ...policy,
+        backoff: {
+          initialDelayMs: 500,
+          maxDelayMs: 10_000,
+          jitterRatio: 0,
+          rateLimitDelaysMs: [60_000, 180_000, 300_000],
+          ...backoff,
+        },
+      }
+    }
+
+    it('waits one, three, and five minutes across three cooldown retries before failing the turn', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('throttled one', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled two', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled three', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled four', 'RATE_LIMIT', { status: 429 }),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: cooldownConfig() }))
+      const agent = context.agentLoop.create(SessionId('cooldown-exhausted'), { provider: 'mock', model: 'mock' })
+      const first = waitForRetry(context, agent, 1)
+
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await first).data.delayMs).toBe(60_000)
+
+      const second = waitForRetry(context, agent, 2)
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect((await second).data.delayMs).toBe(180_000)
+
+      const third = waitForRetry(context, agent, 3)
+      await vi.advanceTimersByTimeAsync(180_000)
+      expect((await third).data.delayMs).toBe(300_000)
+
+      const idle = waitForIdle(context, agent)
+      await vi.advanceTimersByTimeAsync(300_000)
+      await idle
+
+      expect(adapter.requests).toHaveLength(4)
+      expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(3)
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: {
+          reason: {
+            kind: 'error',
+            error: { message: 'throttled four', code: 'RATE_LIMIT', status: 429 },
+          },
+        },
+      })
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('recovers the turn when the gateway clears during the cooldown window', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('throttled once', 'RATE_LIMIT', { status: 429 }),
+        textResponse('recovered after cooldown'),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: cooldownConfig() }))
+      const agent = context.agentLoop.create(SessionId('cooldown-recovered'), { provider: 'mock', model: 'mock' })
+      const scheduled = waitForRetry(context, agent, 1)
+
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await scheduled).data.delayMs).toBe(60_000)
+
+      const idle = waitForIdle(context, agent)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await idle
+
+      expect(adapter.requests).toHaveLength(2)
+      expect(agent.session.events.filter(event => event.type === 'step/start').map(event => event.data))
+        .toEqual([{ turn: 1, step: 1 }])
+      expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'recovered after cooldown' }],
+      })
+    })
+
+    it('raises a cooldown entry with a valid provider Retry-After and ignores an out-of-range one', async () => {
+      vi.useFakeTimers()
+      const raised = new ScriptedAdapter([
+        new LlmError('wait for me', 'RATE_LIMIT', { providerRetryAfterMs: 600_001 }),
+        textResponse('raised recovery'),
+      ])
+      ;({ ctx: context } = await harness(raised, { mock: cooldownConfig() }))
+      const raisedAgent = context.agentLoop.create(SessionId('cooldown-retry-after-raise'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const raisedScheduled = waitForRetry(context, raisedAgent, 1)
+      raisedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await raisedScheduled).data.delayMs).toBe(600_001)
+      const raisedIdle = waitForIdle(context, raisedAgent)
+      await vi.advanceTimersByTimeAsync(600_001)
+      await raisedIdle
+      expect(raised.requests).toHaveLength(2)
+
+      await context.fiber.dispose()
+      const absurd = new ScriptedAdapter([
+        new LlmError('unusable advice', 'RATE_LIMIT', { providerRetryAfterMs: MAX_TIMER_DELAY_MS + 1 }),
+        textResponse('schedule recovery'),
+      ])
+      ;({ ctx: context } = await harness(absurd, { mock: cooldownConfig() }))
+      const absurdAgent = context.agentLoop.create(SessionId('cooldown-retry-after-absurd'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const absurdScheduled = waitForRetry(context, absurdAgent, 1)
+      absurdAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await absurdScheduled).data.delayMs).toBe(60_000)
+      const absurdIdle = waitForIdle(context, absurdAgent)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await absurdIdle
+      expect(absurd.requests).toHaveLength(2)
+    })
+
+    it('caps normal-mode RATE_LIMIT retries at the shorter schedule length', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('throttled one', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled two', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled three', 'RATE_LIMIT', { status: 429 }),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: cooldownConfig({
+        backoff: { rateLimitDelaysMs: [25, 30] },
+      }) }))
+      const agent = context.agentLoop.create(SessionId('cooldown-short-schedule'), { provider: 'mock', model: 'mock' })
+      const first = waitForRetry(context, agent, 1)
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await first).data.delayMs).toBe(25)
+      const second = waitForRetry(context, agent, 2)
+      await vi.advanceTimersByTimeAsync(25)
+      expect((await second).data.delayMs).toBe(30)
+
+      const idle = waitForIdle(context, agent)
+      await vi.advanceTimersByTimeAsync(30)
+      await idle
+
+      expect(adapter.requests).toHaveLength(3)
+      expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(2)
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: {
+          reason: {
+            kind: 'error',
+            error: { message: 'throttled three', code: 'RATE_LIMIT', status: 429 },
+          },
+        },
+      })
+    })
+
+    it('falls back to exponential backoff for RATE_LIMIT when the schedule is empty', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('throttled once', 'RATE_LIMIT', { status: 429 }),
+        textResponse('exponential recovery'),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+        backoff: { rateLimitDelaysMs: [] },
+      }) }))
+      const agent = context.agentLoop.create(SessionId('cooldown-empty-schedule'), { provider: 'mock', model: 'mock' })
+      const scheduled = waitForRetry(context, agent, 1)
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      expect((await scheduled).data.delayMs).toBe(500)
+
+      const idle = waitForIdle(context, agent)
+      await vi.advanceTimersByTimeAsync(500)
+      await idle
+      expect(adapter.requests).toHaveLength(2)
+    })
+
+    it('continues always mode past the schedule with exponential backoff', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('throttled one', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled two', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled three', 'RATE_LIMIT', { status: 429 }),
+        new LlmError('throttled four', 'RATE_LIMIT', { status: 429 }),
+        textResponse('always recovered'),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({
+        initialDelayMs: 1,
+        maxDelayMs: 4,
+        jitterRatio: 0,
+        rateLimitDelaysMs: [2, 3],
+      }) }))
+      const agent = context.agentLoop.create(SessionId('cooldown-always-past-schedule'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const idle = waitForIdle(context, agent)
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'keep trying' }], source: { kind: 'user' } }))
+      await vi.runAllTimersAsync()
+      await idle
+
+      const events = agent.session.events.filter(event => event.type === 'llm/retry')
+      expect(adapter.requests).toHaveLength(5)
+      expect(events.map(event => event.data.delayMs)).toEqual([2, 3, 4, 4])
+      expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'always recovered' }],
+      })
+    })
+
+    it('lets turn cancellation abort a cooldown wait without opening another step', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('throttled', 'RATE_LIMIT', { status: 429 }),
+        textResponse('must not run'),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: cooldownConfig() }))
+      const agent = context.agentLoop.create(SessionId('cooldown-cancel'), { provider: 'mock', model: 'mock' })
+      const scheduled = waitForRetry(context, agent, 1)
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await scheduled
+      const idle = waitForIdle(context, agent)
+      agent.cancel({ kind: 'user' })
+      await idle
+
+      expect(adapter.requests).toHaveLength(1)
+      expect(agent.session.events.at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'aborted' } },
+      })
+      expect(vi.getTimerCount()).toBe(0)
+    })
   })
 
   it('rejects retry policy configured on the executor instead of a provider', () => {

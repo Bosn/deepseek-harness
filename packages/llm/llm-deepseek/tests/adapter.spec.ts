@@ -497,10 +497,15 @@ describe('DeepSeekAdapter against a mock server', () => {
     expect(httpErrorCode(413, { code: 'context_length_exceeded' })).toBe('INVALID_REQUEST')
   })
 
-  it('distinguishes terminal quota exhaustion from transient HTTP 429 throttling', () => {
+  it('classifies every HTTP 429 as throttling and reserves terminal QUOTA for non-429 quota wording', () => {
     expect(httpErrorCode(429, { code: 'insufficient_quota', message: 'account credits exhausted' }))
-      .toBe(QUOTA_EXCEEDED_CODE)
+      .toBe('RATE_LIMIT')
+    expect(httpErrorCode(429, {
+      message: 'You exceeded your current quota, please check your plan and billing details.',
+    })).toBe('RATE_LIMIT')
     expect(httpErrorCode(429, { message: 'request rate limit exceeded' })).toBe('RATE_LIMIT')
+    expect(httpErrorCode(402, { code: 'insufficient_quota', message: 'account credits exhausted' }))
+      .toBe(QUOTA_EXCEEDED_CODE)
   })
 
   it('keeps the status-line message for JSON error bodies without a message', async () => {
@@ -757,6 +762,7 @@ describe('plugin registration and config', () => {
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0.2,
+      rateLimitDelaysMs: [60_000, 180_000, 300_000],
     })
   })
 

@@ -76,7 +76,7 @@ Within a step, exclusive calls form barriers; parallel-safe calls use a bounded 
 Everything that goes beyond "call the model, run the tools, repeat" belongs to plugins listening on the event taxonomy:
 - Hooks and policy: the relevant `agent/*` checkpoints plus the guarded `tools/pre-execute` → `tools/execute` → `tools/post-execute` → definition-owned `finalizeContent` → `tools/result` pipeline; exact event signatures and modes live in the generated regions of [core.md](../../../docs/subsystems/core.md#cordis-surface) and [tools.md](../../../docs/subsystems/tools.md#cordis-surface)
 - Compaction: pressure on `agent/pre-step`; canonical overflow repair on `agent/request-error`
-- Model-request recovery: `dsh-llm-retry` records and waits exact-provider normal or unbounded backoff on `agent/request-error`, emits non-surface `llm/retry` status, then returns a retry action
+- Model-request recovery: `dsh-llm-retry` records and waits exact-provider normal or unbounded backoff on `agent/request-error` — with a per-attempt cooldown schedule (default one, three, five minutes) for `RATE_LIMIT` throttling — emits non-surface `llm/retry` status, then returns a retry action
 - Sandbox, permission, plan mode: `tools/pre-execute` for extensible deny/ask, `tools.guard()` for monotonic owner policy, `tools/post-execute` for result decisions, and `tools/result` for final observation
 - Sub-agents: implemented outside the loop as `ctx.subagents` providers; in-process providers use `ctx.agents.create()` and owned `AgentHandle` teardown, while generic [`ctx.jobs`](../../jobs/jobs/) plus [`dsh-tool-subagent`](../../subagent/tool-subagent/) own background collection.
 - Persistence: eager write-behind from `session/event`; `session/flush` is an explicit observation barrier

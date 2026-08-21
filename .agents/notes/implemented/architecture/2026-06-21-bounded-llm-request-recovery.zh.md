@@ -46,7 +46,7 @@ agent loop（智能体循环）会将终止 finish 的 `LlmFailure` 传给 `agen
 
 适配器会先提取结构化事实，再回退到消息检查。它们会验证 HTTP 状态，将 `Retry-After` 的秒数或日期解析为正的有限毫秒延迟，在提供方公开请求 id 时将其品牌化，并区分自身超时与调用方中止。提供方专用 code 和消息可以细化映射，但恢复监听器不会解析它们。
 
-共享的暂时性 code 集有意保持很小：适配器针对 `RATE_LIMIT` 和 `SERVER` 的映射，远程失败使用的显式 `TIMEOUT` 和 `TRANSPORT` code，以及提供方响应已完成却没有内容块时使用的 `EMPTY_RESPONSE`。两个适配器都会把最后一种情况归类为错误 finish；详见[空模型响应可重试](../bug-fix/2026-07-24-empty-model-response-is-retryable.md)。身份验证、配额、无效请求、上下文溢出、协议、中止和未知失败都保留不同的稳定 code，且默认不属于暂时性失败。新增 code 需要适配器 fixture（测试前置数据）和已记录的策略决策；无需扩展第二个失败类枚举。
+共享的暂时性 code 集有意保持很小：适配器针对 `RATE_LIMIT` 和 `SERVER` 的映射，远程失败使用的显式 `TIMEOUT` 和 `TRANSPORT` code，以及提供方响应已完成却没有内容块时使用的 `EMPTY_RESPONSE`。两个适配器都会把最后一种情况归类为错误 finish；详见[空模型响应可重试](../bug-fix/2026-07-24-empty-model-response-is-retryable.md)。DeepSeek 适配器把每个 HTTP 429——无论是否带 quota 措辞——都归类为 `RATE_LIMIT`，`QUOTA` 只留给非 429 状态上的 quota 措辞（例如 402 余额不足）；分类与分钟级等待都由[冷却决策](../bug-fix/2026-08-21-rate-limit-cooldown-retry.md)负责。身份验证、无效请求、上下文溢出、协议、中止和未知失败都保留不同的稳定 code，且默认不属于暂时性失败。新增 code 需要适配器 fixture（测试前置数据）和已记录的策略决策；无需扩展第二个失败类枚举。
 
 ### 将重试策略放在现有失败步骤扩展点上
 
@@ -54,9 +54,9 @@ agent loop（智能体循环）会将终止 finish 的 `LlmFailure` 传给 `agen
 
 `agent/request-error` waterfall 携带当前 `LlmFailure`、在连续恢复序列中授权重试轮次的不可变先前失败列表，以及提供服务的注册项所携带的不可变重试策略。循环只传递而不解释该策略；它拥有连续失败历史，并在模型请求成功后清除。`dsh-llm-retry` 的 normal 策略统计由同一项确切提供方策略安排的持久重试记录，`dsh-compaction-basic` 则维护自己的上下文溢出预算。因此，暂时性失败与上下文溢出交替出现时，会各自独立消耗其有限预算；最大请求数等于 1 加上所有已加载有限预算之和。
 
-当前配置形状由[提供方策略决策](../feature/2026-07-24-provider-retry-policies.md)规定。提供方适配器会注册嵌套的 `retryPolicy`；省略时使用 normal 默认值：两次暂时性重试、500 毫秒初始延迟、10 秒延迟上限、10% 抖动，以及上述五个暂时性 code。计数与延迟边界参考了所调查实现中较保守的一端：[OpenCode 使用两次请求重试，延迟边界为 500 毫秒／10 秒](https://github.com/anomalyco/opencode/blob/9976269ab1accfc9f9dc98a4a688c516934de422/%70ackages/llm/src/route/executor.ts#L36-L39)；[Pi 将三次 agent 级重试与提供方重试分开，且提供方重试默认为零](https://github.com/earendil-works/pi/blob/3da591ab74ab9ab407e72ed882600b2c851fae21/%70ackages/coding-agent/docs/settings.md#L139-L147)；[Codex 使用有限请求／流预算以及五分钟空闲超时](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/model-provider-info/src/lib.rs#L25-L33)。10% 抖动参考 [Codex 的有界抖动](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/codex-client/src/retry.rs#L40-L47)。
+当前配置形状由[提供方策略决策](../feature/2026-07-24-provider-retry-policies.md)规定。提供方适配器会注册嵌套的 `retryPolicy`；省略时使用 normal 默认值：五次暂时性重试（RATE_LIMIT 以三项冷却调度为上限）、500 毫秒初始延迟、10 秒延迟上限、10% 抖动，以及上述五个暂时性 code。计数与延迟边界参考了所调查实现中较保守的一端：[OpenCode 使用两次请求重试，延迟边界为 500 毫秒／10 秒](https://github.com/anomalyco/opencode/blob/9976269ab1accfc9f9dc98a4a688c516934de422/%70ackages/llm/src/route/executor.ts#L36-L39)；[Pi 将三次 agent 级重试与提供方重试分开，且提供方重试默认为零](https://github.com/earendil-works/pi/blob/3da591ab74ab9ab407e72ed882600b2c851fae21/%70ackages/coding-agent/docs/settings.md#L139-L147)；[Codex 使用有限请求／流预算以及五分钟空闲超时](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/model-provider-info/src/lib.rs#L25-L33)。10% 抖动参考 [Codex 的有界抖动](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/codex-client/src/retry.rs#L40-L47)。
 
-对于预算未耗尽的合格失败，从 1 开始的暂时性重试计数使用有界指数退避。有效的 `providerRetryAfterMs` 只有在不超过 `maxDelayMs` 时才会取代指数退避；提供方延迟更长时，系统会委托给下一监听器，而不会违反提供方指令提前重试。本地退避乘以 `[1 - jitterRatio, 1 + jitterRatio]` 内的注入随机因子，并将最终值限制到 `maxDelayMs`；提供方延迟不加抖动。
+对于预算未耗尽的合格失败，从 1 开始的暂时性重试计数在 RATE_LIMIT 冷却路径之外使用有界指数退避。有效的 `providerRetryAfterMs` 只有在不超过 `maxDelayMs` 时才会取代指数退避；提供方延迟更长时，系统会委托给下一监听器，而不会违反提供方指令提前重试。本地退避乘以 `[1 - jitterRatio, 1 + jitterRatio]` 内的注入随机因子，并将最终值限制到 `maxDelayMs`；提供方延迟不加抖动。RATE_LIMIT 重试则改为等待策略的冷却调度（默认一、三、五分钟），提供方提示只会抬高该调度等待。
 
 插件拥有一个覆盖其整个生命周期的 `AbortController`，并跟踪每个活跃的恢复回调，包括委托的 waterfall 工作与退避。effect 的 dispose（资源释放）会先注销监听器，再中止并等待活跃回调；中止会胜过较晚到达的委托重试决策，被捕获的回调在插件 dispose 后既不能重试，也不能进入其 waterfall 的剩余部分。尽管 Cordis 已捕获该监听器，此设计仍能使 HMR（热模块替换）的 dispose 达到完全停稳。
 
@@ -136,3 +136,4 @@ agent-spine 演示组合包加载该插件，因此共享的 stdio/TUI、一次�
 - [超时 deadline 库](../../implemented/architecture/2026-07-06-timeout-deadline-library.md)将共享的 deadline 分类与能力自身拥有的终止操作分开。
 - [调用后压缩压力与上下文溢出恢复](../../implemented/architecture/2026-07-10-after-call-compaction-pressure-and-overflow-recovery.md)负责当前已关闭步骤的请求恢复扩展点与有界溢出重试。
 - [提供方路由的 LLM 适配器](../../implemented/architecture/2026-07-14-provider-routed-llm-adapters.md)负责显式提供方／模型路由与每个提供方仅有一个适配器的不变量。
+- [RATE_LIMIT 冷却重试](../../implemented/bug-fix/2026-08-21-rate-limit-cooldown-retry.md)负责一／三／五分钟冷却调度与带 quota 措辞的 429 分类。

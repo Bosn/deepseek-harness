@@ -13,7 +13,7 @@ class RetrySnapshotAdapter extends LlmAdapter {
     mode: 'normal',
     maxRetries: 1,
     retryableCodes: ['RATE_LIMIT'],
-    backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+    backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0, rateLimitDelaysMs: [1] },
   }, 'retry-snapshot-backend.retryPolicy')
 
   providerRetryPolicy() {

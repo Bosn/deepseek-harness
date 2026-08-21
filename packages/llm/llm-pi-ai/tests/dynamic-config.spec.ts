@@ -152,6 +152,7 @@ describe('request-level dynamic profiles', () => {
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0.2,
+      rateLimitDelaysMs: [60_000, 180_000, 300_000],
     })
     expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['openai'])
   })

@@ -10,7 +10,7 @@
 
 ### 重试策略
 
-每个提供方适配器都会提供解析后的路由策略。省略提供方配置时使用有界 normal mode，在首次请求后最多重试五次。分层配置把 `mode` 改为 `always` 后可能残留 `maxRetries` 或 `retryableCodes`；解析过程会忽略这些不再生效的 normal-mode 字段，并捕获纯 always 策略。本服务存储有效策略，但不执行重试。
+每个提供方适配器都会提供解析后的路由策略。省略提供方配置时使用有界 normal mode，在首次请求后最多重试五次；`RATE_LIMIT` 失败还会按 `rateLimitDelaysMs` 冷却调度等待（默认一、三、五分钟，即三次冷却重试）。分层配置把 `mode` 改为 `always` 后可能残留 `maxRetries` 或 `retryableCodes`；解析过程会忽略这些不再生效的 normal-mode 字段，并捕获纯 always 策略。本服务存储有效策略，但不执行重试。
 
 ### 公开 API
 
@@ -79,7 +79,7 @@
 - `LlmError`：继承自 `HarnessError`；其稳定 `code` 字符串（`NO_ADAPTER`、`DUPLICATE_ADAPTER` 与 `AUTH`／`RATE_LIMIT` 等适配器 code）与冻结可序列化 `failure.code` 匹配。Payload 还可以保留已验证状态、`Retry-After` 和品牌化提供方请求 id 事实；策略位于错误之外。
 - `errorChain(value)`：渲染抛出值的完整 `cause` 链与 AggregateError 成员，供诊断输出使用，包括 UI 通知、logger 行和持久 `turn/end` 消息。因此 undici 的 `TypeError: fetch failed` 等传输包装层会显示底层 `ECONNREFUSED`／DNS／TLS 详细信息，而不是将其遮蔽。该函数只负责生成诊断文本。调用方必须依据稳定的 `code` 选择错误处理路径，绝不能通过解析渲染后的文本作出判断。
 - `CONTEXT_WINDOW_EXCEEDED_CODE`：当请求超过模型上下文窗口时，无论通过 HTTP 异常抛出还是带内 finish 交付，两个 DeepSeek 适配器都使用的提供方无关 code。`isContextWindowExceededError(detail)` 是它们针对 OpenAI 兼容提供方详细信息的共享保守分类器。
-- `QUOTA_EXCEEDED_CODE`：帐户配额、余额、点数、预算或用量限制耗尽时使用的非暂时性提供方无关 code。`isQuotaExceededError(detail)` 使这些失败与请求速率限制保持区分。
+- `QUOTA_EXCEEDED_CODE`：帐户配额、余额、点数、预算或用量限制耗尽时使用的非暂时性提供方无关 code。`isQuotaExceededError(detail)` 使这些失败与请求速率限制保持区分；DeepSeek 适配器只对非 429 状态上的 quota 措辞使用它，因为 429——即使带 quota 措辞——也是限流，应执行冷却重试。
 - `EMPTY_RESPONSE_CODE`：两个适配器都使用的提供方无关 code，用于表示退化的提供方生成结果：一个未携带任何内容块的终止 `stop`。它会被分类为错误 finish（而非成功空消息），因为尝试未产生持久内容；`dsh-llm-retry` 默认重试它。
 - `INVALID_CREDENTIAL_CODE`：已提供但无法使用的凭据所用的提供方无关 code——格式错误而非缺失，修复方式是改正已存储的值，而不是补充一个凭据，这正是它与 `MISSING_CREDENTIAL` 的区别。它被刻意排除在默认可重试集合之外：格式错误的凭据每次尝试都会以同样方式失败。`assertUsableApiKey(raw, pkg, ref)` 会以该 code 抛出 `LlmError`，是每个适配器判定已存储凭据不可用时共用的诊断。
 

@@ -84,6 +84,11 @@ it('assembles the shipped Web catalog, file-reference guidance, retry policy, an
       "maxDelayMs": 10000,
       "maxRetries": 5,
       "mode": "normal",
+      "rateLimitDelaysMs": [
+        60000,
+        180000,
+        300000,
+      ],
       "retryableCodes": [
         "EMPTY_RESPONSE",
         "RATE_LIMIT",
@@ -102,6 +107,11 @@ it('assembles the shipped Web catalog, file-reference guidance, retry policy, an
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "mode": "always",
+      "rateLimitDelaysMs": [
+        60000,
+        180000,
+        300000,
+      ],
     }
   `)
   await ctx.settings.update(settingsNamespace('llm-pi-ai'), {
@@ -117,6 +127,11 @@ it('assembles the shipped Web catalog, file-reference guidance, retry policy, an
       "maxDelayMs": 10000,
       "maxRetries": 5,
       "mode": "normal",
+      "rateLimitDelaysMs": [
+        60000,
+        180000,
+        300000,
+      ],
       "retryableCodes": [
         "EMPTY_RESPONSE",
         "RATE_LIMIT",
@@ -132,6 +147,11 @@ it('assembles the shipped Web catalog, file-reference guidance, retry policy, an
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "mode": "always",
+      "rateLimitDelaysMs": [
+        60000,
+        180000,
+        300000,
+      ],
     }
   `)
   // The catalog belongs to an AGENT, not to the process: every model-facing row
