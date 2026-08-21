@@ -10,6 +10,7 @@ import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import * as CompactionInvariant from '@deepseek-ai/dsh-compaction/invariant'
 import * as CompactionBasicInvariant from '@deepseek-ai/dsh-compaction-basic/invariant'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { CompactionId, isCompactCheckpointSource, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import {
@@ -217,7 +218,9 @@ function fakeAgent(
 }
 
 /** Service over a store-detached session for failure classification. */
-function detachedService(): { ctx: Context; compact: GatedCompactionEngine; flushes: () => number } {
+function detachedService(
+  config: BasicCompactionConfig = { auto: false },
+): { ctx: Context; compact: GatedCompactionEngine; flushes: () => number } {
   const ctx = new Context()
   void new LlmRuntime(ctx)
   void new SessionStore(ctx)
@@ -228,7 +231,7 @@ function detachedService(): { ctx: Context; compact: GatedCompactionEngine; flus
     flushes += 1
     return Promise.resolve(false)
   })
-  return { ctx, compact: new GatedCompactionEngine(ctx, { auto: false }), flushes: () => flushes }
+  return { ctx, compact: new GatedCompactionEngine(ctx, config), flushes: () => flushes }
 }
 
 function compactEvents(session: Session): Array<Session['events'][number]> {
@@ -379,6 +382,17 @@ describe('compactNow through the real loop', () => {
 })
 
 describe('compactNow transaction and failure classification', () => {
+  it('applies the configured summarizer cap before a manual provider call', async () => {
+    const { compact } = detachedService({ auto: false, summarizationInputBytes: 100 })
+    const session = closedConversation(2)
+    const agent = fakeAgent(session, () => () => undefined)
+
+    await expect(compact.compactNow(agent, SIGNAL))
+      .rejects.toThrow(/cannot accommodate .* compaction instruction/)
+    expect(compact.calls).toHaveLength(0)
+    expect(compactEvents(session)).toEqual([])
+  })
+
   it('returns null without writing a bracket for history that cannot be compacted', async () => {
     const { compact } = detachedService()
     const session = Session.create(SessionId('empty'))

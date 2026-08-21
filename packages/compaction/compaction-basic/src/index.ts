@@ -72,6 +72,11 @@ function conversationTarget(
   return { provider: agent.options.provider, model: agent.options.model }
 }
 
+/** Stable in-memory key for one exact provider/model route. */
+function targetBudgetKey(target: Pick<LlmCallConfig, 'provider' | 'model'>): string {
+  return JSON.stringify([target.provider, target.model])
+}
+
 /**
  * Estimate the wire-byte size of the current surfaced request envelope:
  * the routed header (system + tool schemas) plus every surface node's
@@ -174,8 +179,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly warnedPressureConfigTargets = new Set<string>()
   private readonly recoveryRetries = new WeakMap<Agent, number>()
   private readonly recoveryAgents = new WeakMap<Session, Agent>()
-  /** Per-agent byte budgets learned from gateway 413 rejections (pressure probe). */
-  private readonly learnedByteBudgets = new WeakMap<Agent, number>()
+  /** Probe-learned byte budgets isolated by agent and exact routed target. */
+  private readonly learnedByteBudgets = new WeakMap<Agent, Map<string, number>>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -253,9 +258,9 @@ export class BasicCompactionEngine extends CompactionEngine {
       if (requestSizeFailure) {
         const learned = Math.floor(failedBytes * this.config.learnedByteSafetyRatio)
         if (learned >= MIN_USEFUL_REQUEST_BYTES) {
-          const current = this.learnedByteBudgets.get(agent)
+          const current = this.learnedByteBudget(agent, target)
           if (current === undefined || learned < current) {
-            this.learnedByteBudgets.set(agent, learned)
+            this.setLearnedByteBudget(agent, target, learned)
           }
         }
       }
@@ -271,6 +276,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
+        // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
         if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
           ctx.logger.warn(
             `${label} compaction failed after durable surface progress: ${message}; `
@@ -280,12 +286,14 @@ export class BasicCompactionEngine extends CompactionEngine {
           return { kind: 'retry' }
         }
         ctx.logger.warn(
+          // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
           `${label} compaction failed: ${message}; ${signal.aborted
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
         return next()
       }
+      // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
       if (signal.aborted
         || agent.session.surface.replaceGeneration <= generation) return next()
       if (result !== null) logResult(result, `${label} recovery`)
@@ -360,7 +368,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       if (range === null) return null
       // The compaction's own summarizer request must survive the same gateway
       // byte cap that overflowed the conversation: replay only a bounded head.
-      const inputCap = summarizerBudget(policy, this.learnedByteBudgets.get(agent))
+      const inputCap = summarizerBudget(policy, this.learnedByteBudget(agent, target))
       return this.compactRegion(range.start, range.end, agent, signal, inputCap)
     }
 
@@ -375,7 +383,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       )
     }
     const spec = resolveCompactSpec(policy, context.contextWindow)
-    const learnedBudget = this.learnedByteBudgets.get(agent)
+    const learnedBudget = this.learnedByteBudget(agent, target)
     const effectiveByteLimit = (): number | undefined => {
       // An explicitly configured budget is authoritative. A gateway-probe
       // budget is an estimate, so only values above the usefulness floor count.
@@ -432,7 +440,8 @@ export class BasicCompactionEngine extends CompactionEngine {
    * @param end - inclusive last surface-node seq.
    * @param agent - owner of the target session, used by the summarizer.
    * @param signal - optional summarization cancellation signal.
-   * @param summarizationInputBytes - optional complete-request byte cap for hierarchical compaction.
+   * @param summarizationInputBytes - internal complete-request cap; omitted
+   * explicit calls resolve the routed configured and learned budget.
    * @returns the successful durable compaction result.
    */
   override async compactRegion(
@@ -442,6 +451,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     signal?: AbortSignal,
     summarizationInputBytes?: number,
   ): Promise<CompactionResult> {
+    const inputCap = summarizationInputBytes ?? this.summarizationBudgetFor(agent)
     return compactSurfaceRegion(
       this.regionDependencies(),
       agent.session,
@@ -451,17 +461,16 @@ export class BasicCompactionEngine extends CompactionEngine {
       {
         owner: 'current-turn',
         stability: 'whole-surface',
-        ...summarizationInputBytes === undefined
-          ? {}
-          : { summarizationInputBytes },
+        summarizationInputBytes: inputCap,
       },
       signal,
     )
   }
 
   /**
-   * Force one useful idle-session compaction below the pressure threshold, and
-   * resolve only after its standalone marker pair is durably checkpointed.
+   * Force one useful idle-session compaction below the pressure threshold,
+   * enforcing the routed summarizer byte cap, and resolve only after its
+   * standalone marker pair is durably checkpointed.
    * @param agent - idle agent whose next-turn admission this call reserves.
    * @param signal - cancellation scoped to this compaction request.
    * @param sourceCommandId - initiating command identity for presentation correlation.
@@ -493,6 +502,7 @@ export class BasicCompactionEngine extends CompactionEngine {
             {
               owner: null,
               stability: 'selected-span',
+              summarizationInputBytes: this.summarizationBudgetFor(agent),
               ...sourceCommandId === undefined ? {} : { sourceCommandId },
               flush: async () => {
                 await this.ctx.sessions.flush(agent.session)
@@ -527,6 +537,37 @@ export class BasicCompactionEngine extends CompactionEngine {
       meter: this.ctx.tokenMeter,
       summarize: (input, owner, abort) => this.summarize(input, owner, abort),
     }
+  }
+
+  /** Resolve the configured and learned complete-request cap for one agent route. */
+  private summarizationBudgetFor(agent: Agent): number {
+    const target = conversationTarget(agent)
+    const policy = target === undefined
+      ? this.config
+      : resolveTargetPolicy(this.config, target)
+    const learned = target === undefined
+      ? undefined
+      : this.learnedByteBudget(agent, target)
+    return summarizerBudget(policy, learned)
+  }
+
+  /** Read a probe-learned byte budget without sharing it across routed targets. */
+  private learnedByteBudget(
+    agent: Agent,
+    target: Pick<LlmCallConfig, 'provider' | 'model'>,
+  ): number | undefined {
+    return this.learnedByteBudgets.get(agent)?.get(targetBudgetKey(target))
+  }
+
+  /** Store a probe-learned byte budget for one agent's exact routed target. */
+  private setLearnedByteBudget(
+    agent: Agent,
+    target: Pick<LlmCallConfig, 'provider' | 'model'>,
+    budget: number,
+  ): void {
+    const budgets = this.learnedByteBudgets.get(agent) ?? new Map<string, number>()
+    budgets.set(targetBudgetKey(target), budget)
+    this.learnedByteBudgets.set(agent, budgets)
   }
 }
 

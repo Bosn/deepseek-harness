@@ -903,8 +903,8 @@ describe('compaction region transaction', () => {
     expect(summarizedText(input)).toContain('fixture user 1')
   })
 
-  it('partitions capped summarizer requests only at balanced tool boundaries', async () => {
-    const compact = service({ auto: false })
+  it('applies the configured cap to explicit regions and partitions only at balanced tool boundaries', async () => {
+    const compact = service({ auto: false, summarizationInputBytes: 14_000 })
     const session = toolConversation()
     const nodes = session.surface.nodes
 
@@ -913,7 +913,6 @@ describe('compaction region transaction', () => {
       nodes[nodes.length - 1]!,
       agent(session, MODEL),
       SIGNAL,
-      14_000,
     )
 
     expect(compact.calls.length).toBeGreaterThan(1)
@@ -1494,11 +1493,15 @@ describe('automatic listener and loader composition', () => {
   function recover(
     ctx: Context,
     owner: Agent,
-    error: Error & { code?: string },
+    error: Error & { code?: string; status?: number },
     signal = SIGNAL,
     next: () => Promise<RequestErrorAction> = () => Promise.resolve(undefined),
   ): Promise<boolean> {
-    const failure: LlmFailure = { message: error.message, code: error.code ?? 'UNKNOWN' }
+    const failure: LlmFailure = {
+      message: error.message,
+      code: error.code ?? 'UNKNOWN',
+      ...error.status === undefined ? {} : { status: error.status },
+    }
     const turn = owner.session.events.findLast(event => event.type === 'turn/start')?.data.turn ?? 1
     return agentEvents(ctx, owner).waterfall(
       'agent/request-error',
@@ -1640,6 +1643,35 @@ describe('automatic listener and loader composition', () => {
     expect(session.surface.replaceGeneration).toBe(beforeGeneration + 1)
     expect(session.events.some(event => event.type === 'compaction/summary')).toBe(true)
     expect(session.surface.nodes).toContain(retainedSeq)
+  })
+
+  it('isolates a learned request-byte budget to the exact routed provider and model', async () => {
+    const ctx = createContext(1_000_000)
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 1,
+      retainTokens: 50,
+    })
+    const session = conversation(3, 'x'.repeat(30_000))
+    const owner = agent(session, MODEL)
+    const learningAttempt = vi.spyOn(compact, 'compactIfNeeded').mockResolvedValueOnce(null)
+
+    expect(await recover(ctx, owner, Object.assign(new Error('request too large'), {
+      code: 'PROVIDER',
+      status: 413,
+    }))).toBe(false)
+    learningAttempt.mockRestore()
+
+    session.append('request/header', {
+      header: { config: { provider: 'actual', model: MODEL } },
+      reason: 'change',
+    })
+    await expect(compact.compactIfNeeded(owner, 'pressure', SIGNAL)).resolves.toBeNull()
+
+    session.append('request/header', {
+      header: { config: { provider: MODEL, model: MODEL } },
+      reason: 'change',
+    })
+    await expect(compact.compactIfNeeded(owner, 'pressure', SIGNAL)).resolves.not.toBeNull()
   })
 
   it('authorizes overflow retry when pruning alone advances an indivisible surface', async () => {
