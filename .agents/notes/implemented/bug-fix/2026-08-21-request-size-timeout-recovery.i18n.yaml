@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-21-request-size-timeout-recovery.md
-2026-08-21-request-size-timeout-recovery.md: 8812142d87da5bdd9833b4c82e28e61079d116b3
-2026-08-21-request-size-timeout-recovery.zh.md: c900ebda7d0a7cce6c82661e431ad815bcc6447f
+2026-08-21-request-size-timeout-recovery.md: 79ecb83fed0869740080746b555877731e61310b
+2026-08-21-request-size-timeout-recovery.zh.md: 30f7f53053525b0a83a59f818b0fe155a5f6165e

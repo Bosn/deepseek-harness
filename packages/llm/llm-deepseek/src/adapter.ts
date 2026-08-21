@@ -266,6 +266,7 @@ export class DeepSeekAdapter extends LlmAdapter {
       ? consumer.signal
       : AbortSignal.any([options.signal, consumer.signal])
     using watchdog = idleWatchdog(upstream, connection.streamIdleTimeoutMs, STREAM_IDLE_TIMEOUT_CODE)
+    let requestBytesEstimate: number | undefined
     const iterator = this.request(
       options,
       watchdog.signal,
@@ -274,6 +275,7 @@ export class DeepSeekAdapter extends LlmAdapter {
       userId,
       attachments,
       () => { watchdog.pulse() },
+      (estimate) => { requestBytesEstimate = estimate },
     )[Symbol.asyncIterator]()
     let exhausted = false
     try {
@@ -290,7 +292,10 @@ export class DeepSeekAdapter extends LlmAdapter {
         throw new LlmError(
           `DeepSeek stream idle timeout after ${connection.streamIdleTimeoutMs}ms`,
           'TIMEOUT',
-          { cause: error },
+          {
+            cause: error,
+            ...requestBytesEstimate === undefined ? {} : { requestBytesEstimate },
+          },
         )
       }
       if (options.signal?.aborted) {
@@ -318,6 +323,7 @@ export class DeepSeekAdapter extends LlmAdapter {
     userId: AnonymousUserId,
     attachments: AttachmentStore | undefined,
     onComment: () => void,
+    onRequestSerialized: (requestBytesEstimate: number) => void,
   ): AsyncIterable<StreamChunk> {
     const body = attachments === undefined
       ? serializeRequest(options, connection.defaults)
@@ -329,6 +335,8 @@ export class DeepSeekAdapter extends LlmAdapter {
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
+    const requestBytesEstimate = new TextEncoder().encode(payload).byteLength
+    onRequestSerialized(requestBytesEstimate)
     const headers = {
       'authorization': `Bearer ${apiKey}`,
       'content-type': 'application/json',

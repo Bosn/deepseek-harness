@@ -3,7 +3,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
+import { compactSurfaceRegion, selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
+import { estimateCompactionInstructionBytes } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
@@ -23,7 +24,7 @@ import type {
   TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId } from '@deepseek-ai/dsh-session'
-import TokenMeter from '@deepseek-ai/dsh-token-meter'
+import TokenMeter, { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import { agentEvents, type Agent, type RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 
@@ -904,8 +905,14 @@ describe('compaction region transaction', () => {
   })
 
   it('applies the configured cap to explicit regions and partitions only at balanced tool boundaries', async () => {
-    const compact = service({ auto: false, summarizationInputBytes: 14_000 })
     const session = toolConversation()
+    const messages = session.deriveMessages()
+    const summarizationInputBytes = estimateCompactionInstructionBytes()
+      + estimateHeaderBytes(session.requestHeader())
+      + messages.reduce((total, message) => total + estimateMessageBytes(message), 0)
+      - estimateMessageBytes(messages[0]!)
+      - estimateMessageBytes(messages[1]!)
+    const compact = service({ auto: false, summarizationInputBytes })
     const nodes = session.surface.nodes
 
     await compact.compactRegion(
@@ -916,7 +923,7 @@ describe('compaction region transaction', () => {
     )
 
     expect(compact.calls.length).toBeGreaterThan(1)
-    for (const { input } of compact.calls) {
+    for (const [index, { input }] of compact.calls.entries()) {
       const openCalls = new Set<string>()
       for (const message of input.messages) {
         for (const block of message.content) {
@@ -927,7 +934,32 @@ describe('compaction region transaction', () => {
         }
       }
       expect(openCalls).toEqual(new Set())
+      if (index > 0) expect(summarizedText(input)).toContain('small checkpoint')
     }
+    expect(session.deriveMessages()).toHaveLength(1)
+  })
+
+  it('supports an uncapped direct region transaction', async () => {
+    const ctx = createContext()
+    const compact = service({ auto: false }, ctx)
+    const session = conversation(2)
+    const nodes = session.surface.nodes
+
+    await compactSurfaceRegion(
+      {
+        meter: ctx.tokenMeter,
+        summarize: (input, requestAgent, signal) => compact.summarize(input, requestAgent, signal),
+      },
+      session,
+      nodes[0]!,
+      nodes[nodes.length - 1]!,
+      agent(session, MODEL),
+      { owner: 'current-turn', stability: 'whole-surface' },
+      SIGNAL,
+    )
+
+    expect(compact.calls).toHaveLength(1)
+    expect(compact.calls[0]!.input).not.toHaveProperty('maxRequestBytes')
   })
 
   it('rejects a capped range whose only retained tool pair is indivisible', async () => {

@@ -12,11 +12,11 @@ normal 提供方策略可能让耗时差异很大的失败共享同一份重试�
 
 ## 决策
 
-- Pi-ai 从 SDK 展平后的错误文本提取显式 HTTP 状态码，并记录到 `LlmFailure`。HTTP 429 的优先级高于 quota 措辞并映射为 `RATE_LIMIT`；非 429 quota 仍为 `QUOTA`。HTTP 413 与请求体上限措辞映射为 `CONTEXT_WINDOW_EXCEEDED`。适配器还会记录 pi-ai context 转换与图片 offload 后的 UTF-8 字节估算。SDK 只对成功响应调用 response hook，因此 pi-ai 不会声称拥有实际不可用的非 2xx 响应头、`Retry-After` 或请求 ID。
+- Pi-ai 从 SDK 展平后的错误文本提取显式 HTTP 状态码，并记录到 `LlmFailure`。HTTP 429 的优先级高于 quota 措辞并映射为 `RATE_LIMIT`；非 429 quota 仍为 `QUOTA`。HTTP 413 与请求体上限措辞映射为 `CONTEXT_WINDOW_EXCEEDED`。Pi-ai 与直连 DeepSeek 的超时失败都会在各自请求转换与图片 offload 后记录 UTF-8 字节估算。SDK 只对成功响应调用 response hook，因此 pi-ai 不会声称拥有实际不可用的非 2xx 响应头、`Retry-After` 或请求 ID。
 - normal 重试策略增加 `maxRetriesByCode`，参与校验、不可变解析与规范策略键。省略默认值为 `{ TIMEOUT: 1 }`；未列出的 code 继续使用共享 `maxRetries` 上限，显式 always 策略不设逐代码上限。
 - normal 通用重试在安排重复请求前，会把符合条件的失败委托给下游恢复。专用 `{ kind: 'retry' }` 决定优先；只有没有下游监听器修复请求时才执行通用重试，预算耗尽路径在这一次委托后直接返回。
 - 压缩把 HTTP 413 视为请求大小失败；只有适配器转换后的估算（缺省时使用表层请求估算）达到 `timeoutRecoveryBytes`（默认 512 KiB）时，`TIMEOUT` 才使用相同路径。这避免已 offload 的图片字节把无关超时变成请求大小恢复。回退字节估算器会计价内置内容的转义 JSON 与 framing。每个正数的已确认 413 预算都会约束当次 summarizer；低于 64 KiB 主动实用 floor 的值不会持久化。两条恢复路径都会绕过常规压力与保留尾部策略，使用既有 `maxOverflowRetries` 预算，并且只在持久表层替换后重试。请求大小恢复只有在持久推进后才按 `learnedByteSafetyRatio`（默认 `0.75`）为对应 agent 与精确提供方／模型路由发布主动字节预算；语义上下文溢出不会学习。
-- `summarizationInputBytes`（默认 512 KiB）限制自动压力、显式范围与 `compactNow()` 入口生成的完整摘要请求：路由头、回放消息与固定指令。超大范围先通过较早的平衡事务压缩，直到每个请求都可装入上限。切分会保留 tool-call/result 配对；每条被替换消息都进入某个有界摘要输入；无法拆分且超限的单元会在提供方调用前失败。
+- `summarizationInputBytes`（默认 512 KiB）限制自动压力、显式范围与 `compactNow()` 入口生成的完整摘要请求：路由头、回放消息与固定指令。超大范围先通过较早的平衡事务压缩，直到每个请求都可装入上限。每个新检查点都会进入下一次有界处理，因此完整替换会收敛为一个检查点，而不会累积各分区摘要。切分会保留 tool-call/result 配对；每条被替换消息都进入某个有界摘要输入；无法拆分且超限的单元会在提供方调用前失败。
 
 ## 曾考虑的替代方案
 

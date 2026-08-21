@@ -8,6 +8,7 @@ import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attac
 import { createLaunchEnvironmentSnapshot } from '@deepseek-ai/dsh-launch-environment'
 import LlmRuntime, { createUserMessage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
+  LlmError,
   ProviderRequestId,
   QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
@@ -685,6 +686,88 @@ describe('DeepSeekAdapter against a mock server', () => {
     } finally {
       fetchSpy.mockRestore()
     }
+  })
+
+  it('reports the post-offload request bytes when an image stream times out', async () => {
+    vi.useFakeTimers()
+    let payload = ''
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      if (typeof init?.body !== 'string') throw new Error('expected a serialized string request body')
+      payload = init.body
+      const signal = init?.signal
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal?.addEventListener('abort', () => { controller.error(signal.reason) }, { once: true })
+        },
+      })
+      return Promise.resolve(new Response(body, { status: 200 }))
+    })
+    const readImage = vi.fn((ref: ImageAttachmentRef) =>
+      Promise.resolve({ ref, data: Uint8Array.of(1, 2, 3) }))
+    const attachments = { readImage } as unknown as AttachmentStore
+    const adapter = adapterOf({
+      baseURL: 'https://example.invalid',
+      streamIdleTimeoutMs: 100,
+      maxRequestImageBytes: 3,
+      models: [{ id: 'vision', inputModalities: ['text', 'image'] }],
+    }, attachments)
+    try {
+      const drainRequest = drain(adapter.stream({
+        provider: 'deepseek-official',
+        model: 'vision',
+        messages: [createUserMessage({
+          content: [{ type: 'image', attachment: imageRef }],
+          source: { kind: 'user' },
+        })],
+      }))
+      await vi.advanceTimersByTimeAsync(0)
+      const requestBytesEstimate = Buffer.byteLength(payload, 'utf8')
+      const rejected = expect(drainRequest).rejects.toMatchObject({
+        code: 'TIMEOUT',
+        failure: { code: 'TIMEOUT', requestBytesEstimate },
+      })
+      await vi.advanceTimersByTimeAsync(100)
+      await rejected
+      expect(payload).toContain('[image omitted to keep the request within its image limit;')
+      expect(readImage).not.toHaveBeenCalled()
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
+  it('omits request bytes when image serialization times out before a payload exists', async () => {
+    vi.useFakeTimers()
+    const attachments = {
+      readImage: vi.fn((_ref: ImageAttachmentRef, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { reject(new Error(String(signal.reason))) }, { once: true })
+        })),
+    } as unknown as AttachmentStore
+    const adapter = adapterOf({
+      baseURL: 'https://example.invalid',
+      streamIdleTimeoutMs: 100,
+      models: [{ id: 'vision', inputModalities: ['text', 'image'] }],
+    }, attachments)
+
+    const drainRequest = drain(adapter.stream({
+      provider: 'deepseek-official',
+      model: 'vision',
+      messages: [createUserMessage({
+        content: [{ type: 'image', attachment: imageRef }],
+        source: { kind: 'user' },
+      })],
+    }))
+    const errorPromise = drainRequest.then(
+      () => undefined,
+      (error: unknown) => error instanceof LlmError ? error : undefined,
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(100)
+    const error = await errorPromise
+    expect(error?.failure).toEqual({
+      code: 'TIMEOUT',
+      message: 'DeepSeek stream idle timeout after 100ms',
+    })
   })
 
   it('keeps an idle provider read alive through SSE comments', async () => {

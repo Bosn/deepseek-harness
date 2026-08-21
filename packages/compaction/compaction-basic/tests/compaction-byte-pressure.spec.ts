@@ -250,8 +250,8 @@ describe('gateway request-size recovery', () => {
       await waitForIdle(ctx, agent)
 
       expect(adapter.conversationRequests).toHaveLength(2)
-      // Two bounded transactions: the oversized front chunk first, then the
-      // remaining span. No input carries an omission marker.
+      // Two bounded transactions: the oversized front chunk first, then that
+      // checkpoint plus the remaining span. No input carries an omission marker.
       expect(compact.capturedInputs).toHaveLength(2)
       for (const input of compact.capturedInputs) {
         const payloadBytes = input.messages
@@ -260,13 +260,14 @@ describe('gateway request-size recovery', () => {
         const replayed = JSON.stringify(input.messages)
         expect(replayed).not.toContain('omitted from this summarization input')
       }
+      expect(JSON.stringify(compact.capturedInputs[1]!.messages)).toContain('CHECKPOINT SUMMARY')
 
-      // The retried request carries two honest checkpoints and none of the
-      // oversized original text.
+      // The retried request carries one consolidated checkpoint and none of
+      // the oversized original text.
       const retry = JSON.stringify(adapter.conversationRequests[1]!.messages)
       expect(retry).not.toContain(hugeOne)
       expect(retry).not.toContain(hugeTwo)
-      expect((retry.match(/CHECKPOINT SUMMARY/g) ?? []).length).toBe(2)
+      expect((retry.match(/CHECKPOINT SUMMARY/g) ?? []).length).toBe(1)
 
       expect([...agent.session.events].at(-1)).toMatchObject({
         type: 'turn/end',

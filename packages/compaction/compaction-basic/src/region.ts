@@ -211,7 +211,7 @@ export async function compactSurfaceRegion(
     if (omittedHeadSeq === undefined || omittedTailSeq === undefined) {
       throw new Error('compactRegion: bounded compaction selected an empty prefix')
     }
-    await compactSurfaceRegion(
+    const prefix = await compactSurfaceRegion(
       dependencies,
       session,
       omittedHeadSeq,
@@ -220,7 +220,11 @@ export async function compactSurfaceRegion(
       options,
       signal,
     )
-    remainingSeqs = remainingSeqs.slice(prepared.dropCount)
+    // The replacement user message is appended immediately before the closing
+    // event. Carry it into the next bounded pass so partition summaries
+    // converge to one checkpoint instead of accumulating on the surface.
+    const checkpointSeq = prefix.endSeq - 1
+    remainingSeqs = [checkpointSeq, ...remainingSeqs.slice(prepared.dropCount)]
   }
 }
 
