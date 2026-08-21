@@ -76,7 +76,8 @@ function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => nu
  * failure, an empty schedule, or every entry consumed). A positive provider
  * `Retry-After` within timer range raises the wait — throttling advice can only
  * extend the cooldown — while an out-of-range value is ignored in favor of the
- * schedule entry.
+ * schedule entry. Jitter varies the schedule entry, and the final wait never
+ * falls below the entry or a valid provider hint.
  * @param policy - the serving registration's resolved per-provider policy.
  * @param retry - one-based retry number about to be waited out.
  * @param failure - the classified model-request failure being recovered.
@@ -92,15 +93,17 @@ function cooldownDelay(
   if (failure.code !== 'RATE_LIMIT') return undefined
   const entry = policy.rateLimitDelaysMs[retry - 1]
   if (entry === undefined) return undefined
-  let base = entry
+  let floor = entry
   const providerMs = failure.providerRetryAfterMs
   if (providerMs !== undefined
     && Number.isFinite(providerMs)
     && providerMs > 0
     && providerMs <= MAX_TIMER_DELAY_MS) {
-    base = Math.max(base, providerMs)
+    floor = Math.max(floor, providerMs)
   }
-  return jittered(base, policy.jitterRatio, MAX_TIMER_DELAY_MS, random)
+  // Jitter varies the entry; both floors survive it. Throttling advice and
+  // the scheduled entry can extend the wait, never shorten it.
+  return Math.max(jittered(entry, policy.jitterRatio, MAX_TIMER_DELAY_MS, random), floor)
 }
 
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {

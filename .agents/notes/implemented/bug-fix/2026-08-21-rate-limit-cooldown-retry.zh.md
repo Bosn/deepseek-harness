@@ -14,7 +14,7 @@ Status: implemented
 
 - `BackoffConfig.rateLimitDelaysMs` 为 `RATE_LIMIT` 失败逐次列出一个等待时长，默认 `[60000, 180000, 300000]`——三次冷却重试，分别等待一、三、五分钟。空数组关闭该调度并回落指数退避。
 - DeepSeek 适配器把 `QUOTA` 留给非 429 状态上的 quota 措辞（402 余额不足），并把每个 HTTP 429——无论是否带 quota 措辞——归类为 `RATE_LIMIT`，由 `dsh-llm-retry` 负责等待。有调度封顶，真正欠费的账号最坏约九分钟后仍会失败。
-- `dsh-llm-retry` 把调度项作为该次尝试的延迟，以提供方 `Retry-After`（有效且在定时器范围内）为下限，并用共享抖动比例抖动。normal 模式下调度取代 `maxRetries` 成为 RATE_LIMIT 预算（`min(maxRetries, 调度长度)`），调度先于共享预算耗尽；always 模式在调度耗尽后继续指数退避重试。规范策略键包含该调度，因此调度变更会像任何其他策略变更一样重置同一步内的重试历史。
+- `dsh-llm-retry` 把调度项作为该次尝试的延迟，用共享抖动比例抖动，但绝不会低于该调度项或有效的提供方 `Retry-After`（在定时器范围内；超出范围的值被忽略）。normal 模式下调度取代 `maxRetries` 成为 RATE_LIMIT 预算（`min(maxRetries, 调度长度)`），调度先于共享预算耗尽；always 模式在调度耗尽后继续指数退避重试。规范策略键包含该调度，因此调度变更会像任何其他策略变更一样重置同一步内的重试历史。
 - 调度是数据，不是循环变更：循环的 `agent/request-error` 恢复本就无截止时间地等待 `Promise<RequestErrorAction>`，现有的生命周期／取消信号融合也本就会在取消与 dispose 时中止分钟级等待。
 
 ## Alternatives considered

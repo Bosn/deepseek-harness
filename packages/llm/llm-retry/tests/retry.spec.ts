@@ -1189,6 +1189,50 @@ describe('provider-routed retry policy', () => {
       expect(absurd.requests).toHaveLength(2)
     })
 
+    it('never jitters a cooldown wait below its schedule entry or a valid provider hint', async () => {
+      vi.useFakeTimers()
+      const adviceFloor = new ScriptedAdapter([
+        new LlmError('throttled with advice', 'RATE_LIMIT', { providerRetryAfterMs: 120_000 }),
+        textResponse('advice floor recovery'),
+      ])
+      ;({ ctx: context } = await harness(adviceFloor, { mock: cooldownConfig({
+        backoff: { jitterRatio: 0.1 },
+      }) }, undefined, { random: () => 0 }))
+      const adviceAgent = context.agentLoop.create(SessionId('cooldown-jitter-floor-advice'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const adviceScheduled = waitForRetry(context, adviceAgent, 1)
+      adviceAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      // The low jitter sample would give 54_000; the 120 s provider hint must survive.
+      expect((await adviceScheduled).data.delayMs).toBe(120_000)
+      const adviceIdle = waitForIdle(context, adviceAgent)
+      await vi.advanceTimersByTimeAsync(120_000)
+      await adviceIdle
+      expect(adviceFloor.requests).toHaveLength(2)
+
+      await context.fiber.dispose()
+      const entryFloor = new ScriptedAdapter([
+        new LlmError('throttled without advice', 'RATE_LIMIT', { status: 429 }),
+        textResponse('entry floor recovery'),
+      ])
+      ;({ ctx: context } = await harness(entryFloor, { mock: cooldownConfig({
+        backoff: { jitterRatio: 0.1 },
+      }) }, undefined, { random: () => 0 }))
+      const entryAgent = context.agentLoop.create(SessionId('cooldown-jitter-floor-entry'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      const entryScheduled = waitForRetry(context, entryAgent, 1)
+      entryAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      // The same sample would give 54_000; the 60 s schedule entry is the floor.
+      expect((await entryScheduled).data.delayMs).toBe(60_000)
+      const entryIdle = waitForIdle(context, entryAgent)
+      await vi.advanceTimersByTimeAsync(60_000)
+      await entryIdle
+      expect(entryFloor.requests).toHaveLength(2)
+    })
+
     it('caps normal-mode RATE_LIMIT retries at the shorter schedule length', async () => {
       vi.useFakeTimers()
       const adapter = new ScriptedAdapter([
