@@ -181,6 +181,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly recoveryAgents = new WeakMap<Session, Agent>()
   /** Probe-learned byte budgets isolated by agent and exact routed target. */
   private readonly learnedByteBudgets = new WeakMap<Agent, Map<string, number>>()
+  /** Candidate byte budgets visible only to the request-size recovery in flight. */
+  private readonly recoveryByteBudgets = new WeakMap<Agent, Map<string, number>>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -254,16 +256,12 @@ export class BasicCompactionEngine extends CompactionEngine {
 
       // HTTP 413 confirms byte pressure. A TIMEOUT above the configured
       // threshold opts into the same conservative recovery because resending
-      // the unchanged large envelope can repeat an upload-side stall.
-      if (requestSizeFailure) {
-        const learned = Math.floor(failedBytes * this.config.learnedByteSafetyRatio)
-        if (learned >= MIN_USEFUL_REQUEST_BYTES) {
-          const current = this.learnedByteBudget(agent, target)
-          if (current === undefined || learned < current) {
-            this.setLearnedByteBudget(agent, target, learned)
-          }
-        }
-      }
+      // the unchanged large envelope can repeat an upload-side stall. The
+      // candidate is temporary until recovery durably advances the surface.
+      const learnedBudget = requestSizeFailure
+        ? Math.floor(failedBytes * this.config.learnedByteSafetyRatio)
+        : undefined
+      this.stageRecoveryByteBudget(agent, target, learnedBudget)
 
       const generation = agent.session.surface.replaceGeneration
       const trigger: CompactionTrigger = requestSizeFailure ? 'request-size' : 'context-overflow'
@@ -273,11 +271,13 @@ export class BasicCompactionEngine extends CompactionEngine {
         result = await this.compactIfNeeded(agent, trigger, signal)
       } catch (recoveryError: unknown) {
         const message = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+        const madeProgress = agent.session.surface.replaceGeneration > generation
+        if (madeProgress) this.publishLearnedByteBudget(agent, target, learnedBudget)
         // A model-free prune can land before later summary work fails. That
         // durable reduction is sufficient retry proof; do not discard it just
         // because the optional second phase threw. Cancellation still wins.
         // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
-        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+        if (!signal.aborted && madeProgress) {
           ctx.logger.warn(
             `${label} compaction failed after durable surface progress: ${message}; `
             + 'retrying from the replacement surface',
@@ -291,11 +291,15 @@ export class BasicCompactionEngine extends CompactionEngine {
             ? 'cancellation prevents retry'
             : 'preserving the original request error'}`,
         )
-        return next()
+        return await next()
+      } finally {
+        this.clearRecoveryByteBudget(agent)
       }
+      const madeProgress = agent.session.surface.replaceGeneration > generation
+      if (madeProgress) this.publishLearnedByteBudget(agent, target, learnedBudget)
       // oxlint-disable-next-line typescript/no-unnecessary-condition -- the signal may abort while compaction is awaited.
       if (signal.aborted
-        || agent.session.surface.replaceGeneration <= generation) return next()
+        || !madeProgress) return next()
       if (result !== null) logResult(result, `${label} recovery`)
       this.recoveryRetries.set(agent, retries + 1)
       return { kind: 'retry' }
@@ -368,7 +372,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       if (range === null) return null
       // The compaction's own summarizer request must survive the same gateway
       // byte cap that overflowed the conversation: replay only a bounded head.
-      const inputCap = summarizerBudget(policy, this.learnedByteBudget(agent, target))
+      const inputCap = summarizerBudget(policy, this.effectiveByteBudget(agent, target))
       return this.compactRegion(range.start, range.end, agent, signal, inputCap)
     }
 
@@ -383,7 +387,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       )
     }
     const spec = resolveCompactSpec(policy, context.contextWindow)
-    const learnedBudget = this.learnedByteBudget(agent, target)
+    const learnedBudget = this.effectiveByteBudget(agent, target)
     const effectiveByteLimit = (): number | undefined => {
       // An explicitly configured budget is authoritative. A gateway-probe
       // budget is an estimate, so only values above the usefulness floor count.
@@ -559,14 +563,46 @@ export class BasicCompactionEngine extends CompactionEngine {
     return this.learnedByteBudgets.get(agent)?.get(targetBudgetKey(target))
   }
 
-  /** Store a probe-learned byte budget for one agent's exact routed target. */
-  private setLearnedByteBudget(
+  /** Combine the durable learned budget with a narrower in-flight recovery candidate. */
+  private effectiveByteBudget(
     agent: Agent,
     target: Pick<LlmCallConfig, 'provider' | 'model'>,
-    budget: number,
+  ): number | undefined {
+    const learned = this.learnedByteBudget(agent, target)
+    const recovery = this.recoveryByteBudgets.get(agent)?.get(targetBudgetKey(target))
+    if (learned === undefined) return recovery
+    return recovery === undefined ? learned : Math.min(learned, recovery)
+  }
+
+  /** Expose one useful candidate only while its recovery attempt runs. */
+  private stageRecoveryByteBudget(
+    agent: Agent,
+    target: Pick<LlmCallConfig, 'provider' | 'model'>,
+    budget: number | undefined,
   ): void {
-    const budgets = this.learnedByteBudgets.get(agent) ?? new Map<string, number>()
+    if (budget === undefined || budget < MIN_USEFUL_REQUEST_BYTES) return
+    const budgets = this.recoveryByteBudgets.get(agent) ?? new Map<string, number>()
     budgets.set(targetBudgetKey(target), budget)
+    this.recoveryByteBudgets.set(agent, budgets)
+  }
+
+  /** Remove the candidate after the agent's serial recovery attempt settles. */
+  private clearRecoveryByteBudget(agent: Agent): void {
+    this.recoveryByteBudgets.delete(agent)
+  }
+
+  /** Publish a useful lower probe budget after durable recovery progress. */
+  private publishLearnedByteBudget(
+    agent: Agent,
+    target: Pick<LlmCallConfig, 'provider' | 'model'>,
+    budget: number | undefined,
+  ): void {
+    if (budget === undefined || budget < MIN_USEFUL_REQUEST_BYTES) return
+    const budgets = this.learnedByteBudgets.get(agent) ?? new Map<string, number>()
+    const key = targetBudgetKey(target)
+    const current = budgets.get(key)
+    if (current !== undefined && current <= budget) return
+    budgets.set(key, budget)
     this.learnedByteBudgets.set(agent, budgets)
   }
 }

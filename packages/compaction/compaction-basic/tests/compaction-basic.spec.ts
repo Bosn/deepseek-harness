@@ -1653,12 +1653,22 @@ describe('automatic listener and loader composition', () => {
     })
     const session = conversation(3, 'x'.repeat(30_000))
     const owner = agent(session, MODEL)
-    const learningAttempt = vi.spyOn(compact, 'compactIfNeeded').mockResolvedValueOnce(null)
+    const learningAttempt = vi.spyOn(compact, 'compactIfNeeded').mockImplementationOnce(() => {
+      const head = session.surface.nodes[0]!
+      session.append('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'durable prune replacement' }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }), {
+        surfaceOp: { op: 'replace', start: head, end: head },
+        sourceEventSeqs: [head],
+      })
+      return Promise.resolve(null)
+    })
 
     expect(await recover(ctx, owner, Object.assign(new Error('request too large'), {
       code: 'PROVIDER',
       status: 413,
-    }))).toBe(false)
+    }))).toBe(true)
     learningAttempt.mockRestore()
 
     session.append('request/header', {
@@ -1672,6 +1682,24 @@ describe('automatic listener and loader composition', () => {
       reason: 'change',
     })
     await expect(compact.compactIfNeeded(owner, 'pressure', SIGNAL)).resolves.not.toBeNull()
+  })
+
+  it('does not publish a learned byte budget when request-size recovery makes no progress', async () => {
+    const ctx = createContext(1_000_000)
+    const compact = new TestCompactionEngine(ctx, {
+      thresholdRatio: 1,
+      retainTokens: 50,
+    })
+    const owner = agent(conversation(3, 'x'.repeat(30_000)), MODEL)
+    const learningAttempt = vi.spyOn(compact, 'compactIfNeeded').mockResolvedValueOnce(null)
+
+    expect(await recover(ctx, owner, Object.assign(new Error('request too large'), {
+      code: 'PROVIDER',
+      status: 413,
+    }))).toBe(false)
+    learningAttempt.mockRestore()
+
+    await expect(compact.compactIfNeeded(owner, 'pressure', SIGNAL)).resolves.toBeNull()
   })
 
   it('authorizes overflow retry when pruning alone advances an indivisible surface', async () => {
