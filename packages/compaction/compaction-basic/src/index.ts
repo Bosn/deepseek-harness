@@ -574,13 +574,13 @@ export class BasicCompactionEngine extends CompactionEngine {
     return recovery === undefined ? learned : Math.min(learned, recovery)
   }
 
-  /** Expose one useful candidate only while its recovery attempt runs. */
+  /** Expose every positive candidate only while its recovery attempt runs. */
   private stageRecoveryByteBudget(
     agent: Agent,
     target: Pick<LlmCallConfig, 'provider' | 'model'>,
     budget: number | undefined,
   ): void {
-    if (budget === undefined || budget < MIN_USEFUL_REQUEST_BYTES) return
+    if (budget === undefined || budget <= 0) return
     const budgets = this.recoveryByteBudgets.get(agent) ?? new Map<string, number>()
     budgets.set(targetBudgetKey(target), budget)
     this.recoveryByteBudgets.set(agent, budgets)

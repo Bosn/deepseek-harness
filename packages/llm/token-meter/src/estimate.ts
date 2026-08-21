@@ -91,36 +91,43 @@ function utf8Length(text: string): number {
   return Buffer.byteLength(text, 'utf8')
 }
 
+/** UTF-8 bytes in one JSON-serialized model-facing value. */
+function serializedBytes(value: object): number {
+  return utf8Length(JSON.stringify(value))
+}
+
 /**
- * Price content blocks under the fixed byte heuristic: the approximate
- * encoded wire size of the model-visible payload. Image blocks price their
- * real base64 payload; text prices UTF-8 bytes. This is the number an HTTP
+ * Price content blocks under the fixed byte heuristic: a conservative JSON
+ * serialization of model-visible content. Built-in strings include JSON
+ * escaping and field framing. Image blocks add their real base64 payload to
+ * the serialized durable reference. This approximates the number an HTTP
  * gateway caps with its request-size limit (the 413 family), which token
  * pressure alone cannot predict.
  * @param blocks - content blocks to price without mutation.
  * @returns heuristic wire bytes including per-block structural overhead.
  */
 export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
-  let bytes = 0
-  for (const block of blocks) {
+  let bytes = 2 // surrounding JSON array brackets
+  for (const [index, block] of blocks.entries()) {
+    if (index > 0) bytes += 1 // separating comma
     switch (block.type) {
       case 'text':
       case 'reasoning':
-        bytes += utf8Length(block.text) + BLOCK_OVERHEAD
-        break
       case 'tool-call':
-        bytes += utf8Length(block.name) + utf8Length(block.arguments) + BLOCK_OVERHEAD
+        bytes += serializedBytes(block)
         break
-      case 'tool-result':
-        bytes += estimateContentBytes(block.content) + BLOCK_OVERHEAD
+      case 'tool-result': {
+        const emptyContent = serializedBytes({ ...block, content: [] })
+        bytes += emptyContent - 2 + estimateContentBytes(block.content)
         break
+      }
       case 'image':
-        bytes += Math.ceil(block.attachment.bytes / 3) * 4 + BLOCK_OVERHEAD
+        bytes += serializedBytes(block) + Math.ceil(block.attachment.bytes / 3) * 4
         break
       default:
         // ContentBlockMap is merge-extensible; unknown blocks retain a
-        // conservative wire JSON price, byte-priced like the token heuristic.
-        bytes += utf8Length(JSON.stringify(block)) + BLOCK_OVERHEAD
+        // conservative serialized JSON price.
+        bytes += serializedBytes(block)
     }
   }
   return bytes
@@ -132,7 +139,8 @@ export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
  * @returns content and role-framing bytes under the fixed heuristic.
  */
 export function estimateMessageBytes(message: Message): number {
-  return estimateContentBytes(message.content) + ROLE_OVERHEAD
+  const emptyContent = serializedBytes({ ...message, content: [] })
+  return emptyContent - 2 + estimateContentBytes(message.content)
 }
 
 /**
@@ -141,10 +149,10 @@ export function estimateMessageBytes(message: Message): number {
  * @returns heuristic system plus tool-schema bytes.
  */
 export function estimateHeaderBytes(header: EpochHeader | undefined): number {
-  let bytes = 0
-  if (header?.system !== undefined) bytes += utf8Length(header.system) + ROLE_OVERHEAD
-  if (header?.tools !== undefined && header.tools.length > 0) {
-    bytes += utf8Length(JSON.stringify(header.tools)) + BLOCK_OVERHEAD
+  if (header === undefined) return 0
+  const content = {
+    ...header.system === undefined ? {} : { system: header.system },
+    ...header.tools === undefined || header.tools.length === 0 ? {} : { tools: header.tools },
   }
-  return bytes
+  return Object.keys(content).length === 0 ? 0 : serializedBytes(content)
 }

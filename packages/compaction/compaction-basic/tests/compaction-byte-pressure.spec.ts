@@ -277,6 +277,39 @@ describe('gateway request-size recovery', () => {
     }
   })
 
+  it('applies a confirmed 413 budget below the proactive usefulness floor to its recovery', async () => {
+    const rejectedBytes = 60 * 1024
+    const recoveryBudget = Math.floor(rejectedBytes * 0.75)
+    const { ctx, compact, adapter } = await harness({
+      contextWindow: 1_000_000,
+      failing: new Set([1]),
+      failureRequestBytesEstimate: rejectedBytes,
+    })
+    try {
+      const agent = await createSeededAgent(ctx, 'small-gateway-recovery', sizedHistorySeed([
+        { user: 'a'.repeat(24_000), assistant: 'historical response 1' },
+        { user: 'b'.repeat(24_000), assistant: 'historical response 2' },
+      ]))
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'continue' }],
+        source: { kind: 'user' },
+      }))
+      await waitForIdle(ctx, agent)
+
+      expect(adapter.conversationRequests).toHaveLength(2)
+      expect(compact.capturedInputs.length).toBeGreaterThan(0)
+      for (const input of compact.capturedInputs) {
+        expect(input.maxRequestBytes).toBe(recoveryBudget)
+      }
+      expect([...agent.session.events].at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'completed' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('fails loud instead of replaying when one indivisible message exceeds the cap', async () => {
     const indivisible = 'z'.repeat(600 * 1024) // Alone it still exceeds the cap.
     const { ctx, compact, adapter } = await harness({
@@ -311,6 +344,7 @@ describe('gateway request-size recovery', () => {
     const { ctx, compact, adapter } = await harness({
       contextWindow: 1_000_000,
       failing: new Set([1, 2]),
+      failureRequestBytesEstimate: 512 * 1024,
     })
     try {
       const agent = await createSeededAgent(ctx, 'unbounded-retry', sizedHistorySeed([

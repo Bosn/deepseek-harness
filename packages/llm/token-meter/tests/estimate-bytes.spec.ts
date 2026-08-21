@@ -8,8 +8,9 @@ import {
 import { createMessage, createUserMessage, CallId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 
-const BLOCK_OVERHEAD = 4
-const ROLE_OVERHEAD = 4
+function serializedBytes(value: object): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8')
+}
 
 function textMessage(text: string, role: Message['role'] = 'user'): Message {
   return createMessage({
@@ -22,10 +23,10 @@ function textMessage(text: string, role: Message['role'] = 'user'): Message {
 }
 
 describe('byte-priced estimation (gateway request-size pressure)', () => {
-  it('prices text blocks as UTF-8 wire bytes with structural overhead', () => {
-    expect(estimateMessageBytes(textMessage('abcd'))).toBe(4 + BLOCK_OVERHEAD + ROLE_OVERHEAD)
-    // 4 Chinese characters encode to 12 UTF-8 bytes.
-    expect(estimateMessageBytes(textMessage('中文文本'))).toBe(12 + BLOCK_OVERHEAD + ROLE_OVERHEAD)
+  it('prices text blocks through their escaped JSON representation', () => {
+    const ascii = textMessage('quotes " slash \\ newline\n')
+    expect(estimateMessageBytes(ascii)).toBe(serializedBytes(ascii))
+    expect(estimateMessageBytes(textMessage('中文文本'))).toBe(serializedBytes(textMessage('中文文本')))
   })
 
   it('prices tool-call blocks on name and arguments bytes plus nested results', () => {
@@ -37,11 +38,22 @@ describe('byte-priced estimation (gateway request-size pressure)', () => {
       ],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     })
-    expect(estimateMessageBytes(message)).toBe(
-      'work'.length + '{"i":1}'.length + BLOCK_OVERHEAD
-      + 3 + BLOCK_OVERHEAD + BLOCK_OVERHEAD
-      + ROLE_OVERHEAD,
-    )
+    expect(estimateMessageBytes(message)).toBe(serializedBytes(message))
+
+    const argumentsText = JSON.stringify({ quoted: '"'.repeat(2_000), path: '\\'.repeat(2_000) })
+    const escapedArguments = createMessage({
+      role: 'assistant',
+      content: [{
+        type: 'tool-call',
+        id: CallId('c2'),
+        name: 'work',
+        arguments: argumentsText,
+      }],
+      source: { kind: 'model', provider: 'mock', model: 'mock' },
+    })
+    expect(estimateMessageBytes(escapedArguments)).toBe(serializedBytes(escapedArguments))
+    expect(estimateMessageBytes(escapedArguments))
+      .toBeGreaterThan(Buffer.byteLength(argumentsText, 'utf8'))
   })
 
   it('prices image blocks on their real base64 payload', () => {
@@ -58,25 +70,22 @@ describe('byte-priced estimation (gateway request-size pressure)', () => {
       }],
       source: { kind: 'user' },
     })
-    expect(estimateMessageBytes(message)).toBe(Math.ceil(900 / 3) * 4 + BLOCK_OVERHEAD + ROLE_OVERHEAD)
+    expect(estimateMessageBytes(message)).toBe(serializedBytes(message) + Math.ceil(900 / 3) * 4)
   })
 
   it('prices unknowns conservatively through serialized JSON bytes', () => {
     const unknown = { type: 'exotic', payload: '中' } as unknown as Parameters<typeof estimateContentBytes>[0][number]
-    expect(estimateContentBytes([unknown]))
-      .toBe(Buffer.byteLength(JSON.stringify(unknown), 'utf8') + BLOCK_OVERHEAD)
+    expect(estimateContentBytes([unknown])).toBe(serializedBytes([unknown]))
   })
 
   it('prices the request header as system and tool-schema bytes', () => {
     expect(estimateHeaderBytes({ config: { provider: 'mock', model: 'mock' }, system: '中文' }))
-      .toBe(6 + ROLE_OVERHEAD)
+      .toBe(serializedBytes({ system: '中文' }))
     expect(estimateHeaderBytes({
       config: { provider: 'mock', model: 'mock' },
       tools: [{ name: 'work', description: 'x', parameters: {} }],
-    })).toBe(Buffer.byteLength(
-      JSON.stringify([{ name: 'work', description: 'x', parameters: {} }]),
-      'utf8',
-    ) + BLOCK_OVERHEAD)
+    })).toBe(serializedBytes({ tools: [{ name: 'work', description: 'x', parameters: {} }] }))
+    expect(estimateHeaderBytes({ config: { provider: 'mock', model: 'mock' } })).toBe(0)
     expect(estimateHeaderBytes(undefined)).toBe(0)
   })
 })

@@ -15,6 +15,8 @@ The estimator has no settings. It intentionally uses one fixed heuristic: four c
 - `measure(session, requestHeader?)` returns request pressure and the current priced surface at one consumed-log revision.
 - `estimateMessage(message)` prices one message with the fixed heuristic.
 
+The package also exports pure byte estimators for request-size policy. They conservatively price the JSON serialization of built-in messages and blocks, including string escaping and field framing; images add their base64 payload to the serialized durable reference. Adapter-specific protocol conversion can still differ, so an adapter-provided post-conversion estimate is more authoritative when available.
+
 `measure()` synchronizes once and returns one detached, deeply immutable snapshot. `totalTokens` is request-and-response pressure, while `surfaceTokens` is the surface-only heuristic total and equals the sum of `nodes[].tokens`. A `requestHeader` override affects pressure fields only; the surface fields still describe the current session. Every call clones the positional nodes, so measurement is O(surface).
 
 The fold tracks full request-header snapshots, step boundaries, surface appends and replacements, successful assistant messages, provider usage, and the chunk seqs cited by each assistant message. Provider usage is reused only when the latest successful call's canonical request envelope matches the measured envelope and its total is no lower than that call's full heuristic anchor; a later success replaces the earlier anchor. Otherwise the complete current envelope and surface are estimated. Surface changes remain signed relative to a matching anchor, including negative deltas after shrinking replacements.
@@ -62,7 +64,7 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 
 ## Known Limitations and Deferred Work
 
-- **The fixed heuristic is approximate** — content without reusable provider usage is priced by character count plus structural overhead, not an exact provider tokenizer or request serializer.
+- **The fixed heuristic is approximate** — token pressure uses character count plus structural overhead rather than an exact provider tokenizer. Byte pressure uses a conservative JSON surrogate rather than an adapter's exact protocol serializer.
 - **Every measurement clones the current surface** — coherent immutable snapshots make reads O(surface), including below-threshold pressure checks.
 - **Provider usage is only reusable for an identical canonical envelope** — prompt, prefix, tools, provider, model, or call-config changes deliberately fall back to full heuristic estimation.
 - **Missing legacy source seqs are handled conservatively** — assistant messages without `sourceEventSeqs` cannot distinguish provider output from listener rewrites, so the fold avoids claiming a known empty or exact chunk stream.
