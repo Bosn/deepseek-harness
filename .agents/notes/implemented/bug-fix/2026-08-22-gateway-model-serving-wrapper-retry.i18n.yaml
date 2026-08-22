@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-22-gateway-model-serving-wrapper-retry.md
-2026-08-22-gateway-model-serving-wrapper-retry.md: de611056ceb3160745afecefb2bc3662c3c65be2
-2026-08-22-gateway-model-serving-wrapper-retry.zh.md: 8c84c73933d2c11816ec5d22490a62ba0e51a683
+2026-08-22-gateway-model-serving-wrapper-retry.md: 8d5ca0047e91d3f8b06cf960d688ec394bbfecf9
+2026-08-22-gateway-model-serving-wrapper-retry.zh.md: 45c8798d0ea389fdfa663570d0ef679d99b3bbfa

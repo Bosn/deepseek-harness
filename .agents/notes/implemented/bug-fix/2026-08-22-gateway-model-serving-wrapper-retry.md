@@ -26,7 +26,7 @@ The wrapper denotes serving infrastructure, not request shape: on 2026-08-22 the
 
 ## Verification
 
-`convert.spec.ts` pins both directions: `error occurred in model serving` → `SERVER`, and the bare `[Invalid request parameters.]` → `INVALID_REQUEST`. The complete llm-pi-ai suite (268 tests) passes and the package's per-file coverage gate covers the new branch.
+`convert.spec.ts` pins both directions: `error occurred in model serving` → `SERVER`, and the bare `[Invalid request parameters.]` → `INVALID_REQUEST`. The complete llm-pi-ai suite (268 tests) passes and the package's per-file coverage gate covers the new branch. The keyless headless scenario `examples/headless-agent/tests/snapshots/provider-serving-wrapper` runs the assembled app through the real pi-ai adapter against a local OpenAI-compatible SSE stand-in whose first stream emits the wrapper and dies, and whose second attempt completes: the replay pins the `llm/retry` schedule (failure code `SERVER` carrying the wrapper message), the `llm/retry-started` record, retraction of the failed partial from the projected assistant message, and projection of the retry outcome leading to a completed turn.
 
 ## Consequences
 

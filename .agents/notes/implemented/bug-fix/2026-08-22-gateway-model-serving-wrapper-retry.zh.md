@@ -26,7 +26,7 @@ Status: implemented
 
 ## Verification
 
-`convert.spec.ts` 双向钉死：`error occurred in model serving` → `SERVER`，裸 `[Invalid request parameters.]` → `INVALID_REQUEST`。llm-pi-ai 全量套件（268 个测试）通过，包的逐文件覆盖率门禁覆盖了新分支。
+`convert.spec.ts` 双向钉死：`error occurred in model serving` → `SERVER`，裸 `[Invalid request parameters.]` → `INVALID_REQUEST`。llm-pi-ai 全量套件（268 个测试）通过，包的逐文件覆盖率门禁覆盖了新分支。keyless headless 场景 `examples/headless-agent/tests/snapshots/provider-serving-wrapper` 让装配后的应用经真实 pi-ai 适配器连到本地 OpenAI-compatible SSE 桩——第一次流发出 wrapper 错误后中断、第二次正常完成——回放钉住 `llm/retry` 调度（failure code `SERVER` 并携带 wrapper 消息）、`llm/retry-started` 记录、失败片段从投影 assistant 消息中剔除、重试结果投影入转写并以 completed 结束该 turn。
 
 ## Consequences
 
