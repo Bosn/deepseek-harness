@@ -34,6 +34,8 @@ const goalScenarioDir = join(snapshotsDir, 'goal-tools')
 const goalConfigPath = fileURLToPath(new URL('../goal.cordis.snapshot.yml', import.meta.url))
 const retryScenarioDir = join(snapshotsDir, 'provider-retry')
 const retryConfigPath = fileURLToPath(new URL('../retry.cordis.snapshot.yml', import.meta.url))
+const servingWrapperScenarioDir = join(snapshotsDir, 'provider-serving-wrapper')
+const servingWrapperConfigPath = fileURLToPath(new URL('../serving-wrapper.cordis.snapshot.yml', import.meta.url))
 const compactionScenarioDir = join(snapshotsDir, 'compaction-recovery')
 const compactionSessionFixture = join(compactionScenarioDir, 'session.jsonl')
 const compactionStreamExpected = join(compactionScenarioDir, 'stream-json.expected.jsonl')
@@ -129,6 +131,55 @@ async function deepseekDefaultsServer(): Promise<DeepSeekDefaultsServer> {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('DeepSeek defaults snapshot server has no port')
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    requests,
+    close: () => new Promise(resolve => server.close(() => { resolve() })),
+  }
+}
+
+interface ServingWrapperServer {
+  readonly url: string
+  readonly requests: JsonObject[]
+  close(): Promise<void>
+}
+
+/**
+ * Serve the gateway serving-wrapper scenario: the first chat-completions
+ * stream emits one partial content delta and then the wrapper error payload
+ * the dashscope-intl gateway sends when its serving layer dies mid-flight;
+ * the second request completes normally.
+ */
+async function servingWrapperServer(): Promise<ServingWrapperServer> {
+  const requests: JsonObject[] = []
+  const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+    let body = ''
+    request.setEncoding('utf8')
+    request.on('data', (chunk: string) => { body += chunk })
+    request.on('end', () => {
+      requests.push(JSON.parse(body) as JsonObject)
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      if (requests.length === 1) {
+        response.end([
+          'data: {"choices":[{"delta":{"role":"assistant","content":""},"index":0,"finish_reason":null}]}',
+          'data: {"choices":[{"delta":{"content":"WRAPPER_PARTIAL"},"index":0,"finish_reason":null}]}',
+          'data: {"error":{"message":"An error occurred in model serving, error message is: [Invalid request parameters.]"}}',
+          '',
+        ].join('\n\n'))
+        return
+      }
+      response.end([
+        'data: {"choices":[{"delta":{"role":"assistant","content":""},"index":0,"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"WRAPPER_RETRY_OK"},"index":0,"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}',
+        'data: [DONE]',
+        '',
+      ].join('\n\n'))
+    })
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (address === null || typeof address === 'string') throw new Error('serving-wrapper snapshot server has no port')
   return {
     url: `http://127.0.0.1:${address.port}`,
     requests,
@@ -351,6 +402,64 @@ describe('headless stream-json snapshots', () => {
     const normalized = normalizeHeadlessStream(result.stdout, runCwd)
     if (refreshing) await writeFile(streamExpected, normalized)
     expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
+  }, LOADER_SMOKE_TEST_TIMEOUT_MS)
+
+  it('classifies a gateway serving-wrapper failure as retryable and projects the retry', async () => {
+    const prompt = await scenarioPrompt(servingWrapperScenarioDir, 'provider-serving-wrapper')
+    const streamExpected = join(servingWrapperScenarioDir, 'stream-json.expected.jsonl')
+    const server = await servingWrapperServer()
+    let runCwd = ''
+    try {
+      const result = await runLoaderSmoke({
+        label: 'serving-wrapper headless stream-json snapshot',
+        tempDirPrefix: 'headless-snapshot-serving-wrapper-',
+        binScript,
+        libBinScript: binScript,
+        configPath: servingWrapperConfigPath,
+        binArgs: [servingWrapperConfigPath, prompt],
+        tsconfigPath,
+        env: {
+          DSH_SNAPSHOT: 'replay',
+          DSH_SNAPSHOT_PI_URL: server.url,
+          SNAPSHOT_PI_KEY: 'keyless-snapshot-key',
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, '--disable-warning=ExperimentalWarning'].filter(Boolean).join(' '),
+        },
+        prepare: (cwd) => { runCwd = cwd },
+        inspect: async (cwd) => {
+          const logs = await persistedLogs(cwd)
+          expect(logs).toHaveLength(1)
+          const records = parseJsonl(logs[0]?.content ?? '')
+          const retries = records.filter(record => record.type === 'llm/retry')
+          expect(retries).toHaveLength(1)
+          expect(retries[0]?.data).toMatchObject({
+            provider: 'snapshot-gateway',
+            mode: 'normal',
+            retry: 1,
+            maxRetries: 1,
+            delayMs: 1,
+            failure: {
+              message: 'An error occurred in model serving, error message is: [Invalid request parameters.]',
+              code: 'SERVER',
+            },
+          })
+          expect(records.filter(record => record.type === 'llm/retry-started')).toHaveLength(1)
+          // The failed partial stays out of the projected assistant message;
+          // the retry outcome is what the transcript carries forward.
+          const projected = records.filter(record => record.type === 'assistant/message')
+          expect(projected.length).toBeGreaterThan(0)
+          const joined = projected.map(record => JSON.stringify(record.data)).join('\n')
+          expect(joined).toContain('WRAPPER_RETRY_OK')
+          expect(joined).not.toContain('WRAPPER_PARTIAL')
+        },
+      })
+      expect(server.requests).toHaveLength(2)
+      expect(result.stderr).toBe('')
+      const normalized = normalizeHeadlessStream(result.stdout, runCwd)
+      if (refreshing) await writeFile(streamExpected, normalized)
+      expect(normalized).toBe(await readFile(streamExpected, 'utf8'))
+    } finally {
+      await server.close()
+    }
   }, LOADER_SMOKE_TEST_TIMEOUT_MS)
 
   it('recovers from HTTP 413 request-size rejection through an assembled compaction', async () => {

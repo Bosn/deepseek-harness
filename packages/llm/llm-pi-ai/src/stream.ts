@@ -62,6 +62,15 @@ function classifyPiAiError(
     || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
     return CONTEXT_WINDOW_EXCEEDED_CODE
   }
+  // The dashscope-intl compatible-mode gateway routes upstream model-serving
+  // failures through a wrapper statement ("An error occurred in model serving,
+  // error message is: [...]"). It arrives mid-stream, after the gateway has
+  // validated and partially streamed the request — a rejection of request
+  // parameters is answered up front, before any content — so this wording is
+  // transient serving infrastructure, not a request-shape bug. Classify it
+  // retryable (SERVER) instead of INVALID_REQUEST, which the agent recovery
+  // layer never retries and which aborts the whole run.
+  if (/error occurred in model serving/i.test(message)) return 'SERVER'
   if (status === 400 || /\b400\b|invalid.?request/i.test(message)) return 'INVALID_REQUEST'
   if ((status !== undefined && status >= 500) || /\b5\d\d\b/.test(message)) return 'SERVER'
   if (/\btime(?:d)?\s*out\b|timeout/i.test(message)) return 'TIMEOUT'

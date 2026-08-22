@@ -842,6 +842,20 @@ describe('mapStopReason / mapUsage', () => {
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
   })
 
+  it('classifies the gateway model-serving wrapper as retryable SERVER, not INVALID_REQUEST', () => {
+    // dashscope-intl compatible-mode surfaces upstream serving failures with
+    // this wrapper mid-stream (after content has streamed), so a retry can
+    // survive the incident; request-shape 400s arrive unwrapped and up front.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'An error occurred in model serving, error message is: [Invalid request parameters.]',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '[Invalid request parameters.]',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+  })
+
   it.each([
     '413 Content Too Large: gateway rejected request',
     '413 Payload Too Large: gateway rejected request',

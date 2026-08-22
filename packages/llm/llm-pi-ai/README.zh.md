@@ -155,7 +155,7 @@ pi-ai 依据提供方 id 与 baseURL 决定每个请求的形状：系统提示�
 ## 词汇差异
 
 - pi-ai 工具调用参数是已解析对象；harness 存储原始 JSON 字符串。适配器会解析输入，并将输出重新字符串化。
-- pi-ai 将失败报告为流内错误事件；它们会映射到 `finish {kind:'error'|'aborted', failure}` 分片。普通 HTTP 429 与 rate-limit 措辞映射为 `RATE_LIMIT`。quota 措辞映射为终态 `QUOTA`；仅当响应是显式 HTTP 429 且路由解析为 `quotaWorded429IsRateLimit: true` 时才例外。显式 HTTP 状态文本会保留为 `failure.status`，请求体拒绝映射为 `CONTEXT_WINDOW_EXCEEDED` 以进入请求大小压缩，针对已解析模型上下文窗口评估的文本或 usage 则把语义溢出映射为同一规范 code。终止时的 `stop` 若消息不含内容块，则会映射为 `finish {kind:'error'}`，code 为 `EMPTY_RESPONSE`（默认策略会重试），而非成功空消息。
+- pi-ai 将失败报告为流内错误事件；它们会映射到 `finish {kind:'error'|'aborted', failure}` 分片。普通 HTTP 429 与 rate-limit 措辞映射为 `RATE_LIMIT`。quota 措辞映射为终态 `QUOTA`；仅当响应是显式 HTTP 429 且路由解析为 `quotaWorded429IsRateLimit: true` 时才例外。显式 HTTP 状态文本会保留为 `failure.status`，请求体拒绝映射为 `CONTEXT_WINDOW_EXCEEDED` 以进入请求大小压缩，针对已解析模型上下文窗口评估的文本或 usage 则把语义溢出映射为同一规范 code。网关包装上游模型服务失败的语句（以 `error occurred in model serving` 开头、在网关已接受并流出内容之后中流到达）映射为可重试的 `SERVER` 而非 `INVALID_REQUEST`；`INVALID_REQUEST` 保留给请求形状的即时拒绝。终止时的 `stop` 若消息不含内容块，则会映射为 `finish {kind:'error'}`，code 为 `EMPTY_RESPONSE`（默认策略会重试），而非成功空消息。
 - pi-ai 将推理 token 折叠到输出 usage 中；没有可映射的独立推理计数。
 - pi-ai 的 `off` 思考级别会原样穿过 Harness 能力 seam，并在分派时变为被省略的 pi-ai 通用 `reasoning` 选项。
 - `GenerateOptions.stop` 会以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式输出接口无法保证所有提供方都支持它。
