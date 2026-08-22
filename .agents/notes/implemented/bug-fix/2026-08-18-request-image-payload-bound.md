@@ -21,12 +21,12 @@ The placeholder is model-visible but not logged as a session event. It stays wit
 - **Fail the request with a clear error instead of offloading.** Keeps the model informed but leaves the session wedged: the user cannot remove images from durable history, so a hard failure at the bound is permanent. Offload keeps the session serviceable, which is the point of the fix.
 - **Upload images once and reference them by URL / file id.** Removes the linear body growth entirely and is the right medium-term shape (providers and the internal gateway both document a Files path), but it introduces upload lifecycle management across providers and is far beyond a P0 hotfix.
 - **Count the full request body, not only images.** Text and tools contribute little and their sizes are only known after full serialization per protocol; bounding the dominant term with explicit headroom is accurate enough for the failure being fixed and much simpler. Revisit inside the route-capability design.
-- **Trim at admission instead.** Admission cannot see future accumulation; only the assembled request knows its total. Admission-side bounds (per-side dimension, bytes) remain as the first layer and are owned by [the dimension-limit note](2026-08-17-image-dimension-admission-limit.md).
+- **Trim at admission instead.** Admission cannot see future accumulation; only the assembled request knows its total. Admission-side bounds (per-side dimension, bytes) remain as the first layer and are owned by [the unified image request pipeline note](../feature/2026-08-20-unified-image-request-pipeline.md).
 
 ## Related
 
-- [Per-side image dimension admission limit](2026-08-17-image-dimension-admission-limit.md) — the admission-layer companion fix; together they close the two observed session-poisoning failures (400 dimension, 413 body size).
-- [Direct DeepSeek vision input](../feature/2026-08-19-direct-deepseek-vision-input.md) — applies this provider-neutral conversion to the official multimodal route.
+- [Unified image request pipeline](../feature/2026-08-20-unified-image-request-pipeline.md) — the admission-layer companion fix; together they close the two observed session-poisoning failures (400 dimension, 413 body size).
+- [DeepSeek Files inline fallback](2026-08-21-deepseek-files-inline-fallback.md) — applies this provider-neutral conversion to the official multimodal route.
 - [Request-size and stalled-stream recovery](2026-08-21-request-size-timeout-recovery.md) — owns 413 classification, bounded summarizer requests, and the rebuilt-request retry.
 
 ## Consequences
