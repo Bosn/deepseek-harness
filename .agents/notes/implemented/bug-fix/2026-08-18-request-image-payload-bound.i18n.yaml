@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-18-request-image-payload-bound.md
-2026-08-18-request-image-payload-bound.md: cb9cd8f28908447ae4afa321f8f5cac8a40e62e6
-2026-08-18-request-image-payload-bound.zh.md: 6dfba70c1eeacba51d380821117324ebe54d0b5b
+2026-08-18-request-image-payload-bound.md: 71a535a6adafbb1853f4c35fa71a56da60087f9e
+2026-08-18-request-image-payload-bound.zh.md: 24c0d6d5c143ea127aadb41c477f3f8022e04715
