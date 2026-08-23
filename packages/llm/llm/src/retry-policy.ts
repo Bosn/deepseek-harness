@@ -9,13 +9,14 @@
 
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { EMPTY_RESPONSE_CODE } from './error.ts'
+import { CONTENT_FILTERED_CODE, EMPTY_RESPONSE_CODE } from './error.ts'
 
 const DEFAULT_MAX_RETRIES = 5
 const DEFAULT_INITIAL_DELAY_MS = 500
 const DEFAULT_MAX_DELAY_MS = 10_000
 const DEFAULT_JITTER_RATIO = 0.1
 const DEFAULT_RETRYABLE_CODES = Object.freeze([
+  CONTENT_FILTERED_CODE,
   EMPTY_RESPONSE_CODE,
   'RATE_LIMIT',
   'SERVER',

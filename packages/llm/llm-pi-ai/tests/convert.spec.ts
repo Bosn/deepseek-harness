@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestPolicy, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { createUserMessage, CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, CallId, CONTENT_FILTERED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
 import { toPiContext } from '../src/context.ts'
@@ -840,6 +840,33 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'vector length limit exceeded',
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+  })
+
+  it('classifies moderation rejections of the response as retryable CONTENT_FILTERED', () => {
+    // dashscope-intl's safety guard rejects generated content with this exact
+    // wording; the harness retries the attempt inside the bounded budget.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'Output data may contain inappropriate content.',
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTENT_FILTERED_CODE } })
+    // A gateway that phrases the rejection as an HTTP 400 keeps the retryable
+    // class instead of the terminal INVALID_REQUEST bucket.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'HTTP 400: Output data may contain inappropriate content.',
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTENT_FILTERED_CODE, status: 400 } })
+    // pi-ai synthesizes this stop reason for a wire content_filter finish.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'Provider finish_reason: content_filter',
+    }))).toMatchObject({ kind: 'error', failure: { code: CONTENT_FILTERED_CODE } })
+    // Request-side moderation carries no response-specific wording: the
+    // identical blocked prompt is deterministic, so it stays INVALID_REQUEST
+    // instead of spending the retry budget on five unchanged re-sends.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'HTTP 400: prompt blocked by content_filter',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST', status: 400 } })
   })
 
   it('classifies the gateway model-serving wrapper as retryable SERVER, not INVALID_REQUEST', () => {

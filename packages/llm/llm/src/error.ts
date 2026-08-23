@@ -39,6 +39,17 @@ export const QUOTA_EXCEEDED_CODE = 'QUOTA'
 export const EMPTY_RESPONSE_CODE = 'EMPTY_RESPONSE'
 
 /**
+ * Canonical provider-neutral code for a response the provider or an upstream
+ * safety gate rejected on moderation grounds — a wire `content_filter` finish
+ * reason, a gateway rejection like dashscope-intl's `Output data may contain
+ * inappropriate content.`, or equivalent wording. The rejection follows from
+ * one sampled response's content, not from the request itself, so the default
+ * retry policy repeats the request inside its bounded budget: another sample
+ * is a fresh moderation decision.
+ */
+export const CONTENT_FILTERED_CODE = 'CONTENT_FILTERED'
+
+/**
  * Canonical provider-neutral code for a credential that was supplied but
  * cannot be used — malformed rather than absent. Distinct from
  * `MISSING_CREDENTIAL` because the fix differs: correct the stored value

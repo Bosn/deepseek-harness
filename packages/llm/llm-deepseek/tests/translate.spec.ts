@@ -270,7 +270,14 @@ describe('mapFinishReason', () => {
     expect(mapFinishReason(wire)).toEqual(expected)
   })
 
-  it.each(['content_filter', 'insufficient_system_resource', 'mystery_reason'])(
+  it('maps content_filter to the canonical CONTENT_FILTERED code', () => {
+    expect(mapFinishReason('content_filter')).toEqual({
+      kind: 'error',
+      failure: { message: 'model stopped: content_filter', code: 'CONTENT_FILTERED' },
+    })
+  })
+
+  it.each(['insufficient_system_resource', 'mystery_reason'])(
     'maps %s to an error kind with the wire code',
     (wire) => {
       expect(mapFinishReason(wire)).toEqual({
