@@ -63,12 +63,16 @@ function classifyPiAiError(
     return CONTEXT_WINDOW_EXCEEDED_CODE
   }
   // Response moderation rejections: a wire content_filter finish reason or an
-  // upstream safety gate's wording (dashscope-intl rejects with "Output data
-  // may contain inappropriate content."). They follow from one sampled
-  // response's content rather than from the serving request, so CONTENT_FILTERED
-  // joins the default retryable codes; the branch precedes status 400 so a
-  // gateway that phrases the rejection as a 400 keeps the retryable class.
-  if (/content[_\s-]?filter(?:ed)?|\binappropriate\s+content\b/i.test(message)) {
+  // upstream safety gate's wording naming the rejected OUTPUT (dashscope-intl
+  // rejects with "Output data may contain inappropriate content."). They follow
+  // from one sampled response's content rather than from the serving request,
+  // so CONTENT_FILTERED joins the default retryable codes; the branch precedes
+  // status 400 so a gateway that phrases the rejection as a 400 keeps the
+  // retryable class. Request-side moderation — a prompt rejected before any
+  // generation — carries none of this wording, stays INVALID_REQUEST on a 400,
+  // and is never re-sent unchanged.
+  if (/\boutput\s+(?:data|content)\b.{0,80}\binappropriate\s+content\b/i.test(message)
+    || /\bfinish[_\s]?reason\s*:\s*content[_\s-]?filter(?:ed)?\b/i.test(message)) {
     return CONTENT_FILTERED_CODE
   }
   // The dashscope-intl compatible-mode gateway routes upstream model-serving

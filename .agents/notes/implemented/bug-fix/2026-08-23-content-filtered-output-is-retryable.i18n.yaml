@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-23-content-filtered-output-is-retryable.md
-2026-08-23-content-filtered-output-is-retryable.md: 7b6f40aa24d58ad6f2a2c5b1bb00891e59660b0a
-2026-08-23-content-filtered-output-is-retryable.zh.md: 32e84c2ecad526ccab85685121d59a81117ceb14
+2026-08-23-content-filtered-output-is-retryable.md: 0461bd0c9642ee2756f6acb4d96844571db8d47e
+2026-08-23-content-filtered-output-is-retryable.zh.md: f421211605830fa1c1c2477c0f8f6834a4e305e6

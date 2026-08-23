@@ -860,6 +860,13 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'Provider finish_reason: content_filter',
     }))).toMatchObject({ kind: 'error', failure: { code: CONTENT_FILTERED_CODE } })
+    // Request-side moderation carries no response-specific wording: the
+    // identical blocked prompt is deterministic, so it stays INVALID_REQUEST
+    // instead of spending the retry budget on five unchanged re-sends.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'HTTP 400: prompt blocked by content_filter',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST', status: 400 } })
   })
 
   it('classifies the gateway model-serving wrapper as retryable SERVER, not INVALID_REQUEST', () => {

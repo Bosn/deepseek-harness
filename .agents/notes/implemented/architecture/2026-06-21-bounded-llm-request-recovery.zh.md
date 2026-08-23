@@ -46,7 +46,7 @@ agent loop（智能体循环）会将终止 finish 的 `LlmFailure` 传给 `agen
 
 适配器会先提取结构化事实，再回退到消息检查。它们会验证 HTTP 状态，将 `Retry-After` 的秒数或日期解析为正的有限毫秒延迟，在提供方公开请求 id 时将其品牌化，并区分自身超时与调用方中止。提供方专用 code 和消息可以细化映射，但恢复监听器不会解析它们。
 
-共享的暂时性 code 集有意保持很小：适配器针对 `RATE_LIMIT` 和 `SERVER` 的映射，远程失败使用的显式 `TIMEOUT` 和 `TRANSPORT` code，以及提供方响应已完成却没有内容块时使用的 `EMPTY_RESPONSE`。两个适配器都会把最后一种情况归类为错误 finish；详见[空模型响应可重试](../bug-fix/2026-07-24-empty-model-response-is-retryable.zh.md)。直连 DeepSeek 适配器把每个显式 HTTP 429 归类为 `RATE_LIMIT`。Pi-ai 对普通 429 采用同样分类，但 quota 措辞保持终态 `QUOTA`；只有显式 429 出现在已配置为瞬态 quota 措辞的路由上时例外。内建 qwen token-plan 路由默认开启该行为，OpenAI 与未知路由则不会。所有路由上的非 429 quota 措辞都保持终态。分类与分钟级等待由[冷却决策](../bug-fix/2026-08-21-rate-limit-cooldown-retry.zh.md)负责。身份验证、无效请求、语义上下文溢出、协议、中止和未知失败都保留不同的稳定 code，且默认不属于暂时性失败。HTTP 413 使用上下文溢出 code 选择重建请求压缩，归[请求大小恢复决策](../bug-fix/2026-08-21-request-size-timeout-recovery.zh.md)负责。新增 code 需要适配器 fixture（测试前置数据）和已记录的策略决策；无需扩展第二个失败类枚举。
+共享的暂时性 code 集有意保持很小：适配器针对 `RATE_LIMIT` 和 `SERVER` 的映射，远程失败使用的显式 `TIMEOUT` 和 `TRANSPORT` code，提供方响应已完成却没有内容块时使用的 `EMPTY_RESPONSE`，以及被上游安全网关以内容审核为由拒绝的响应所使用的 `CONTENT_FILTERED`。两个适配器都会把空完成情况归类为错误 finish；详见[空模型响应可重试](../bug-fix/2026-07-24-empty-model-response-is-retryable.zh.md)。响应侧内容审核分类、其重试默认值和请求侧 `INVALID_REQUEST` 边界归[内容被过滤的输出可重试](../bug-fix/2026-08-23-content-filtered-output-is-retryable.zh.md)所有。直连 DeepSeek 适配器把每个显式 HTTP 429 归类为 `RATE_LIMIT`。Pi-ai 对普通 429 采用同样分类，但 quota 措辞保持终态 `QUOTA`；只有显式 429 出现在已配置为瞬态 quota 措辞的路由上时例外。内建 qwen token-plan 路由默认开启该行为，OpenAI 与未知路由则不会。所有路由上的非 429 quota 措辞都保持终态。分类与分钟级等待由[冷却决策](../bug-fix/2026-08-21-rate-limit-cooldown-retry.zh.md)负责。身份验证、无效请求、语义上下文溢出、协议、中止和未知失败都保留不同的稳定 code，且默认不属于暂时性失败。HTTP 413 使用上下文溢出 code 选择重建请求压缩，归[请求大小恢复决策](../bug-fix/2026-08-21-request-size-timeout-recovery.zh.md)负责。新增 code 需要适配器 fixture（测试前置数据）和已记录的策略决策；无需扩展第二个失败类枚举。
 
 ### 将重试策略放在现有失败步骤扩展点上
 
@@ -54,7 +54,7 @@ agent loop（智能体循环）会将终止 finish 的 `LlmFailure` 传给 `agen
 
 当持久步骤仍处于打开状态时，`agent/request-error` waterfall 携带当前 `LlmFailure`、失败调用的提供方、轮次与步骤、实际服务注册所对应的不可变重试策略，以及仍有效的轮次 signal。循环只传递而不解释该策略；只有 listener 返回 `{ kind: 'retry' }` 时，循环才会在同一次 `step()` 调用内重建请求。`dsh-llm-retry` 的 normal 策略统计同一轮次、步骤、提供方和确切策略安排的持久重试记录，`dsh-compaction-basic` 则维护自己的失败请求恢复预算。因此，暂时性失败与压缩所属失败交替出现时，会各自独立消耗其有限预算；最大请求数等于 1 加上所有已加载有限预算之和。
 
-当前配置形状由[提供方策略决策](../feature/2026-07-24-provider-retry-policies.zh.md)规定。提供方适配器会注册嵌套的 `retryPolicy`；省略时使用 normal 默认值：五次暂时性重试、TIMEOUT 逐代码上限一次、RATE_LIMIT 以三项冷却调度为上限、500 毫秒初始延迟、10 秒延迟上限、10% 抖动，以及上述五个暂时性 code。计数与延迟边界参考了所调查实现中较保守的一端：[OpenCode 使用两次请求重试，延迟边界为 500 毫秒／10 秒](https://github.com/anomalyco/opencode/blob/9976269ab1accfc9f9dc98a4a688c516934de422/%70ackages/llm/src/route/executor.ts#L36-L39)；[Pi 将三次 agent 级重试与提供方重试分开，且提供方重试默认为零](https://github.com/earendil-works/pi/blob/3da591ab74ab9ab407e72ed882600b2c851fae21/%70ackages/coding-agent/docs/settings.md#L139-L147)；[Codex 使用有限请求／流预算以及五分钟空闲超时](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/model-provider-info/src/lib.rs#L25-L33)。10% 抖动参考 [Codex 的有界抖动](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/codex-client/src/retry.rs#L40-L47)。
+当前配置形状由[提供方策略决策](../feature/2026-07-24-provider-retry-policies.zh.md)规定。提供方适配器会注册嵌套的 `retryPolicy`；省略时使用 normal 默认值：五次暂时性重试、TIMEOUT 逐代码上限一次、RATE_LIMIT 以三项冷却调度为上限、500 毫秒初始延迟、10 秒延迟上限、10% 抖动，以及上述六个暂时性 code。计数与延迟边界参考了所调查实现中较保守的一端：[OpenCode 使用两次请求重试，延迟边界为 500 毫秒／10 秒](https://github.com/anomalyco/opencode/blob/9976269ab1accfc9f9dc98a4a688c516934de422/%70ackages/llm/src/route/executor.ts#L36-L39)；[Pi 将三次 agent 级重试与提供方重试分开，且提供方重试默认为零](https://github.com/earendil-works/pi/blob/3da591ab74ab9ab407e72ed882600b2c851fae21/%70ackages/coding-agent/docs/settings.md#L139-L147)；[Codex 使用有限请求／流预算以及五分钟空闲超时](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/model-provider-info/src/lib.rs#L25-L33)。10% 抖动参考 [Codex 的有界抖动](https://github.com/openai/codex/blob/0fb559f0f6e231a88ac02ea002d3ecd248e2b515/codex-rs/codex-client/src/retry.rs#L40-L47)。
 
 对于预算未耗尽的合格失败，从 1 开始的暂时性重试计数在 RATE_LIMIT 冷却路径之外使用有界指数退避。有效的 `providerRetryAfterMs` 只有在不超过 `maxDelayMs` 时才会取代指数退避；提供方延迟更长时，系统会委托给下一监听器，而不会违反提供方指令提前重试。本地退避乘以 `[1 - jitterRatio, 1 + jitterRatio]` 内的注入随机因子，并将最终值限制到 `maxDelayMs`；提供方延迟不加抖动。RATE_LIMIT 重试则改为等待策略的冷却调度（默认一、三、五分钟），提供方提示只会抬高该调度等待。
 
@@ -90,7 +90,7 @@ agent-spine 演示组合包加载该插件，因此共享的 stdio/TUI、一次�
 
 - 自动提供方或模型故障转移。请求已显式选择一个提供方和模型，提供方注册表也有意规定每个提供方只由一个适配器负责。
 - 在成功的终止性 finish 后重试或继续，或将两次尝试的分片拼接成一条 assistant 消息。
-- 修复格式错误的工具参数、拒答、内容过滤或其他语义模型输出。
+- 重写被安全网关拒绝的内容，以及修复格式错误的工具参数、拒答或其他语义模型输出——重试被拒绝的采样只是在有界预算内重新采样，从不改写被拦截的 token。
 - 熔断器、共享提供方健康状态或跨 agent 重试预算。
 - 在没有生产消费方的情况下，把 `llm/stream` 改造成响应生命周期或增加便利的生成 API。
 
