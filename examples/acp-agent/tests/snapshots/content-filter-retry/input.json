@@ -1,0 +1,7 @@
+{
+  "steps": [
+    { "op": "initialize" },
+    { "op": "newSession" },
+    { "op": "prompt", "text": "This prompt first receives a content-filtered completion, then a retried reply." }
+  ]
+}

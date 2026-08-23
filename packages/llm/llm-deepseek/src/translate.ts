@@ -8,7 +8,7 @@
  * @module dsh-llm-deepseek/translate
  */
 
-import { CallId, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTENT_FILTERED_CODE, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { DONE } from './sse.ts'
 import type { WireChunk, WireUsage } from './types.ts'
@@ -26,15 +26,21 @@ interface OpenBlock {
 /**
  * Map the wire finish_reason vocabulary to the harness FinishReason.
  * @param reason - the wire `finish_reason` string.
- * @returns the mapped reason; unrecognized values (content_filter, …) become `{kind: 'error'}` with the uppercased value as `code`.
+ * @returns the mapped reason; `content_filter` carries the canonical
+ *   `CONTENT_FILTERED` code (retried by the default policy), and other
+ *   unrecognized values become `{kind: 'error'}` with the uppercased value as `code`.
  */
 export function mapFinishReason(reason: string): FinishReason {
   switch (reason) {
     case 'stop': return { kind: 'stop' }
     case 'tool_calls': return { kind: 'tool-calls' }
     case 'length': return { kind: 'max-tokens' }
+    case 'content_filter': return {
+      kind: 'error',
+      failure: { message: `model stopped: ${reason}`, code: CONTENT_FILTERED_CODE },
+    }
     default:
-      // content_filter, insufficient_system_resource, future additions.
+      // insufficient_system_resource, future additions.
       return {
         kind: 'error',
         failure: { message: `model stopped: ${reason}`, code: reason.toUpperCase() },

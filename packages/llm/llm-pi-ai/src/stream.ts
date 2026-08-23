@@ -8,7 +8,7 @@
  * @module dsh-llm-pi-ai/stream
  */
 
-import { CallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { CallId, CONTENT_FILTERED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, LlmFailure, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
@@ -61,6 +61,15 @@ function classifyPiAiError(
   if (status === 413
     || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
     return CONTEXT_WINDOW_EXCEEDED_CODE
+  }
+  // Response moderation rejections: a wire content_filter finish reason or an
+  // upstream safety gate's wording (dashscope-intl rejects with "Output data
+  // may contain inappropriate content."). They follow from one sampled
+  // response's content rather than from the serving request, so CONTENT_FILTERED
+  // joins the default retryable codes; the branch precedes status 400 so a
+  // gateway that phrases the rejection as a 400 keeps the retryable class.
+  if (/content[_\s-]?filter(?:ed)?|\binappropriate\s+content\b/i.test(message)) {
+    return CONTENT_FILTERED_CODE
   }
   // The dashscope-intl compatible-mode gateway routes upstream model-serving
   // failures through a wrapper statement ("An error occurred in model serving,

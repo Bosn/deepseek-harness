@@ -414,6 +414,14 @@ const SCENARIOS: Scenario[] = [
   // reply, and a clean completed retry turn. Its overlay only pins a deterministic
   // 1 ms zero-jitter delay, so it shares the default header class.
   { name: 'empty-response-retry', hasModelTurn: true, recorded: false, configPath: RETRY_CONFIG },
+  // Keyless, authored (like error-finish): a live provider cannot be coaxed
+  // into a deterministic wire content_filter finish, so the fixture scripts
+  // the adapters' CONTENT_FILTERED error finish in turn 1 followed by the
+  // recovered reply in retry turn 2, proving the default retry policy retries
+  // moderation rejections: the durable llm/retry event carries the canonical
+  // code, no ACP output for the discarded attempt, and the recovered reply
+  // completes the turn.
+  { name: 'content-filter-retry', hasModelTurn: true, recorded: false, configPath: RETRY_CONFIG },
   // Keyless, authored (like error-finish): a live model cannot be coaxed into
   // a deterministic mid-tool-call output-limit truncation. Turn 1's script ends
   // at `max-tokens` with an unfinished tool call and adapter replay metadata for
