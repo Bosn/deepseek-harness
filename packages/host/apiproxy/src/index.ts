@@ -16,7 +16,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type { ApiProxy } from './api/index.ts'
-import { createApiProxy, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from './api-proxy.ts'
+import { createApiProxy, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES, DEFAULT_HISTORY_PAGE_MAX_BYTES } from './api-proxy.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
   type SessionLogCompressionLevel,
@@ -54,6 +54,17 @@ export interface Config {
    */
   sessionExportCompressionLevel?: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
   /**
+   * Maximum serialized size of one served history response, counting the
+   * complete wire payload (RPC envelope, tail-page projections block, events
+   * array delimiters, and each entry). Larger pages drop their oldest whole
+   * message groups until the page fits; the newest message group always stays
+   * and `hasMore` turns true so the client can page the dropped content back.
+   * A page that still cannot fit drops the projections block for that read.
+   * `0` disables the bound.
+   * @default 2097152
+   */
+  historyPageMaxBytes?: number
+  /**
    * Maximum physical size of a cold Session artifact eligible for blankness
    * verification. Zero disables probes.
    * @default 1024
@@ -76,6 +87,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     nativeOpen: z.boolean(),
     sessionExportCompressionLevel: z.number().step(1).min(0).max(9)
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
+    historyPageMaxBytes: z.natural().default(DEFAULT_HISTORY_PAGE_MAX_BYTES),
     coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
   })
 
@@ -103,6 +115,9 @@ export class ApiProxyService extends Service implements ApiProxy {
       ...(config.sessionExportCompressionLevel === undefined
         ? {}
         : { sessionExportCompressionLevel: config.sessionExportCompressionLevel }),
+      ...(config.historyPageMaxBytes === undefined
+        ? {}
+        : { historyPageMaxBytes: config.historyPageMaxBytes }),
       ...(config.coldBlankProbeMaxBytes === undefined
         ? {}
         : { coldBlankProbeMaxBytes: config.coldBlankProbeMaxBytes }),
