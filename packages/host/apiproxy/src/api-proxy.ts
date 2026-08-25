@@ -115,14 +115,16 @@ import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-
 const DEFAULT_MAX_MESSAGES = 50
 
 /**
- * Maximum serialized size of one served history page, counting the complete
- * entry (raw event plus any host-computed view). A larger page drops its
- * oldest whole message groups from the head until it fits: the counted
- * maximum produces tail pages that still weigh several megabytes of chunk
- * events, whose browser-side parse and fold can outlast the client's RPC
- * timeout on a busy tab. Dropping only older groups keeps the newest content
- * served while `hasMore` stays true, so loadOlder pages the rest back on
- * demand. Setting `0` disables the bound.
+ * Maximum serialized size of one served history response, counting the
+ * complete wire payload — the RPC envelope, the value's other members (a tail
+ * page's projections block included), the events array's delimiters, and each
+ * entry's UTF-8 bytes (raw event plus any host-computed view). A larger page
+ * drops its oldest whole message groups from the head until it fits: the
+ * counted maximum produces tail pages that still weigh several megabytes of
+ * chunk events, whose browser-side parse and fold can outlast the client's
+ * RPC timeout on a busy tab. Dropping only older groups keeps the newest
+ * content served while `hasMore` stays true, so loadOlder pages the rest back
+ * on demand. Setting `0` disables the bound.
  */
 export const DEFAULT_HISTORY_PAGE_MAX_BYTES = 2 * 1024 * 1024
 
@@ -281,54 +283,109 @@ function pageIndexFromSeq(entries: readonly HistoryEntry[], target: number): num
 }
 
 /**
- * Byte-bounded page head: drop the oldest whole message groups until the
- * serialized entries fit `maxBytes`. Groups follow paginate's pivots
- * (append-origin messages; related chunk/tool events group via
- * sourceEventSeqs), so the kept range stays contiguous and never cuts a
- * message; the newest group always stays, even when it alone exceeds the
- * budget — an empty page serves the user less than an over-budget one. The
- * UTF-8 serialized size is what the response body actually weighs; `hasMore`
- * turns true whenever anything older than the kept head exists. A
- * non-positive budget disables the bound.
+ * Byte-bounded history response: drop the oldest whole message groups from
+ * the page head until the complete serialized response fits `maxBytes`.
+ * Groups follow paginate's pivots (append-origin messages; related
+ * chunk/tool events group via sourceEventSeqs), so the kept range stays
+ * contiguous and never cuts a message; the newest group always stays, even
+ * when it alone exceeds the remaining budget — an empty page serves the user
+ * less than an over-budget one. The accounting covers the whole wire payload:
+ * the RPC envelope around the value, every other member of the value (a tail
+ * page's projections block rides on the same budget), the events array's
+ * delimiters, and each entry's UTF-8 serialization. A page that cannot fit
+ * with its projections block attached is re-bounded without the block —
+ * capability-absent, the same shape loadOlder pages already serve — so the
+ * only over-budget ship is a newest message group that alone exceeds the
+ * bound. `hasMore` turns true whenever anything older than the kept head
+ * exists. A non-positive budget disables the bound.
  */
-function boundHistoryPageBytes(
-  entries: readonly HistoryEntry[],
-  hasMore: boolean,
+function boundHistoryPage<T extends { events: HistoryEntry[]; hasMore: boolean }>(
+  rpcId: RpcId,
+  value: T,
   maxBytes: number,
-): { events: HistoryEntry[]; hasMore: boolean } {
-  if (maxBytes <= 0 || entries.length === 0) return { events: [...entries], hasMore }
-  const prefix = new Array<number>(entries.length + 1)
+): T {
+  const { events } = value
+  if (maxBytes <= 0 || events.length === 0) return value
+  const prefix = new Array<number>(events.length + 1)
   prefix[0] = 0
-  for (let i = 0; i < entries.length; i++) {
+  for (let i = 0; i < events.length; i++) {
     prefix[i + 1] = (prefix[i] as number)
-      + Buffer.byteLength(JSON.stringify(entries[i]), 'utf8')
+      + Buffer.byteLength(JSON.stringify(events[i]), 'utf8')
   }
-  if ((prefix[entries.length] as number) <= maxBytes) return { events: [...entries], hasMore }
-  const headSeq = (entries[0] as HistoryEntry).event.seq
-  let cutSeq = headSeq
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i] as HistoryEntry
-    const event = entry.event
-    if (!MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
-    const sources = (event as { sourceEventSeqs?: number[] }).sourceEventSeqs
-    let groupStart = event.seq
-    if (sources !== undefined) {
-      for (const source of sources) {
-        if (source < groupStart) groupStart = source
+  // Everything that is not the events array: the RPC envelope ok() wraps
+  // around the value, the value's other members as they serialize today, and
+  // the empty array's own brackets. The filled array adds one comma per gap,
+  // priced against the kept count below. The `{}` placeholder stands where
+  // the real value serializes, hence the `- 2`.
+  const envelopeBytes = Buffer.byteLength(
+    JSON.stringify({ rpcId, result: { ok: true, value: {} } }),
+    'utf8',
+  ) - 2
+  /**
+   * Find the oldest message-group start whose suffix fits the budget, or the
+   * newest group's start when nothing fits at all. `fits: false` names the
+   * latter escape hatch: the newest group alone exceeds the budget.
+   */
+  const fit = (shellBytes: number): { cutSeq: number; fits: boolean } => {
+    const fixed = envelopeBytes + shellBytes
+    const fullBytes = fixed + (prefix[events.length] as number) + (events.length - 1)
+    if (fullBytes <= maxBytes) return { cutSeq: (events[0] as HistoryEntry).event.seq, fits: true }
+    const headSeq = (events[0] as HistoryEntry).event.seq
+    let cutSeq = headSeq
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = (events[i] as HistoryEntry).event
+      if (!MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
+      const sources = (event as { sourceEventSeqs?: number[] }).sourceEventSeqs
+      let groupStart = event.seq
+      if (sources !== undefined) {
+        for (const source of sources) {
+          if (source < groupStart) groupStart = source
+        }
       }
+      const start = pageIndexFromSeq(events, groupStart)
+      const total = fixed + ((prefix[events.length] as number) - (prefix[start] as number))
+        + (events.length - start - 1)
+      if (total <= maxBytes) {
+        cutSeq = groupStart
+        continue
+      }
+      // The newest pivot: over budget alone — keep the whole group anyway.
+      const isNewestBailout = cutSeq === headSeq
+      if (isNewestBailout) cutSeq = groupStart
+      return { cutSeq, fits: !isNewestBailout }
     }
-    const keptBytes = (prefix[entries.length] as number)
-      - (prefix[pageIndexFromSeq(entries, groupStart)] as number)
-    if (keptBytes <= maxBytes) {
-      cutSeq = groupStart
-      continue
-    }
-    // The newest pivot: over budget alone — keep the whole group anyway.
-    if (cutSeq === headSeq) cutSeq = groupStart
-    break
+    return { cutSeq, fits: true }
   }
-  const kept = entries.slice(pageIndexFromSeq(entries, cutSeq))
-  return { events: kept, hasMore: hasMore || cutSeq > 0 }
+  const first = fit(Buffer.byteLength(JSON.stringify({ ...value, events: [] }), 'utf8'))
+  if (first.fits) {
+    return {
+      ...value,
+      events: events.slice(pageIndexFromSeq(events, first.cutSeq)),
+      hasMore: value.hasMore || first.cutSeq > 0,
+    }
+  }
+  // Only the newest message group survived the first pass, and it alone
+  // exceeds the budget with the value's other members attached. Re-bound
+  // without the projections block when one rides along: its snapshot values
+  // are indivisible, but omitting the whole block degrades to
+  // capability-absent instead of shipping a page that breaks its byte promise
+  // by the block's weight. `second.fits === false` merely allows the newest
+  // group's own over-budget, and must not restore the block.
+  if ('projections' in value) {
+    const withoutProjections: typeof value & { projections?: unknown } = { ...value }
+    delete withoutProjections.projections
+    const second = fit(Buffer.byteLength(JSON.stringify({ ...withoutProjections, events: [] }), 'utf8'))
+    return {
+      ...withoutProjections,
+      events: events.slice(pageIndexFromSeq(events, second.cutSeq)),
+      hasMore: value.hasMore || second.cutSeq > 0,
+    } as T
+  }
+  return {
+    ...value,
+    events: events.slice(pageIndexFromSeq(events, first.cutSeq)),
+    hasMore: value.hasMore || first.cutSeq > 0,
+  }
 }
 
 /** Wrap an ok result echoing the request's rpcId. */
@@ -676,7 +733,7 @@ export interface ApiProxyDefaults {
   openTextFile?: (path: string, signal: AbortSignal) => Promise<void>
   /** Validated DEFLATE level for session-log ZIP entries; defaults to 6. */
   sessionExportCompressionLevel?: SessionLogCompressionLevel
-  /** Maximum serialized size of one served history page; `0` disables the bound. */
+  /** Maximum serialized size of one served history response; `0` disables the bound. */
   historyPageMaxBytes?: number
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
@@ -828,18 +885,17 @@ function historyPage(
   events: readonly SessionEvent[],
   beforeSeq: number | undefined,
   maxMessages: number | undefined,
-  maxBytes: number,
   scope?: ScopeKey,
 ): { events: HistoryEntry[]; hasMore: boolean } {
   const page = paginate(events, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
-  // Views resolve against the full paginated page (tool-backscan included)
-  // before the byte bound drops old groups, so a kept entry never loses its
-  // call context to the trim.
+  // Views resolve against the full paginated page (tool-backscan included),
+  // before the complete-response byte bound drops old groups at the call
+  // site, so a kept entry never loses its call context to the trim.
   const entries = page.events.map((event) => {
     const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
     return { event, ...view === undefined ? {} : { view } }
   })
-  return boundHistoryPageBytes(entries, page.hasMore, maxBytes)
+  return { events: entries, hasMore: page.hasMore }
 }
 
 /**
@@ -2247,12 +2303,13 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // at N with a baseline folded to N+1.
           const scope = await presenterScopeFor(sessionId, sourceSession(source))
           const cut = historyCutOf(source, beforeSeq === undefined)
-          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, historyPageMaxBytes, scope)
-          return ok(request, {
+          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope)
+          const value = {
             events: page.events,
             hasMore: page.hasMore,
             ...cut.projections === undefined ? {} : { projections: cut.projections },
-          })
+          }
+          return ok(request, boundHistoryPage(request.rpcId, value, historyPageMaxBytes))
         } catch (error: unknown) {
           if (error instanceof SessionNotFound) {
             return err(request, { code: 'session-not-found', message: error.message, details: { sessionId } })
@@ -2714,8 +2771,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { childSessionId },
           })
         }
-        const page = historyPage(ctx, events, beforeSeq, maxMessages, historyPageMaxBytes)
-        return ok(request, { ...page, ...projections === undefined ? {} : { projections } })
+        const page = historyPage(ctx, events, beforeSeq, maxMessages)
+        const value = { ...page, ...projections === undefined ? {} : { projections } }
+        return ok(request, boundHistoryPage(request.rpcId, value, historyPageMaxBytes))
       },
 
       async prompt(request, signal) {

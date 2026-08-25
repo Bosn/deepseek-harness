@@ -9,9 +9,12 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { z } from 'zod'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { CallId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -22,6 +25,15 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import type { MuxFrame, RpcRequest, HistoryEntry } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionStateMap {
+    'test/big': string
+  }
+  interface SessionProjectionMap {
+    'test/big': string
+  }
+}
 
 const reply = (text: string): Promise<ContentBlock[]> => Promise.resolve([{ type: 'text', text }])
 
@@ -405,14 +417,53 @@ describe('history page byte limit', () => {
     return response.result.value
   }
 
+  const readWire = async (api: ReturnType<typeof createApiProxy>, sessionId: SessionId):
+  Promise<{ rpcId: RpcId; result: { ok: boolean; value?: unknown } }> => {
+    const response = await api.sessions.history({ rpcId: RpcId('t-hist-bytes'), payload: { sessionId } })
+    expect(response.result.ok).toBe(true)
+    return response
+  }
+
+  /**
+   * Serialized bytes around the events array of one history RPC response,
+   * reproduced from the gateway's own accounting: the `ok()` envelope (the
+   * `{}` placeholder stands where the real value serializes) plus the value
+   * shell with an empty events array. The filled array adds one comma per
+   * gap, priced against the kept count by each test.
+   */
+  const frameBytes = (hasMore: boolean, projections?: unknown): number =>
+    Buffer.byteLength(JSON.stringify({ rpcId: RpcId('t-hist-bytes'), result: { ok: true, value: {} } }), 'utf8') - 2
+    + Buffer.byteLength(JSON.stringify({ events: [], hasMore, ...projections === undefined ? {} : { projections } }), 'utf8')
+
+  const BIG_TEXT = 'p'.repeat(4_000)
+  const bigStateUnit = () => ({
+    key: 'test/big',
+    stateSchema: z.string(),
+    init: () => BIG_TEXT,
+    apply: state => state,
+    wire: { viewSchema: z.string(), view: state => state },
+    stateVersion: 1,
+  }) satisfies ProjectionDefinition<'test/big', string>
+
+  const projectionSessionWith = async (): Promise<{ ctx: Context; session: Session; log: SessionEvent[] }> => {
+    const { ctx } = await harness()
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(bigStateUnit())
+    const session = ctx.sessions.create()
+    ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+    const log: SessionEvent[] = []
+    log.push(session.append('turn/start', { turn: 1 }))
+    return { ctx, session, log }
+  }
+
   it('keeps a page that fits the budget untouched, hasMore included', async () => {
     const { ctx, session, log } = await sessionWith()
     log.push(appendUserText(session, 'first'))
     log.push(appendAssistantText(session, 'first reply', 1))
     log.push(appendUserText(session, 'second'))
     log.push(appendAssistantText(session, 'second reply', 2))
-    const total = windowBytes(log, log[0]!.seq)
-    const page = await readPage(apiWith(ctx, total), session.id)
+    const budget = frameBytes(false) + windowBytes(log, log[0]!.seq) + (log.length - 1)
+    const page = await readPage(apiWith(ctx, budget), session.id)
     expect(page.events.map(entry => entry.event.seq)).toEqual(log.map(event => event.seq))
     expect(page.hasMore).toBe(false)
   })
@@ -424,7 +475,7 @@ describe('history page byte limit', () => {
     const third = appendUserText(session, 'second')
     log.push(third)
     log.push(appendAssistantText(session, 'second reply', 2))
-    const budget = windowBytes(log, third.seq)
+    const budget = frameBytes(false) + windowBytes(log, third.seq) + 1
     const page = await readPage(apiWith(ctx, budget), session.id)
     // The second exchange fills the budget exactly and survives intact; the
     // oldest group is dropped whole and the kept range stays contiguous.
@@ -504,14 +555,105 @@ describe('history page byte limit', () => {
       [call.seq, { for: 'call', view: { card: 'terminal', title: 'ls' } }],
       [result.seq, { for: 'result', view: { card: 'terminal', output: 'done' } }],
     ])
-    // Budget: the whole old-message suffix minus one fits only when the two
-    // tool views are excluded from the accounting.
-    const budget = windowBytes(log, oldReply.seq, views) - 1
+    // Budget: the whole old-message suffix (plus response frame) minus one
+    // fits only when the two tool views are excluded from the accounting.
+    const budget = frameBytes(false) + windowBytes(log, oldReply.seq, views) + 4 - 1
     const page = await readPage(apiWith(ctx, budget), session.id)
     // View-aware accounting keeps the newest group; viewless accounting would
     // have pulled the oldest reply in as well under the same budget.
     expect(page.events.map(entry => entry.event.seq)).toEqual(log.filter(e => e.seq >= third.seq).map(e => e.seq))
     expect(page.hasMore).toBe(true)
+  })
+
+  it('keeps the newest fitting suffix when an older group at the page head breaks the budget', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create()
+    ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+    // No turn/start: the oldest message group starts at page index zero, so a
+    // naive kept-count would snap back to the whole page length when the head
+    // candidate breaks the budget. Three complete groups: solo / first pair /
+    // second pair.
+    const log: SessionEvent[] = []
+    log.push(appendUserText(session, 'solo'))
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    log.push(appendUserText(session, 'second'))
+    log.push(appendAssistantText(session, 'second reply', 2))
+    // The [first pair, second pair] suffix fills the budget exactly; the solo
+    // head group pushes it over.
+    const budget = frameBytes(false) + windowBytes(log, 1) + 3
+    const api = apiWith(ctx, budget)
+    const page = await readPage(api, session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual(log.slice(1).map(event => event.seq))
+    expect(page.hasMore).toBe(true)
+    // The complete ok() RPC response serializes within the budget.
+    const wire = await readWire(api, session.id)
+    expect(Buffer.byteLength(JSON.stringify(wire), 'utf8')).toBeLessThanOrEqual(budget)
+  })
+
+  it('drops a projections block that alone keeps the page over budget', async () => {
+    const { ctx, session, log } = await projectionSessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    log.push(appendUserText(session, 'second'))
+    log.push(appendAssistantText(session, 'second reply', 2))
+    // With the projections block attached, even the newest message group is
+    // over budget; without it, that exchange fits exactly. The block is dropped
+    // for this read rather than shipping an over-budget page.
+    const budget = frameBytes(false) + windowBytes(log, 3) + 1
+    const api = apiWith(ctx, budget)
+    const page = await readPage(api, session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual([log[3]!.seq, log[4]!.seq])
+    expect(page.hasMore).toBe(true)
+    expect('projections' in page).toBe(false)
+    const wire = await readWire(api, session.id)
+    expect(Buffer.byteLength(JSON.stringify(wire), 'utf8')).toBeLessThanOrEqual(budget)
+  })
+
+  it('counts a projections block inside the budget when the page still fits', async () => {
+    const { ctx, session, log } = await projectionSessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    log.push(appendUserText(session, 'second'))
+    log.push(appendAssistantText(session, 'second reply', 2))
+    // Price the block the gateway will attach: the test unit plus the
+    // gateway's own fixed-shape sessionListMetadata unit (registered when
+    // createApiProxy runs, so it cannot be snapshotted before the budget is
+    // chosen). Digit lengths are fixed (13-digit timestamps), so the
+    // reconstruction differs from the real shell by only registration-order
+    // quoting — far below the 64-byte slack, and far below one message group.
+    const reconstructedBlock = {
+      asOfSeq: log[log.length - 1]!.seq,
+      values: {
+        'test/big': BIG_TEXT,
+        sessionListMetadata: { blank: false, lastPromptAt: 1_000_000_000_000 },
+      },
+    }
+    // The newest exchange plus the (weighty) projections block fits; the
+    // older exchange pushes the page over.
+    const budget = frameBytes(false, reconstructedBlock) + windowBytes(log, 3) + 1 + 64
+    const api = apiWith(ctx, budget)
+    const page = await readPage(api, session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual([log[3]!.seq, log[4]!.seq])
+    expect(page.hasMore).toBe(true)
+    expect('projections' in page).toBe(true)
+    const wire = await readWire(api, session.id)
+    expect(Buffer.byteLength(JSON.stringify(wire), 'utf8')).toBeLessThanOrEqual(budget)
+  })
+
+  it('keeps the newest group whole and drops projections when the group alone exceeds the budget', async () => {
+    const { ctx, session, log } = await projectionSessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    log.push(appendUserText(session, 'second'))
+    log.push(appendAssistantText(session, 'second reply', 2))
+    // Far below any entry: the bound's sole over-budget escape is the newest
+    // message group itself — the projections block must not ride along.
+    const api = apiWith(ctx, 1)
+    const page = await readPage(api, session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual([log[4]!.seq])
+    expect(page.hasMore).toBe(true)
+    expect('projections' in page).toBe(false)
   })
 
   it('serves uncut pages when the budget is disabled (zero)', async () => {

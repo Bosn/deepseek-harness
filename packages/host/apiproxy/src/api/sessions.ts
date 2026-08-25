@@ -272,10 +272,12 @@ export interface SessionsApi {
    * `maxMessages`, so a compaction's `compaction/summary` record stays on the page of its replacement. The tail
    * page (beforeSeq absent) additionally carries the in-flight
    * partial — chunk events already emitted for the last unfinalized message.
-   * Pages are byte-bounded by the deployment's `historyPageMaxBytes`: a
-   * message-counted page above the budget drops its oldest whole message
-   * groups — never its newest one — until it fits; the dropped content pages
-   * back in through beforeSeq, reflected as `hasMore: true`.
+   * Pages are byte-bounded by the deployment's `historyPageMaxBytes`, counted on the complete
+   * serialized response (RPC envelope, the `projections` block, event-array delimiters, and entry
+   * bytes): a page above the budget drops its oldest whole message groups — never its newest one —
+   * until it fits; the dropped content pages back in through beforeSeq, reflected as `hasMore: true`.
+   * A page that cannot fit even then omits the `projections` block for that read (capability-absent,
+   * the same shape loadOlder pages serve).
    * Each entry pairs the raw SessionEvent with the host-computed view (tool events whose
    * presenter produced one, evaluated against the registry at pagination time); the client
    * rebuilds the surface from the events with the shared fold.
