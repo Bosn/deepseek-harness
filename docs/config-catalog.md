@@ -840,6 +840,15 @@ export interface Config {
    */
   sessionExportCompressionLevel?: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
   /**
+   * Maximum serialized size of one served history page, counting the complete
+   * entry (raw event plus any host-computed view). Larger pages drop their
+   * oldest whole message groups until the page fits; the newest message group
+   * always stays and `hasMore` turns true so the client can page the dropped
+   * content back. `0` disables the bound.
+   * @default 2097152
+   */
+  historyPageMaxBytes?: number
+  /**
    * Maximum physical size of a cold Session artifact eligible for blankness
    * verification. Zero disables probes.
    * @default 1024

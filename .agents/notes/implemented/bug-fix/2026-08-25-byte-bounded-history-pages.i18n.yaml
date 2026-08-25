@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-byte-bounded-history-pages.md
+2026-08-25-byte-bounded-history-pages.md: 4833f5e74a7140e2ad44807847d5664d28274882
+2026-08-25-byte-bounded-history-pages.zh.md: 4165ce9c8118ad73c129d6741a363f94f1b30964

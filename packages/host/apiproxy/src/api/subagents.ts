@@ -77,7 +77,8 @@ export interface SubagentsApi {
   /**
    * Reads one healthy catalog child's transcript — the in-memory snapshot of
    * a live child, the persisted log of a cold one — with ordinary
-   * message-aligned pagination and render intents, without Agent activation.
+   * message-aligned pagination (same byte bound as `sessions.history`) and
+   * render intents, without Agent activation.
    */
   history(
     request: RpcRequest<SubagentAddress & { beforeSeq?: number; maxMessages?: number }>,

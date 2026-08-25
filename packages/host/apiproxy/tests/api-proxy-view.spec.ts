@@ -19,7 +19,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
-import type { MuxFrame, RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { MuxFrame, RpcRequest, HistoryEntry } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 
@@ -370,5 +370,156 @@ describe('mux live view computation', () => {
     const frames = await collected
     const result = frames.find(f => f.type === 'session/event' && f.event.type === 'tool/result')
     expect(result?.type === 'session/event' && result.view).toEqual({ for: 'result', view: { card: 'terminal', output: 'done' } })
+  })
+})
+
+describe('history page byte limit', () => {
+  /** Serialized wire-entry replica; tool views only exist where a presenter matched. */
+  const entryBytes = (event: SessionEvent, view?: HistoryEntry['view']): number =>
+    Buffer.byteLength(JSON.stringify({ event, ...view === undefined ? {} : { view } }), 'utf8')
+
+  /** Total serialized bytes of the log suffix starting at fromSeq, with optional views. */
+  const windowBytes = (log: SessionEvent[], fromSeq: number, views?: Map<number, HistoryEntry['view']>): number =>
+    log.filter(event => event.seq >= fromSeq).reduce((sum, event) => sum + entryBytes(event, views?.get(event.seq)), 0)
+
+  const sessionWith = async (): Promise<{ ctx: Context; session: Session; log: SessionEvent[] }> => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create()
+    ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+    const log: SessionEvent[] = []
+    log.push(session.append('turn/start', { turn: 1 }))
+    return { ctx, session, log }
+  }
+
+  const apiWith = (ctx: Context, historyPageMaxBytes: number) => createApiProxy(ctx, {
+    defaultModelSelection: () => ({ provider: 'p', model: 'm' }),
+    cwd: '/tmp',
+    historyPageMaxBytes,
+  })
+
+  const readPage = async (api: ReturnType<typeof createApiProxy>, sessionId: SessionId):
+  Promise<{ events: HistoryEntry[]; hasMore: boolean }> => {
+    const response = await api.sessions.history({ rpcId: RpcId('t-hist-bytes'), payload: { sessionId } })
+    expect(response.result.ok).toBe(true)
+    if (!response.result.ok) throw new Error('unreachable')
+    return response.result.value
+  }
+
+  it('keeps a page that fits the budget untouched, hasMore included', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    log.push(appendUserText(session, 'second'))
+    log.push(appendAssistantText(session, 'second reply', 2))
+    const total = windowBytes(log, log[0]!.seq)
+    const page = await readPage(apiWith(ctx, total), session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual(log.map(event => event.seq))
+    expect(page.hasMore).toBe(false)
+  })
+
+  it('drops the oldest whole message groups at the exact budget and turns hasMore on', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    const third = appendUserText(session, 'second')
+    log.push(third)
+    log.push(appendAssistantText(session, 'second reply', 2))
+    const budget = windowBytes(log, third.seq)
+    const page = await readPage(apiWith(ctx, budget), session.id)
+    // The second exchange fills the budget exactly and survives intact; the
+    // oldest group is dropped whole and the kept range stays contiguous.
+    expect(page.events.map(entry => entry.event.seq)).toEqual([third.seq, third.seq + 1])
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('keeps the newest message group whole even when it alone exceeds the budget', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    const last = appendAssistantText(session, 'last reply', 2)
+    log.push(last)
+    const page = await readPage(apiWith(ctx, 1), session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual([last.seq])
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('cuts at the group start of a chunked message instead of mid-stream', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    const sources = Array.from({ length: 64 }, (_unused, index) => session.append('assistant/chunk', {
+      turn: 1,
+      step: 2,
+      chunk: { type: 'text-delta', index, text: 'y'.repeat(200) },
+    }).seq)
+    const message = session.append('assistant/message', {
+      turn: 1,
+      step: 2,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'y'.repeat(200 * sources.length) }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      }),
+    }, { surfaceOp: 'append', sourceEventSeqs: sources })
+    const budget = entryBytes(log[0] as SessionEvent)
+    const page = await readPage(apiWith(ctx, budget), session.id)
+    const expected = [...sources, message.seq]
+    expect(page.events.map(entry => entry.event.seq)).toEqual(expected)
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('accounts multibyte text in UTF-8 bytes, not UTF-16 code units', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, '你'.repeat(60)))
+    const last = appendAssistantText(session, '你'.repeat(600), 1)
+    log.push(last)
+    // Code-unit accounting would see the whole log under this budget and
+    // serve it; UTF-8 accounting must keep only the newest group.
+    const codeUnits = log.reduce((sum, event) => sum + JSON.stringify({ event }).length, 0)
+    const page = await readPage(apiWith(ctx, codeUnits), session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual([last.seq])
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('counts host-computed view bytes toward the page budget', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, 'old'))
+    log.push(appendAssistantText(session, 'old reply', 1))
+    const third = appendUserText(session, 'new')
+    log.push(third)
+    log.push(appendAssistantText(session, 'new reply', 2))
+    const call = session.append('tool/call', { turn: 1, step: 3, callId: CallId('c-budget'), name: 'term', arguments: '{"cmd":"ls"}' })
+    log.push(call)
+    const result = session.append('tool/result', {
+      turn: 1, step: 3,
+      message: createToolResultMessage({
+        callId: CallId('c-budget'),
+        content: [{ type: 'text', text: 'ok' }],
+        isError: false,
+      }),
+    }, { surfaceOp: 'append' })
+    log.push(result)
+    const oldReply = log[2] as SessionEvent
+    const views = new Map<number, HistoryEntry['view']>([
+      [call.seq, { for: 'call', view: { card: 'terminal', title: 'ls' } }],
+      [result.seq, { for: 'result', view: { card: 'terminal', output: 'done' } }],
+    ])
+    // Budget: the whole old-message suffix minus one fits only when the two
+    // tool views are excluded from the accounting.
+    const budget = windowBytes(log, oldReply.seq, views) - 1
+    const page = await readPage(apiWith(ctx, budget), session.id)
+    // View-aware accounting keeps the newest group; viewless accounting would
+    // have pulled the oldest reply in as well under the same budget.
+    expect(page.events.map(entry => entry.event.seq)).toEqual(log.filter(e => e.seq >= third.seq).map(e => e.seq))
+    expect(page.hasMore).toBe(true)
+  })
+
+  it('serves uncut pages when the budget is disabled (zero)', async () => {
+    const { ctx, session, log } = await sessionWith()
+    log.push(appendUserText(session, 'first'))
+    log.push(appendAssistantText(session, 'first reply', 1))
+    const page = await readPage(apiWith(ctx, 0), session.id)
+    expect(page.events.map(entry => entry.event.seq)).toEqual(log.map(event => event.seq))
+    expect(page.hasMore).toBe(false)
   })
 })
