@@ -6,7 +6,7 @@ English | [中文](2026-08-18-tool-row-file-open-failure.zh.md)
 
 ## Problem
 
-Tool-row path clicks already call `host.openPath` through the chat view's injected `openFile`. The inject swallowed every Host or OS refusal, so a missing desktop opener, a remote or non-loopback carrier, or a path the Host cannot hand off left the row looking successful. The reader had no reason and no second try.
+Tool-row path clicks already call `host.openPath` through the chat view's injected `openFile`. The inject swallowed every Host or OS refusal, so a missing desktop opener, an undeclared remote carrier, or a path the Host cannot hand off left the row looking successful. The reader had no reason and no second try. An operator-declared `trustedHosts` authority now reaches the handoff ([openPath-trust](../architecture/2026-08-25-openpath-rides-trusted-hosts.md)).
 
 The [file-open-in-OS decision](../feature/2026-07-28-tool-call-file-open-in-os.md) still owns the link gesture and the Host handoff. This note owns only the refusal.
 

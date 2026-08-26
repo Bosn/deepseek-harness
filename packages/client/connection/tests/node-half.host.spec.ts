@@ -169,13 +169,15 @@ describe('connection node half', () => {
 
   it('pins privileged methods to loopback even for a declared trusted authority', async () => {
     const { routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
-    // The privileged set: native dialogs plus the whole settings/credential
-    // configuration plane, reads included, plus the one method that makes the
-    // host fetch a caller-chosen URL. The same declared authority reaches
-    // ordinary reads (carrier-level 404 from the empty proxy proves the fence
-    // passed), but each privileged method stays loopback-only and 403s.
+    // The privileged set: the native directory picker plus the whole
+    // settings/credential configuration plane, reads included, plus the one
+    // method that makes the host fetch a caller-chosen URL. The same declared
+    // authority reaches ordinary reads (carrier-level 404 from the empty proxy
+    // proves the fence passed), but each privileged method stays loopback-only
+    // and 403s. `host.openPath` is not in the set — it rides the deployment
+    // fence and is asserted in its own case below.
     for (const method of [
-      'host.pickDirectory', 'host.openPath',
+      'host.pickDirectory',
       'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
       'credentials.describe', 'credentials.set', 'credentials.unset',
       'llm.discoverModels',
@@ -192,6 +194,16 @@ describe('connection node half', () => {
       expect(denied.state.status).toBe(403)
       expect(denied.state.body).toBe('forbidden')
     }
+    // host.openPath rides the deployment trust fence: the declared authority
+    // reaches the bridge (carrier-level 404 from the empty proxy), while an
+    // undeclared authority is refused before the bridge runs.
+    const openDeclared = fakeResponse()
+    await routes[0]!.handler(fakeRequest({ host: 'harness.example' }, `${API_PATH}/host.openPath`), openDeclared.response)
+    expect(openDeclared.state.status).toBe(404)
+    const openUndeclared = fakeResponse()
+    await routes[0]!.handler(fakeRequest({ host: 'outside.example' }, `${API_PATH}/host.openPath`), openUndeclared.response)
+    expect(openUndeclared.state.status).toBe(403)
+    expect(openUndeclared.state.body).toBe('forbidden')
     const read = fakeResponse()
     await routes[0]!.handler(fakeRequest({ host: 'harness.example' }), read.response)
     expect(read.state.status).not.toBe(403)
@@ -472,7 +484,7 @@ describe('connection node half over a real HTTP server', () => {
       for (const method of [
         'settings.describe', 'settings.openDocument', 'settings.update', 'settings.replace', 'settings.mutate',
         'credentials.describe', 'credentials.set', 'credentials.unset',
-        'host.pickDirectory', 'host.openPath',
+        'host.pickDirectory',
         // Carries a draft credential and turns the host into a fetcher for a
         // URL the caller picked: an anonymous LAN caller must not reach it.
         'llm.discoverModels',
@@ -487,10 +499,13 @@ describe('connection node half over a real HTTP server', () => {
       // trust only, and a LAN client's preset picker needs it. `select` is
       // reachable too: `session.create` already takes an `agentPreset`, and the
       // deployment's own default already carries bash, so pinning the switch
-      // would be a fence beside an open gate.
-      for (const method of ['llm.providers', 'llm.models', 'agentPreset.list', 'agentPreset.select']) {
+      // would be a fence beside an open gate. `host.openPath` rides the same
+      // deployment fence: the declared authority reaches the bridge (404), an
+      // undeclared one stays refused.
+      for (const method of ['llm.providers', 'llm.models', 'agentPreset.list', 'agentPreset.select', 'host.openPath']) {
         expect([method, await call(port, method, 'harness.example')]).toEqual([method, 404])
       }
+      expect(await call(port, 'host.openPath', 'other.example')).toBe(403)
       // Loopback reaches everything, configuration included.
       expect(await call(port, 'settings.describe', `127.0.0.1:${String(port)}`)).toBe(404)
     } finally {
