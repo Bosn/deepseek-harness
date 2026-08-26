@@ -87,9 +87,11 @@ export interface HostApi {
 
   /**
    * Open a filesystem path with the operating system's default application
-   * (Finder / Explorer / xdg-open hand-off). The browser carrier's
-   * prefix-wide trust fence covers this privileged method like every other
-   * `/api` request.
+   * (Finder / Explorer / xdg-open hand-off). Unlike `pickDirectory`, this
+   * method is not pinned to loopback: the browser carrier's prefix-wide
+   * trust fence (dsh-client-connection) admits loopback and every declared
+   * `trustedHosts` authority, so an operator-declared remote deployment may
+   * open paths on this desktop while undeclared Hosts stay refused.
    */
   openPath(
     request: RpcRequest<{ path: string }>,

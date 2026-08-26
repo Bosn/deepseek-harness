@@ -67,9 +67,10 @@ export const Config: z<ConnectionConfig> = z.object({
 })
 
 /**
- * Methods gated to loopback even on a trusted-host deployment. Native dialogs
- * act on the host machine; the settings and credential domains mutate the
- * user's configuration and secret store, and READING them is equally
+ * Methods gated to loopback even on a trusted-host deployment.
+ * `host.pickDirectory` pops an OS dialog on the host machine; the settings
+ * and credential domains mutate the user's configuration and secret store,
+ * and READING them is equally
  * privileged — `settings.describe` returns every exposed namespace's
  * configuration and `credentials.describe` reports whether an arbitrary
  * environment-variable name is configured and where from, which is
@@ -85,6 +86,16 @@ export const Config: z<ConnectionConfig> = z.object({
  * The model catalog (`llm.providers`, `llm.models`) is deliberately NOT here:
  * it carries provider ids, display names, and model lists — no endpoints,
  * keys, or key state — and a LAN client's model picker legitimately needs it.
+ *
+ * `host.openPath` is deliberately NOT here either: it hands one path to the
+ * host desktop's default application, so it rides the ordinary deployment
+ * fence. Loopback and every declared `trustedHosts` authority reach it, and
+ * an undeclared Host is refused by the same fence as any other method. That
+ * is the operator's deliberate grant — a trusted authority already creates
+ * sessions whose agents run `bash` on this host — and it keeps file opens
+ * working from operator-declared remote deployments (for example a Tailscale
+ * authority) without exposing the configuration plane. Recorded in the
+ * openPath-trust Agent Note.
  */
 const PRIVILEGED_METHODS = new Set([
   // A preset composition names the plugins a session runs, so reading one is
@@ -106,7 +117,6 @@ const PRIVILEGED_METHODS = new Set([
   'agentPreset.openDocument',
   'agentPreset.remove',
   'host.pickDirectory',
-  'host.openPath',
   'settings.describe',
   'settings.openDocument',
   'settings.update',
