@@ -16,7 +16,7 @@ Status: implemented
 
 ## Testing
 
-`packages/client/connection/tests/node-half.host.spec.ts` 在手拼路由与真实 HTTP 服务器两层钉住这条边界：已声明的权威可达 `host.openPath`（桥接运行，以空代理的 404 断言），未声明的权威在桥接之前得到 403，而其余每个特权方法对同一已声明权威仍然 403。
+`packages/client/connection/tests/node-half.host.spec.ts` 在手拼路由与真实 HTTP 服务器两层钉住这条边界：已声明的权威可达 `host.openPath`（桥接运行，以空代理的 404 断言），未声明的权威在桥接之前得到 403，而其余每个特权方法对同一已声明权威仍然 403。`apps/cli/tests/web-openpath.spec.ts` 另外通过 Loader 启动交付形态的 Web 表面（两个 bundle patch，webserver 绑定临时端口），把已声明权威的请求送过组装好的代理：返回的是平台打开器自己的应答——对不存在路径的拒绝文本来自打开器而非栅栏——而未声明的权威得到 403。
 
 ## Alternatives considered
 

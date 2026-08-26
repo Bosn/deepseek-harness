@@ -16,7 +16,7 @@ The rest of the privileged set is untouched: `host.pickDirectory` (an OS dialog 
 
 ## Testing
 
-`packages/client/connection/tests/node-half.host.spec.ts` pins the boundary over a hand-assembled route and a real HTTP server: a declared authority reaches `host.openPath` (the bridge runs, asserted as the empty proxy's 404), an undeclared authority gets 403 before the bridge, and every remaining privileged method still 403s for the same declared authority.
+`packages/client/connection/tests/node-half.host.spec.ts` pins the boundary over a hand-assembled route and a real HTTP server: a declared authority reaches `host.openPath` (the bridge runs, asserted as the empty proxy's 404), an undeclared authority gets 403 before the bridge, and every remaining privileged method still 403s for the same declared authority. `apps/cli/tests/web-openpath.spec.ts` additionally boots the shipped Web surface (both bundle patches through the Loader, webserver bound to an ephemeral port) and sends the declared-authority request through the assembled proxy: the platform opener's own answer comes back — its rejection for a missing path is the opener's text, not the fence's — while an undeclared authority gets 403.
 
 ## Alternatives considered
 
