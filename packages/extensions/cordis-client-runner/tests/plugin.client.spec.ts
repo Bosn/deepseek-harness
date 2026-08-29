@@ -14,7 +14,7 @@ import InvariantService from '@deepseek-ai/dsh-invariants'
 import type {
   ApprovalRequestId, CordisDynamicPackageId, CordisDynamicPluginId, CordisDynamicPluginRunId,
 } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SessionId } from '@deepseek-ai/dsh-client-connection/client'
+import type { ConnectionHandle, HostDescription, SessionId } from '@deepseek-ai/dsh-client-connection/client'
 import type { DynamicCordisInvokeResult } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: resolves `ctx.remote` and with it the `$on`/`$dispatch` surface.
 import type {} from '@deepseek-ai/dsh-api-gateway/client'
@@ -42,6 +42,8 @@ function forward(ctx: Context, event: string, payload: object): void {
 
 interface Bench {
   ctx: Context
+  /** Complete inspect manifests sent after a ready connection generation. */
+  syncManifests: string[][]
   /** Source the host hands over for the next run. */
   source: { current: {
     code: string
@@ -73,6 +75,10 @@ interface Bench {
    * tree, so it stands in for that caller on the same core seam.
    */
   crash: (slot: string, entry: unknown, abdicate: boolean, error: unknown) => void
+  /** Publish one connected generation, in the same order as the real runtime. */
+  connect: () => void
+  /** Retract the current generation as the real hostDescription source does. */
+  disconnect: () => void
   dispose: () => Promise<void>
   settle: () => Promise<void>
 }
@@ -118,11 +124,34 @@ async function boot(): Promise<Bench> {
   const resolved: { requestId: string; resolution: unknown }[] = []
   const renderFailures: Bench['renderFailures'] = []
   const reportRefused = { current: false }
+  const syncManifests: string[][] = []
+  let description: HostDescription | undefined
+  const descriptionListeners = new Set<() => void>()
+  const publishDescription = (next: HostDescription | undefined): void => {
+    description = next
+    for (const listener of [...descriptionListeners]) listener()
+  }
+  const connection: ConnectionHandle = {
+    api: undefined as never,
+    isLoopback: true,
+    hostDescription: {
+      getSnapshot: () => description,
+      subscribe: (listener) => {
+        descriptionListeners.add(listener)
+        return () => { descriptionListeners.delete(listener) }
+      },
+    },
+    rpc: { call: () => Promise.reject(new Error('unexpected generic RPC call')) },
+    start: () => ({ stop: () => {} }),
+  }
   // Every generated Remote method resolves to a RemoteResult: the carrier folds
   // its own failures into the error branch, and only an assembly fault rejects.
   const answered = <T>(value: T): Promise<{ ok: true; value: T }> => Promise.resolve({ ok: true as const, value })
   const namespace = {
-    syncInspectManifest: () => answered(null),
+    syncInspectManifest: (providers: readonly { id: string }[]) => {
+      syncManifests.push(providers.map(provider => provider.id))
+      return answered(null)
+    },
     resolveInspectQuery: () => answered({ accepted: true }),
     runHostHalf: () => answered({
       ok: true, pluginId: PLUGIN, packageId: PACKAGE, pluginRunId: RUN, waitingFor: [], startedHere: true,
@@ -180,10 +209,12 @@ async function boot(): Promise<Bench> {
   }
   ctx.reflect.provide('remote', remote)
   ctx.reflect.provide('remote.dynamicCordisRunner', namespace)
+  ctx.reflect.provide('connection', connection)
   const fiber = ctx.plugin(ClientHalf)
   await fiber
   return {
     ctx,
+    syncManifests,
     source,
     resolved,
     invoked,
@@ -197,12 +228,44 @@ async function boot(): Promise<Bench> {
       })._core
       core.reportEntryError(slot, entry, error, { abdicate })
     },
+    connect: () => {
+      publishDescription({
+        version: 'fixture', cwd: '/fixture', attachedSessions: 0, home: '/home/fixture', canOpenPath: true,
+      })
+      Reflect.apply(ctx.emit.bind(ctx), undefined, ['connection/reset'])
+    },
+    disconnect: () => { publishDescription(undefined) },
     dispose: async () => { await fiber.dispose() },
     settle: async () => { await new Promise((resolve) => { setTimeout(resolve, 0) }) },
   }
 }
 
 describe('browser half', () => {
+  it('waits for a ready Connection before syncing and resyncs each generation', async () => {
+    const bench = await boot()
+    await bench.settle()
+    // Provider registration during the handshake is local-only: the browser
+    // must not turn a missing active Connection into a startup error.
+    expect(bench.syncManifests).toEqual([])
+
+    bench.connect()
+    await bench.settle()
+    expect(bench.syncManifests).toHaveLength(1)
+    expect(bench.syncManifests[0]).toEqual(['Service', 'Event', 'Builtin', 'Slots', 'Theme'])
+
+    bench.disconnect()
+    bench.connect()
+    await bench.settle()
+    expect(bench.syncManifests).toHaveLength(2)
+    expect(bench.syncManifests[1]).toEqual(bench.syncManifests[0])
+
+    await bench.dispose()
+    bench.connect()
+    await bench.settle()
+    // The disposed page owns no stale listener or queued Remote work.
+    expect(bench.syncManifests).toHaveLength(2)
+  })
+
   it('provides the load engine as the page run-state face', async () => {
     const bench = await boot()
     expect(bench.ctx.dynamicCordisRunner.getSnapshot()).toEqual([])

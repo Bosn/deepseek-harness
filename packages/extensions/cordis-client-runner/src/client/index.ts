@@ -11,6 +11,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { ConnectionHandle, HostDescription } from '@deepseek-ai/dsh-client-connection/client'
 import type {
   ApprovalRequestId, CordisDynamicPluginId, DynamicCordisInvokeResult, JsonValue,
   DynamicCordisInventoryRow,
@@ -173,12 +174,13 @@ function wireFailure(id: CordisDynamicPluginId, method: string, error: unknown):
 export const name = 'cordis-client-runner'
 
 /**
- * Required services: the loader/module chain for entries, the slot registry for
- * contributions, and the `dynamicCordisRunner` Remote namespace. Declaring the
- * namespace parks this plugin until the host side exists, so a page never loads
- * a browser half whose host half it could not reach.
+ * Required services: the Connection lifecycle, the loader/module chain for
+ * entries, the slot registry for contributions, and the `dynamicCordisRunner`
+ * Remote namespace. Declaring both transport dependencies parks this plugin
+ * until the page has the local connection handle and the host-side namespace;
+ * the inspect registry still waits for the *active* generation below.
  */
-export const inject = ['loader', 'modules', 'slots', 'remote', 'remote.dynamicCordisRunner']
+export const inject = ['connection', 'loader', 'modules', 'slots', 'remote', 'remote.dynamicCordisRunner']
 
 /**
  * Client plugin body: build the runner and subscribe the dispatch family.
@@ -197,10 +199,44 @@ export function apply(ctx: Context): void {
     },
   })
   provideClientCordisInspect(ctx, inspect)
+  const connection = ctx.get('connection') as ConnectionHandle
+  // `connection/reset` is emitted by the runtime after hostDescription has
+  // been published. The description source is the authoritative edge for both
+  // readiness and loss, while the event remains a compatibility nudge for
+  // callers that emit it themselves. Object identity deduplicates the two
+  // notifications for one generation and also handles a runner mounted after
+  // the page is already connected.
+  let observedDescription: HostDescription | undefined
+  let observedConnected = false
+  const observeConnection = (): void => {
+    const description = connection.hostDescription.getSnapshot()
+    if (description === undefined) {
+      if (!observedConnected) return
+      observedConnected = false
+      observedDescription = undefined
+      inspect.connectionLost()
+      return
+    }
+    if (observedConnected && Object.is(observedDescription, description)) return
+    observedConnected = true
+    observedDescription = description
+    inspect.connectionReset()
+  }
+  ctx.on('connection/reset', observeConnection)
+  // The first provider effects run while the Connection handshake is still in
+  // flight. Register the description listener before them so their initial
+  // publish is only a local dirty mark; the first reset opens the transport and
+  // performs one complete sync. Calling observeConnection once closes the
+  // remount window when this plugin starts after the first handshake.
+  ctx.effect(() => {
+    const stop = connection.hostDescription.subscribe(observeConnection)
+    observeConnection()
+    return stop
+  }, 'cordis-client-runner: inspect connection lifecycle')
+  ctx.effect(() => () => { inspect.dispose() }, 'cordis-client-runner: inspect registry')
   for (const provider of clientInspectProviders(ctx)) {
     ctx.effect(() => inspect.register(provider), `cordis-client-runner: inspect ${provider.manifest.id}`)
   }
-  ctx.on('connection/reset', () => { inspect.publish() })
 
   const runner = new DynamicCordisPackageRunner({
     ctx,

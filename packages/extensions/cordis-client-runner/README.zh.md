@@ -20,6 +20,8 @@
 
 激活时什么都不装，刷新之后也不恢复 —— 一页只在有人回答了一次 run 请求、或有人在这一页主动要求时，才运行动态包。
 
+inspect manifest 也跟随 Connection 的生命周期。第一次握手尚未完成时，provider effect 可以先登记，但只有某个 generation ready 之后才会发送完整 manifest。generation 丢失会取消进行中的 inspect query，并使排队中的旧 sync continuation 失效；下一代会重新发送一份完整快照。这样重连或页面 remount 就不会在 carrier 没有 active Connection 时调用 Remote。
+
 ## run 界面读什么、调什么
 
 `ctx.dynamicCordisRunner` 就是全部的面:
