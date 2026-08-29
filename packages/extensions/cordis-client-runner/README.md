@@ -20,6 +20,8 @@ Loads converge by `(id, rev)` against live state: loading a revision this page a
 
 Nothing loads at activation, and nothing is restored after a refresh — a page runs a dynamic package only when someone answers a run request or asks for it here.
 
+The inspect manifest follows the Connection lifecycle as well. Provider effects may register while the first handshake is pending, but their complete manifest is sent only after a generation is ready. A generation loss cancels in-flight inspect queries and invalidates queued sync continuations; the next generation sends a fresh complete snapshot. This keeps a reconnect or a page remount from calling a Remote while its carrier has no active Connection.
+
 ## What a run surface reads and calls
 
 `ctx.dynamicCordisRunner` is the whole face:

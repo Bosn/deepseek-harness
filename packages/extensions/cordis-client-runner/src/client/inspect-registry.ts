@@ -40,7 +40,16 @@ export class ClientCordisInspectRegistry {
   private readonly providers = new Map<string, ClientCordisInspectProviderRegistration>()
   private readonly active = new Map<CordisInspectRequestId, AbortController>()
   private publishQueued = false
-  private syncChain = Promise.resolve()
+  /** Serializes manifest writes within the current Connection generation. */
+  private syncChain: Promise<void> = Promise.resolve()
+  /** A manifest is not transportable until the Connection handshake completes. */
+  private connected = false
+  /** A failed current-generation sync remains dirty for the next reset. */
+  private dirty = false
+  /** Invalidates work that belongs to an older provider or connection snapshot. */
+  private revision = 0
+  private connectionGeneration = 0
+  private disposed = false
 
   /** @param host - folded manifest and query result transport. */
   constructor(private readonly host: ClientCordisInspectHost) {}
@@ -72,19 +81,108 @@ export class ClientCordisInspectRegistry {
     }
   }
 
-  /** Publish the current complete manifest, including after reconnect. */
+  /**
+   * Mark the complete manifest dirty and publish it once a connection is ready.
+   * Registration can happen before the first handshake; in that state this is
+   * deliberately only a local state change, never a Remote call.
+   */
   publish(): void {
-    if (this.publishQueued) return
+    if (this.disposed) return
+    this.revision += 1
+    this.dirty = true
+    this.scheduleSync()
+  }
+
+  /**
+   * Mark a newly established connection generation and send a full snapshot.
+   * Even an unchanged provider set is sent again: the Host mirror belongs to
+   * the previous generation and may have been replaced with a fresh process.
+   */
+  connectionReset(): void {
+    if (this.disposed) return
+    this.connectionGeneration += 1
+    this.revision += 1
+    // An old carrier call can remain pending after its Connection disappears.
+    // Give the new generation an independent queue so it can publish without
+    // waiting for a promise that its transport can no longer settle.
+    this.syncChain = Promise.resolve()
+    this.connected = true
+    this.dirty = true
+    this.cancelActiveQueries()
+    this.scheduleSync()
+  }
+
+  /**
+   * Retract transport work when a generation dies. The next reset will publish
+   * the complete manifest again, while stale sync/query continuations become
+   * no-ops instead of touching a dead Remote host.
+   */
+  connectionLost(): void {
+    if (this.disposed) return
+    this.connectionGeneration += 1
+    this.syncChain = Promise.resolve()
+    this.connected = false
+    this.dirty = true
+    this.cancelActiveQueries()
+  }
+
+  /** Dispose page-local work, including queries waiting on a provider. */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.connected = false
+    this.dirty = false
+    this.publishQueued = false
+    this.connectionGeneration += 1
+    this.syncChain = Promise.resolve()
+    this.cancelActiveQueries()
+  }
+
+  /** Queue one serialized sync for the latest complete snapshot. */
+  private scheduleSync(): void {
+    if (this.disposed || !this.connected || !this.dirty || this.publishQueued) return
     this.publishQueued = true
     queueMicrotask(() => {
       this.publishQueued = false
-      const manifests = [...this.providers.values()].map(provider => provider.manifest)
-      this.syncChain = this.syncChain.then(async () => {
-        await this.host.sync(manifests)
-      }).catch((error: unknown) => {
-        console.error('[cordis-client-runner] syncing inspect providers failed:', error)
+      if (this.disposed || !this.connected || !this.dirty) return
+      const run = this.syncChain.then(async () => {
+        if (this.disposed || !this.connected || !this.dirty) return
+        // Capture immediately before the call, not when the microtask was
+        // scheduled: a burst of register/dispose operations converges to the
+        // latest complete snapshot while preserving call order.
+        const revision = this.revision
+        const generation = this.connectionGeneration
+        const manifests = [...this.providers.values()].map(provider => provider.manifest)
+        try {
+          await this.host.sync(manifests)
+        } catch (error: unknown) {
+          // A disconnect or teardown makes an old failure expected. Keep the
+          // current generation dirty without emitting a misleading error for it.
+          if (!this.isCurrentGeneration(generation)) return
+          this.dirty = true
+          console.error('[cordis-client-runner] syncing inspect providers failed:', error)
+          return
+        }
+        if (!this.isCurrentGeneration(generation)) return
+        if (revision === this.revision) {
+          this.dirty = false
+        } else {
+          this.dirty = true
+          this.scheduleSync()
+        }
       })
+      // A failed chain tail must not wedge later provider or connection updates.
+      this.syncChain = run.catch(() => {})
     })
+  }
+
+  private cancelActiveQueries(): void {
+    for (const controller of this.active.values()) controller.abort()
+    this.active.clear()
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return !this.disposed && this.connected && generation === this.connectionGeneration
   }
 
   /**
@@ -93,9 +191,11 @@ export class ClientCordisInspectRegistry {
    * @returns after the first local result has been sent back to Host.
    */
   async query(request: CordisInspectQueryRequest): Promise<void> {
+    if (this.disposed || !this.connected) return
     if (this.active.has(request.requestId)) return
     const controller = new AbortController()
     this.active.set(request.requestId, controller)
+    const generation = this.connectionGeneration
     let resolution: CordisInspectQueryResolution
     try {
       const provider = this.providers.get(request.provider)
@@ -117,9 +217,13 @@ export class ClientCordisInspectRegistry {
         ? { ok: false, reason: 'cancelled', message: 'Client inspect query was cancelled' }
         : { ok: false, reason: 'provider-error', message: error instanceof Error ? error.message : String(error) }
     } finally {
-      this.active.delete(request.requestId)
+      if (this.active.get(request.requestId) === controller) this.active.delete(request.requestId)
     }
-    if (controller.signal.aborted) return
+    // A provider may ignore AbortSignal, and a reset can happen after the
+    // provider resolved but before the answer reaches the carrier. In either
+    // case the request belongs to an obsolete generation and must not touch a
+    // Remote mounted for the next one.
+    if (controller.signal.aborted || !this.isCurrentGeneration(generation)) return
     await this.host.resolve(request.agentId, request.requestId, resolution)
   }
 
@@ -128,8 +232,9 @@ export class ClientCordisInspectRegistry {
    * @param requestId - query correlation that is no longer answerable.
    */
   close(requestId: CordisInspectRequestId): void {
-    this.active.get(requestId)?.abort()
-    this.active.delete(requestId)
+    const controller = this.active.get(requestId)
+    controller?.abort()
+    if (controller !== undefined && this.active.get(requestId) === controller) this.active.delete(requestId)
   }
 }
 
