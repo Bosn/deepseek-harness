@@ -11,13 +11,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionHandle, HostDescription } from '@deepseek-ai/dsh-client-connection/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {
   ApprovalRequestId, CordisDynamicPluginId, DynamicCordisInvokeResult, JsonValue,
   DynamicCordisInventoryRow,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ClientModuleSystem } from '@deepseek-ai/dsh-client-modules/client'
-import type { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 // The Client Remote assembly is the one place the two planes meet: it mounts the
 // `dynamicCordisRunner` namespace and re-exports its payload vocabulary, so this
 // package names what it sends without importing a Host package.
@@ -200,36 +200,29 @@ export function apply(ctx: Context): void {
   })
   provideClientCordisInspect(ctx, inspect)
   const connection = ctx.get('connection') as ConnectionHandle
-  // `connection/reset` is emitted by the runtime after hostDescription has
-  // been published. The description source is the authoritative edge for both
-  // readiness and loss, while the event remains a compatibility nudge for
-  // callers that emit it themselves. Object identity deduplicates the two
-  // notifications for one generation and also handles a runner mounted after
-  // the page is already connected.
-  let observedDescription: HostDescription | undefined
-  let observedConnected = false
+  // The generation snapshot is the sole readiness authority. Its monotone id
+  // deduplicates repeated observations; the later `connection/reset` cache
+  // notification deliberately does not trigger manifest synchronization.
+  let observedGenerationId: number | undefined
   const observeConnection = (): void => {
-    const description = connection.hostDescription.getSnapshot()
-    if (description === undefined) {
-      if (!observedConnected) return
-      observedConnected = false
-      observedDescription = undefined
+    const generation = connection.generation.getSnapshot()
+    if (generation === undefined) {
+      if (observedGenerationId === undefined) return
+      observedGenerationId = undefined
       inspect.connectionLost()
       return
     }
-    if (observedConnected && Object.is(observedDescription, description)) return
-    observedConnected = true
-    observedDescription = description
+    if (observedGenerationId === generation.id) return
+    observedGenerationId = generation.id
     inspect.connectionReset()
   }
-  ctx.on('connection/reset', observeConnection)
   // The first provider effects run while the Connection handshake is still in
-  // flight. Register the description listener before them so their initial
-  // publish is only a local dirty mark; the first reset opens the transport and
-  // performs one complete sync. Calling observeConnection once closes the
-  // remount window when this plugin starts after the first handshake.
+  // flight. Register the generation listener before them so their initial
+  // publish is only a local dirty mark; the first ready generation opens the
+  // transport and performs one complete sync. Calling observeConnection once
+  // closes the remount window when this plugin starts after that generation.
   ctx.effect(() => {
-    const stop = connection.hostDescription.subscribe(observeConnection)
+    const stop = connection.generation.subscribe(observeConnection)
     observeConnection()
     return stop
   }, 'cordis-client-runner: inspect connection lifecycle')

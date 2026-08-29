@@ -10,7 +10,7 @@ pi-ai 适配器把会话历史中的每张图片 base64 内联进每一个模型
 
 ## Decision
 
-pi-ai provider profile 与直接 DeepSeek 适配器都提供 `maxRequestImageBytes`（默认 `DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20MiB`，正整数，可从 cordis.yml 与 settings 修改）。提供方无关的 `offloadRequestImages` 转换由 `ImageAttachmentRef.bytes` 推算每张历史图片的 base64 长度（无需读取数据）求和，总和超过上限时从最老的图片出现位置开始替换为一段固定的模型可见占位文本。占位文本要求模型在有路径时重新读取文件，否则请用户重新附上图片。越新的图片越晚被省略；单张图片本身超过上限时也会被省略。按出现顺序替换不依赖对象身份，因此重放同一份 JSON 日志会产生相同请求。被 offload 的图片不会从附件存储读取。两个适配器都把 HTTP 413 归类为 `CONTEXT_WINDOW_EXCEEDED`，使失败请求压缩能够重建更小的请求体；pi-ai 还会识别明确的请求体上限措辞。四张按附件存储默认上限准入的 3.5MiB 原始图片，经 base64 膨胀后最多占 18.67MiB。20MiB 默认上限因此可保留四张这样的图片，并在直接 API 的 30MiB 请求上限下留出余量；网关更严格的部署则按路由调低该值。
+每个 pi-ai profile 都提供 `maxRequestImageBytes`（默认 20MiB），限制 base64 请求图片的累积载荷。直连 DeepSeek 适配器采用上游按表示形式区分的配置：Files 请求使用 `maxRequestFilesBytes`，base64 回退使用 `maxInlineRequestImageBytes`，并分别配置数量与量子化移除策略。提供方无关的 `offloadRequestImagesWithPolicy` 转换会在不读取将被省略图片的前提下为每个已表示图片计价，再把确定性的最旧前缀替换为逐图片 `offloadedImageText`。占位文本保留附件身份与当前可用的只读路径，使模型可以重新读取规范化对象，或请用户重新附上图片。越新的图片越晚被省略；单张图片本身超过上限时也会被省略。按出现顺序替换不依赖对象身份，因此重放同一份 JSON 日志会产生相同请求。两个适配器都把 HTTP 413 归类为 `CONTEXT_WINDOW_EXCEEDED`，使失败请求压缩能够重建更小的请求体；pi-ai 还会识别明确的请求体上限措辞。按 1MiB 请求版本默认值计算，pi-ai 的 20MiB 上限可在 base64 膨胀后保留十五张最大版本；剩余请求 envelope 不计入该图片专用预算，网关更严格的部署按路由调低该值。
 
 ## offload 是转换而非历史
 
@@ -19,7 +19,7 @@ pi-ai provider profile 与直接 DeepSeek 适配器都提供 `maxRequestImageByt
 ## Alternatives considered
 
 - **在上限处直接报错而不 offload。** 模型知情，但会话仍然卡死：用户无法从持久历史中删除图片，越线即永久失败。offload 让会话保持可用，这正是本修复的目标。
-- **图片上传一次、按 URL / file id 引用。** 从结构上消除请求体线性增长，是正确的中期形态（各提供方与内部网关都有 Files 路径），但要跨提供方管理上传生命周期，远超 P0 热修复范围。
+- **要求所有路由都使用 Files 引用。** 直连 DeepSeek 适配器现在优先使用 Files id，但 pi-ai 横跨的提供方没有一套共享上传生命周期。仅支持内联的路由与直连 DeepSeek 的确定性内联回退仍需要按表示形式执行 offload。
 - **统计完整请求体而非只统计图片。** 文本与工具占比很小，且其大小要到按协议完整序列化后才可知；对主导项设上限并留出显式余量，对所修故障足够精确且简单得多。留到路由能力设计中再议。
 - **改在准入侧裁剪。** 准入看不到未来的累积，只有组装后的请求知道自己的总量。准入侧上限（单边尺寸、字节）作为第一层保留，归[统一图片请求管道笔记](../feature/2026-08-20-unified-image-request-pipeline.zh.md)所有。
 
@@ -33,5 +33,5 @@ pi-ai provider profile 与直接 DeepSeek 适配器都提供 `maxRequestImageByt
 
 - 图片较多的长会话持续可用。最老的图片优先省略；仅当最新图片本身无法装进上限时才会省略它。
 - 越过上限会改写较早的一条消息，提供方 prompt cache 前缀在新被 offload 的图片处截止，直到被 offload 的前缀稳定。
-- 上限只统计 base64 图片载荷；部署必须让它低于自家网关的请求体上限并留出余量，发行默认值无法预知私有网关的上限。
+- Pi-ai 上限与直连 DeepSeek 内联上限只统计 base64 图片载荷；部署必须让它们低于自家网关的请求体上限并留出余量，发行默认值无法预知私有网关的上限。直连 DeepSeek Files 模式使用独立的原始字节上限。
 - 由路由能力元数据同时驱动准入与组装（图片数量、单图大小、请求大小、提供方 token 公式）的设计仍为暂缓工作，在本修复之外跟踪。

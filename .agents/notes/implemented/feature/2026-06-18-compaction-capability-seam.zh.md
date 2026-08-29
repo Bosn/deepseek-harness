@@ -67,7 +67,7 @@ retry → repeat request in same step   ⟵ derives from the replacement surface
 
 ### 近似收敛不变式
 
-`resolveConfig` 提供可用默认值：阈值比例 `0.8`、保留尾部比例 `0.16`、空的摘要提供方/模型覆盖、`maxTokens: 8192`、`compactionRetries: 1`、`maxOverflowRetries: 1`、`summarizationInputBytes: 524288`、`timeoutRecoveryBytes: 524288`、`learnedByteSafetyRatio: 0.75` 以及 `auto: true`。可选的精确提供方/模型策略会部分覆盖顶层默认值；压力根据拥有该路由的 LLM 适配器所报告容量缩放比例，而 `retainTokens` 可以替代按比例保留。保留量必须低于最终阈值。收敛仍然是动态的，因为提供方输出上限可能被隐藏或显式的推理（reasoning）token 消耗，摘要大小也不可预测。如果压力仍高于阈值，`compactIfNeeded()` 会按配置的重试次数再次压缩头部检查点，但每次提交的摘要必须小于其遮蔽的内容。失败请求恢复不需要容量元数据，并会绕过阈值和保留尾部策略，执行平衡的头部缩减，留下最新的不可分割单元。所有权划分由[已路由模型上下文与压缩策略 Agent Note](../architecture/2026-07-20-routed-model-context-and-compaction-policy.zh.md)规定。
+`resolveConfig` 提供可用默认值：阈值比例 `0.8`、保留尾部比例 `0.16`、空的摘要提供方/模型覆盖、`maxTokens: 8192`、`compactionRetries: 1`、`maxOverflowRetries: 1`、`summarizationInputBytes: 524288`、`timeoutRecoveryBytes: 524288`、`learnedByteSafetyRatio: 0.75` 以及 `auto: true`。继承后，顶层或精确模型策略中 `summarizationInputBytes` 与 `maxRequestBytes` 的有效较小值，必须在分派字节估算器下容纳一条最小回放消息与固定指令。可选的精确提供方/模型策略会部分覆盖顶层默认值；压力根据拥有该路由的 LLM 适配器所报告容量缩放比例，而 `retainTokens` 可以替代按比例保留。保留量必须低于最终阈值。收敛仍然是动态的，因为提供方输出上限可能被隐藏或显式的推理（reasoning）token 消耗，摘要大小也不可预测。如果压力仍高于阈值，`compactIfNeeded()` 会按配置的重试次数再次压缩头部检查点，但每次提交的摘要必须小于其替换的精确 post-offload 回放。失败请求恢复不需要容量元数据，并会绕过阈值和保留尾部策略，执行平衡的头部缩减，留下最新的不可分割单元。所有权划分由[已路由模型上下文与压缩策略 Agent Note](../architecture/2026-07-20-routed-model-context-and-compaction-policy.zh.md)规定。
 
 ### Surface 替换：`compaction/*` 事件仅存在于日志；一条 `user/message` 承载摘要
 

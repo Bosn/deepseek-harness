@@ -10,10 +10,10 @@ The Web Client registers its Cordis inspect providers while the first Connection
 
 ## Decision
 
-- `cordis-client-runner` declares the Client Connection package in its package injection metadata and the `connection` service in its plugin injections. The runner reads the generation-scoped `hostDescription` source as Connection readiness authority; `connection/reset` remains a compatibility notification, and description object identity deduplicates both notifications for one generation.
-- Provider registration before the first handshake changes only the page-local registry and marks its complete manifest dirty. A ready Connection generation sends one complete snapshot, including when the provider set is unchanged, because the Host mirror belongs to the previous process generation.
+- `cordis-client-runner` declares the Client Connection package in its package injection metadata and the `connection` service in its plugin injections. The runner subscribes to `ctx.connection.generation` as the readiness authority; its monotone generation id deduplicates observations, while the later `connection/reset` notification remains available to cache consumers without triggering another manifest sync.
+- Provider registration before the first handshake changes only the page-local registry and marks its complete manifest dirty. Each ready Connection generation queues one complete baseline snapshot, including when the provider set is unchanged, because the Host mirror belongs to the previous process generation.
 - Connection loss invalidates queued continuations and cancels active inspect queries. Query resolution captures its generation and never answers through a later Remote carrier, even when a provider ignores its `AbortSignal`.
-- Manifest writes serialize only within one Connection generation. Generation loss and reset start an independent synchronization queue, so an old carrier promise that never settles cannot block the replacement Connection from receiving its snapshot. A failed current-generation write remains dirty for a later provider change or generation reset rather than entering an unbounded retry loop.
+- Manifest writes serialize only within one Connection generation. Generation loss and replacement start an independent synchronization queue, so an old carrier promise that never settles cannot block the replacement Connection from receiving its snapshot. A failed current-generation write remains dirty for a later provider change or ready generation rather than entering an unbounded retry loop.
 - Page disposal retracts the description listener, invalidates queued work, and cancels active queries before provider effects unwind.
 
 ## Alternatives considered
@@ -24,7 +24,7 @@ The Web Client registers its Cordis inspect providers while the first Connection
 
 **Keep one synchronization promise chain across reconnects.** Rejected: a transport promise can remain pending after its generation disappears, which would prevent every later generation from publishing.
 
-**Listen only for `connection/reset`.** Rejected: the event does not announce generation loss, and a runner mounted after the event needs the current `hostDescription` snapshot immediately.
+**Use only `connection/reset`.** Rejected: the event does not announce generation loss, and a runner mounted after the event needs the current generation snapshot immediately.
 
 ## Verification
 

@@ -5,7 +5,6 @@ import {
   createUserMessage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   createMessage,
-  OFFLOADED_IMAGE_TEXT,
   resolveRetryPolicy,
 } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -21,13 +20,15 @@ import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import TokenMeter, { estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
+import TokenMeter, { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SummarizationInput, SummaryResult } from '../src/summarizer.ts'
 import { summarizeWithLlm } from '../src/summarizer.ts'
 
 /** Gateway request-size and large-timeout recovery coverage. */
+
+const OFFLOADED_IMAGE_PREFIX = 'image omitted to fit request image limits'
 
 const REQUEST_TOO_LARGE_MESSAGE
   = '413: {"message":"Request body size exceeds maximum allowed sized","id":"449fa579-c4a3-9e93-ab20-7eb6805b6101","type":"RequestTooLarge","code":"RequestTooLarge"}'
@@ -51,9 +52,10 @@ class RecordingCompactionEngine extends BasicCompactionEngine {
   }
 }
 
-/** Conversation requests whose one-based indexes are in `failing` fail. */
+/** Conversation requests fail at configured indexes or above the optional repeated byte cap. */
 class SizeGateAdapter extends LlmAdapter {
   readonly conversationRequests: GenerateOptions[] = []
+  readonly conversationRequestBytes: number[] = []
   readonly summaryRequests: GenerateOptions[] = []
   private readonly retryPolicy = resolveRetryPolicy({
     mode: 'normal',
@@ -68,6 +70,7 @@ class SizeGateAdapter extends LlmAdapter {
     private readonly failureCode: string = CONTEXT_WINDOW_EXCEEDED_CODE,
     private readonly failureMessage: string = REQUEST_TOO_LARGE_MESSAGE,
     private readonly failureRequestBytesEstimate?: number,
+    private readonly requestByteCap?: number,
   ) {
     super()
   }
@@ -98,7 +101,16 @@ class SizeGateAdapter extends LlmAdapter {
     }
 
     this.conversationRequests.push(options)
-    if (this.failing.has(this.conversationRequests.length)) {
+    const requestBytes = estimateHeaderBytes({
+      config: { provider: options.provider, model: options.model },
+      ...options.system === undefined ? {} : { system: options.system },
+      ...options.tools === undefined ? {} : { tools: [...options.tools] },
+    }) + options.messages.reduce((total, message) => total + estimateMessageBytes(message), 0)
+    this.conversationRequestBytes.push(requestBytes)
+    const exceedsByteCap = this.requestByteCap !== undefined && requestBytes > this.requestByteCap
+    const requestBytesEstimate = this.failureRequestBytesEstimate
+      ?? (exceedsByteCap ? requestBytes : undefined)
+    if (this.failing.has(this.conversationRequests.length) || exceedsByteCap) {
       yield {
         type: 'finish',
         reason: {
@@ -107,9 +119,7 @@ class SizeGateAdapter extends LlmAdapter {
             message: this.failureMessage,
             code: this.failureCode,
             ...this.failureStatus === undefined ? {} : { status: this.failureStatus },
-            ...this.failureRequestBytesEstimate === undefined
-              ? {}
-              : { requestBytesEstimate: this.failureRequestBytesEstimate },
+            ...requestBytesEstimate === undefined ? {} : { requestBytesEstimate },
           },
         },
       }
@@ -138,6 +148,7 @@ async function harness(
     failureCode?: string
     failureMessage?: string
     failureRequestBytesEstimate?: number
+    requestByteCap?: number
     compaction?: Partial<BasicCompactionConfig>
     withRetry?: boolean
   },
@@ -155,6 +166,7 @@ async function harness(
     options.failureCode,
     options.failureMessage,
     options.failureRequestBytesEstimate,
+    options.requestByteCap,
   )
   ctx.llm.registerAdapter(['mock'], adapter)
   ctx.tools.register(defineContentToolFixture({
@@ -231,7 +243,7 @@ function imageHistorySeed(): SessionEvent[] {
   })
   session.append('user/message', createUserMessage({
     content: [
-      { type: 'text', text: 'old image' },
+      { type: 'text', text: 'old image context '.repeat(200) },
       {
         type: 'image',
         attachment: {
@@ -464,6 +476,7 @@ describe('gateway request-size recovery', () => {
       contextWindow: 1_000_000,
       failing: new Set([1]),
       failureRequestBytesEstimate: rejectedBytes,
+      requestByteCap: recoveryBudget,
     })
     try {
       const agent = await createSeededAgent(ctx, 'small-gateway-recovery', sizedHistorySeed([
@@ -477,6 +490,8 @@ describe('gateway request-size recovery', () => {
       await waitForIdle(ctx, agent)
 
       expect(adapter.conversationRequests).toHaveLength(2)
+      expect(adapter.conversationRequestBytes[0]).toBeGreaterThan(recoveryBudget)
+      expect(adapter.conversationRequestBytes[1]).toBeLessThanOrEqual(recoveryBudget)
       expect(compact.capturedInputs.length).toBeGreaterThan(0)
       for (const input of compact.capturedInputs) {
         expect(input.maxRequestBytes).toBe(recoveryBudget)
@@ -497,6 +512,7 @@ describe('gateway request-size recovery', () => {
       contextWindow: 1_000_000,
       failing: new Set([1]),
       failureRequestBytesEstimate: rejectedBytes,
+      requestByteCap: recoveryBudget,
     })
     try {
       const agent = await createSeededAgent(ctx, 'post-offload-image-413', imageHistorySeed())
@@ -507,10 +523,12 @@ describe('gateway request-size recovery', () => {
       await waitForIdle(ctx, agent)
 
       expect(adapter.conversationRequests).toHaveLength(2)
+      expect(adapter.conversationRequestBytes[0]).toBeGreaterThan(recoveryBudget)
+      expect(adapter.conversationRequestBytes[1]).toBeLessThanOrEqual(recoveryBudget)
       expect(compact.capturedInputs).toHaveLength(1)
       expect(compact.capturedInputs[0]?.maxRequestBytes).toBe(recoveryBudget)
       const replay = JSON.stringify(compact.capturedInputs[0]?.messages)
-      expect(replay).toContain(OFFLOADED_IMAGE_TEXT)
+      expect(replay).toContain(OFFLOADED_IMAGE_PREFIX)
       expect(replay).not.toContain('"type":"image"')
       expect([...agent.session.events].at(-1)).toMatchObject({
         type: 'turn/end',
@@ -794,34 +812,6 @@ describe('gateway request-size recovery', () => {
 
       expect(adapter.conversationRequests).toHaveLength(1)
       expect(compact.capturedInputs).toHaveLength(0)
-      expect([...agent.session.events].at(-1)).toMatchObject({
-        type: 'turn/end',
-        data: { reason: { kind: 'error' } },
-      })
-    } finally {
-      await ctx.fiber.dispose()
-    }
-  })
-
-  it('fails loud when the configured summarization cap cannot hold the compaction instruction', async () => {
-    const { ctx, compact, adapter } = await harness({
-      contextWindow: 1_000_000,
-      failing: new Set([1]),
-      compaction: { summarizationInputBytes: 100 }, // smaller than the fixed instruction
-    })
-    try {
-      const agent = await createSeededAgent(ctx, 'tiny-cap-replay', sizedHistorySeed([
-        { user: 'modest history', assistant: 'historical response 1' },
-      ]))
-      agent.followup(createUserMessage({
-        content: [{ type: 'text', text: 'continue from history' }],
-        source: { kind: 'user' },
-      }))
-      await waitForIdle(ctx, agent)
-
-      expect(compact.capturedInputs).toHaveLength(0)
-      expect(adapter.conversationRequests).toHaveLength(1)
-      expect([...agent.session.events].some(event => event.type === 'compaction/start')).toBe(false)
       expect([...agent.session.events].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },

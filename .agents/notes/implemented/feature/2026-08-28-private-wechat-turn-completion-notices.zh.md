@@ -16,7 +16,7 @@ DSH 用户在没有观察 Web session 时，需要收到私人完成信号。进
 
 每个符合条件的终态会选择 turn number 与完成 turn 完全一致的最后一条 `assistant/message`，并只拼接其中的可见 text block。插件沿用 Codex 完成摘要的清理方式和可配置 Unicode grapheme cluster 上限，然后对完整组装的 channel message 施加 UTF-8 字节上限，且不会拆开 grapheme cluster。reasoning 与 tool-call block 绝不会进入 channel payload。没有可见 assistant 文本的终态保持静默。
 
-每个顶层 session 只保留一条 pending completion。经过可配置的五秒 settle delay 后，插件解析当前 `ctx.sessionTitle` 标题、施加上限，并发送 `DSH任务 [<status>]：<title>\n<summary>`。较新的终态 turn 会替换较旧的 pending completion。settle delay 与子进程 timeout 都不能超过 Node 支持的定时器上限。缺少标题时只记录不含 payload 的 warning，不发送无法识别的通知。
+每个顶层 session 只保留一条 pending 或排队 completion。经过可配置的五秒 settle delay 后，插件解析当前 `ctx.sessionTitle` 标题、施加上限，并发送 `DSH任务 [<status>]：<title>\n<summary>`。较新的终态 turn 会在判断自身是否有可见文本前立即移除较旧的保留 completion，因此排队结果不能在新 settle 窗口内开始交付，而且无文本结果保持静默。settle delay 与子进程 timeout 都不能超过 Node 支持的定时器上限。缺少标题时只记录不含 payload 的 warning，不发送无法识别的通知。
 
 插件加载时从部署方管理的 constants 文件读取 account 和 target。它不经过 shell 启动配置的 OpenClaw wrapper，只传递 allowlist 环境，校验包含配置 channel 与 message id 的 sent 回执，并把交付失败转换为不含 payload 的 warning。幂等键绑定 session id 与精确终态 turn、sequence、timestamp 和 reason。可配置上限会分别约束同时运行的交付子进程，以及跨 session 保留的全部 pending 与排队交付。同一 session 的较新排队 turn 会替换旧通知；保留项溢出时会丢弃全局最旧的 pending 或排队通知、保留最新完成结果，并生成不含 payload 的 warning。dispose 会先移除 observer、取消 pending timer、丢弃排队交付，再中止并等待仍在运行的 channel 子进程。
 

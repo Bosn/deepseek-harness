@@ -5,7 +5,7 @@ import {
   estimateHeaderBytes,
   estimateMessageBytes,
 } from '@deepseek-ai/dsh-token-meter'
-import { createMessage, createUserMessage, CallId } from '@deepseek-ai/dsh-llm'
+import { createMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 
 function serializedBytes(value: object): number {
@@ -33,8 +33,8 @@ describe('byte-priced estimation (gateway request-size pressure)', () => {
     const message = createMessage({
       role: 'assistant',
       content: [
-        { type: 'tool-call', id: CallId('c1'), name: 'work', arguments: '{"i":1}' },
-        { type: 'tool-result', toolCallId: CallId('c1'), content: [{ type: 'text', text: '出' }], isError: false },
+        { type: 'tool-call', id: ToolCallId('c1'), name: 'work', arguments: '{"i":1}' },
+        { type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: '出' }], isError: false },
       ],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     })
@@ -45,7 +45,7 @@ describe('byte-priced estimation (gateway request-size pressure)', () => {
       role: 'assistant',
       content: [{
         type: 'tool-call',
-        id: CallId('c2'),
+        id: ToolCallId('c2'),
         name: 'work',
         arguments: argumentsText,
       }],

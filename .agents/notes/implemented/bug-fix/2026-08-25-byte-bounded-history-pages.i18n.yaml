@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-byte-bounded-history-pages.md
-2026-08-25-byte-bounded-history-pages.md: 3bcdc7c5a5cddd5593d90f2c3736c690a6727653
-2026-08-25-byte-bounded-history-pages.zh.md: 1bed6bce2075846b42f0dc923c6f3b19d7c0cba9
+2026-08-25-byte-bounded-history-pages.md: b3eb4eab441c40f5b93967b4d6da3fb594b27336
+2026-08-25-byte-bounded-history-pages.zh.md: e23786d2ac8c972a280cefce0ee1a7598aff9298

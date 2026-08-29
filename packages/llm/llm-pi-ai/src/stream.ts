@@ -8,7 +8,7 @@
  * @module dsh-llm-pi-ai/stream
  */
 
-import { CallId, CONTENT_FILTERED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, CONTENT_FILTERED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, LlmFailure, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
@@ -17,12 +17,14 @@ import { toPiReplayState } from './replay.ts'
 /**
  * Map pi-ai usage (reasoning folded into output by pi-ai).
  * @param usage - cumulative usage from the terminal pi-ai event.
- * @returns harness counts; cache fields appear only when non-zero (pi-ai reports zeros, not absence).
+ * @returns harness counts with pi-ai's exact total; cache fields appear only
+ *   when non-zero (pi-ai reports zeros, not absence).
  */
 export function mapUsage(usage: PiUsage): TokenUsage {
   return {
     inputTokens: usage.input,
     outputTokens: usage.output,
+    totalTokens: usage.totalTokens,
     ...usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
     ...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {},
   }
@@ -36,12 +38,19 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 // wrapper a bare `terminated`, so we are left pattern-matching terse words here.
 // If pi-ai ever forwards the original Error (or a fetch/dispatcher hook that lets
 // us capture the cause ourselves), classify on `code`/`cause` instead of text.
+const FLATTENED_REQUEST_BODY_CAP = new RegExp(
+  String.raw`\bfailed to buffer the request body:\s*length limit exceeded\b`
+  + String.raw`|\b(?:RequestTooLarge|PayloadTooLarge)\b`
+  + String.raw`|\b(?:request body|payload)(?:\s+size)?\s+(?:exceed(?:s|ed)?|too\s+(?:large|big))\b`,
+  'i',
+)
+
 function statusFromMessage(message: string): number | undefined {
   const match = /\bHTTP\s*([1-5]\d{2})\b/i.exec(message)
     ?? /\bAPI error\s*\(([1-5]\d{2})\)/i.exec(message)
     ?? /^\s*([1-5]\d{2})(?:[ \t]+[^:\r\n]+)?[ \t]*:/.exec(message)
-  if (match?.[1] === undefined) return undefined
-  return Number(match[1])
+  if (match?.[1] !== undefined) return Number(match[1])
+  return FLATTENED_REQUEST_BODY_CAP.test(message) ? 413 : undefined
 }
 
 function classifyPiAiError(
@@ -58,8 +67,7 @@ function classifyPiAiError(
   if (status === 429 || /\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
   // Request-size rejection needs a rebuilt envelope, so it enters compaction
   // recovery instead of retrying the same bytes.
-  if (status === 413
-    || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) {
+  if (status === 413) {
     return CONTEXT_WINDOW_EXCEEDED_CODE
   }
   // Response moderation rejections: a wire content_filter finish reason or an
@@ -129,7 +137,10 @@ function failure(
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
- *   `EMPTY_RESPONSE` error.
+ *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
+ *   to non-retryable `PI_AI_ERROR` failures. Flattened request-body-cap wording
+ *   without an explicit HTTP status carries inferred status 413 for request-size
+ *   recovery.
  */
 export function mapStopReason(
   message: AssistantMessage,
@@ -173,6 +184,14 @@ export function mapStopReason(
       return { kind: 'stop' }
     case 'length': return { kind: 'max-tokens' }
     case 'toolUse': return { kind: 'tool-calls' }
+    case 'pending': return {
+      kind: 'error',
+      failure: { message: `pi-ai stream for model "${message.model}" ended pending`, code: 'PI_AI_ERROR' },
+    }
+    case 'deferred': return {
+      kind: 'error',
+      failure: { message: `pi-ai deferred response for model "${message.model}" is not supported`, code: 'PI_AI_ERROR' },
+    }
     case 'aborted': return {
       kind: 'aborted',
       failure: failure(
@@ -203,6 +222,8 @@ export function mapStopReason(
  * `finish` chunks (the harness protocol's other error-delivery style).
  * @param events - one assistant turn's pi-ai event stream.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param callerSignal - caller cancellation state; an aborted caller makes any
+ *   in-band terminal error an aborted finish.
  * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
  * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
@@ -211,6 +232,7 @@ export function mapStopReason(
 export async function* toStreamChunks(
   events: AsyncIterable<AssistantMessageEvent>,
   contextWindow?: number,
+  callerSignal?: AbortSignal,
   requestBytesEstimate?: number,
   quotaWorded429IsRateLimit = false,
 ): AsyncGenerator<StreamChunk> {
@@ -254,7 +276,7 @@ export async function* toStreamChunks(
         yield {
           type: 'tool-call-delta',
           index: event.contentIndex,
-          id: CallId(known?.id ?? ''),
+          id: ToolCallId(known?.id ?? ''),
           ...known?.name !== undefined && known.name.length > 0 ? { name: known.name } : {},
           argumentsDelta: event.delta,
         }
@@ -266,7 +288,7 @@ export async function* toStreamChunks(
           index: event.contentIndex,
           block: {
             type: 'tool-call',
-            id: CallId(event.toolCall.id),
+            id: ToolCallId(event.toolCall.id),
             name: event.toolCall.name,
             // pi-ai hands back the PARSED arguments; the harness vocabulary
             // keeps the raw string.
@@ -293,7 +315,12 @@ export async function* toStreamChunks(
         yield { type: 'usage', usage: mapUsage(event.error.usage) }
         yield {
           type: 'finish',
-          reason: mapStopReason(event.error, contextWindow, requestBytesEstimate, quotaWorded429IsRateLimit),
+          reason: mapStopReason(
+            callerSignal?.aborted ? { ...event.error, stopReason: 'aborted' } : event.error,
+            contextWindow,
+            requestBytesEstimate,
+            quotaWorded429IsRateLimit,
+          ),
         }
         return
       // no default: AssistantMessageEvent is pi-ai's closed union; a new

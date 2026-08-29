@@ -18,6 +18,7 @@ import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import {
+  MIN_SUMMARIZER_REQUEST_BYTES,
   MIN_USEFUL_REQUEST_BYTES,
   resolveCompactSpec,
   resolveConfig,
@@ -151,8 +152,8 @@ const summarizationModelSchema = z.string()
 const maxTokensSchema = z.number().step(1).min(1)
 const compactionRetriesSchema = z.number().step(1).min(0)
 const maxOverflowRetriesSchema = z.number().step(1).min(0)
-const maxRequestBytesSchema = z.number().step(1).min(1)
-const summarizationInputBytesSchema = z.number().step(1).min(1)
+const maxRequestBytesSchema = z.number().step(1).min(MIN_SUMMARIZER_REQUEST_BYTES)
+const summarizationInputBytesSchema = z.number().step(1).min(MIN_SUMMARIZER_REQUEST_BYTES)
 const timeoutRecoveryBytesSchema = z.number().step(1).min(1)
 const learnedByteSafetyRatioSchema = z.number()
 

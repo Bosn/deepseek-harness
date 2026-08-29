@@ -43,13 +43,14 @@ interface SurfaceSelection {
 interface PreparedCompaction extends SurfaceSelection {
   readonly measurement: TokenMeasurement
   readonly selectedNodes: TokenMeasurement['nodes']
+  /** Fixed-heuristic total written to the replacement event for projection folding. */
   readonly shadowedTokenCount: number
+  /** Route-priced post-offload replay total; the shrink comparison's unit. */
+  readonly summarizedInputRouteTokenCount: number
   /** Estimated durable message bytes replaced by this transaction. */
   readonly durableInputByteCount: number
   /** Estimated post-offload message bytes summarized by this transaction. */
   readonly summarizedInputByteCount: number
-  /** Whether the bounded summarizer projection replaced at least one image. */
-  readonly inputImagesOffloaded: boolean
   /** Estimated header bytes shared by this and the next bounded request. */
   readonly summarizationHeaderBytes: number
   /** Front message count that exceeds the byte cap and compacts separately. */
@@ -202,7 +203,6 @@ export async function compactSurfaceRegion(
     agent,
     options,
     operation,
-    false,
     signal,
   )
 }
@@ -215,7 +215,6 @@ async function compactSurfaceSelection(
   agent: Agent,
   options: CompactionTransactionOptions,
   operation: CompactionOperationState,
-  checkpointWillBeReused: boolean,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
   // Front messages outside the request cap compact in earlier transactions;
@@ -244,7 +243,6 @@ async function compactSurfaceSelection(
         agent,
         options,
         operation,
-        checkpointWillBeReused,
         signal,
       )
     }
@@ -262,7 +260,6 @@ async function compactSurfaceSelection(
       agent,
       options,
       operation,
-      true,
       signal,
     )
     // The replacement user message is appended immediately before the closing
@@ -302,7 +299,6 @@ function resolveCompactionOwner(
  * @param agent - agent used by the summarizer.
  * @param options - bracket owner, stability rule, flush hook, and command identity.
  * @param operation - outer owner and remaining provider-call budget.
- * @param checkpointWillBeReused - whether a later bounded transaction consumes this checkpoint.
  * @param signal - optional summarization cancellation signal.
  * @returns the successful durable compaction result.
  */
@@ -313,7 +309,6 @@ async function runCompactionTransaction(
   agent: Agent,
   options: CompactionTransactionOptions,
   operation: CompactionOperationState,
-  checkpointWillBeReused: boolean,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
   const entryState = inspectCompactionEntryState(session.events)
@@ -359,7 +354,6 @@ async function runCompactionTransaction(
       agent,
       compactionId,
       options.sourceCommandId,
-      checkpointWillBeReused,
       signal,
     )
     if (options.owner === null) signal?.throwIfAborted()
@@ -508,10 +502,17 @@ function prepareCompaction(
     ...selection,
     measurement,
     selectedNodes,
-    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
+    // The shadow-price protocol prices replacements with the fixed heuristic
+    // so the O(1) projection fold stays in agreement with its own appends;
+    // retention and range selection read the route-priced surface nodes,
+    // while shrink validation prices the exact post-offload replay.
+    shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
+    summarizedInputRouteTokenCount: dependencies.meter.estimateMessages(
+      rebuilt.input.messages,
+      session.requestHeader(),
+    ),
     durableInputByteCount: rebuilt.durableInputByteCount,
     summarizedInputByteCount: rebuilt.inputByteCount,
-    inputImagesOffloaded: rebuilt.imagesOffloaded,
     summarizationHeaderBytes: rebuilt.headerBytes,
     dropCount: rebuilt.dropCount,
     input: rebuilt.input,
@@ -525,7 +526,6 @@ async function summarizeCompaction(
   agent: Agent,
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
-  checkpointWillBeReused: boolean,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
   const summaryResult = await dependencies.summarize(prepared.input, agent, signal)
@@ -533,11 +533,13 @@ async function summarizeCompaction(
     content: frameSummary(summaryResult.summary),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
+  // The checkpoint is text-only, so its fixed-heuristic price is its route
+  // price. Compare it with the exact post-offload replay that the bounded
+  // request would otherwise retain.
   const framedSummaryTokenCount = dependencies.meter.estimateMessage(checkpointMessage)
-  if (!prepared.inputImagesOffloaded
-    && framedSummaryTokenCount >= prepared.shadowedTokenCount) {
+  if (framedSummaryTokenCount >= prepared.summarizedInputRouteTokenCount) {
     throw new Error(
-      `summary is not smaller than the shadowed content (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.shadowedTokenCount})`,
+      `summary is not smaller than its post-offload input (${framedSummaryTokenCount} estimated framed tokens >= ${prepared.summarizedInputRouteTokenCount})`,
     )
   }
   if (prepared.input.maxRequestBytes !== undefined) {
@@ -556,8 +558,7 @@ async function summarizeCompaction(
         `summary is not smaller than its durable input (${framedSummaryByteCount} estimated framed bytes >= ${prepared.durableInputByteCount})`,
       )
     }
-    if ((checkpointWillBeReused || !prepared.inputImagesOffloaded)
-      && framedSummaryByteCount >= prepared.summarizedInputByteCount) {
+    if (framedSummaryByteCount >= prepared.summarizedInputByteCount) {
       throw new Error(
         `summary is not smaller than its post-offload input (${framedSummaryByteCount} estimated framed bytes >= ${prepared.summarizedInputByteCount})`,
       )
@@ -702,7 +703,6 @@ function buildSummarizationInput(
   dropCount: number
   durableInputByteCount: number
   inputByteCount: number
-  imagesOffloaded: boolean
   headerBytes: number
 } {
   const header = session.requestHeader()
@@ -715,7 +715,7 @@ function buildSummarizationInput(
   const durableInputByteCount = messages
     .reduce((total, message) => total + estimateMessageBytes(message), 0)
   const fitted = maxBytes === undefined
-    ? { messages, dropCount: 0, imagesOffloaded: false }
+    ? { messages, dropCount: 0 }
     : trimToByteCap(session, shadowedSeqs, messages, header, maxBytes)
   const inputByteCount = fitted.messages
     .reduce((total, message) => total + estimateMessageBytes(message), 0)
@@ -730,7 +730,6 @@ function buildSummarizationInput(
     dropCount: fitted.dropCount,
     durableInputByteCount,
     inputByteCount,
-    imagesOffloaded: fitted.imagesOffloaded,
     headerBytes,
   }
 }
@@ -751,7 +750,7 @@ function trimToByteCap(
   messages: readonly Message[],
   header: EpochHeader | undefined,
   maxBytes: number,
-): { messages: readonly Message[]; dropCount: number; imagesOffloaded: boolean } {
+): { messages: readonly Message[]; dropCount: number } {
   const instructionBytes = estimateCompactionInstructionBytes()
   const dataCap = maxBytes - instructionBytes
   if (dataCap <= 0) {
@@ -771,7 +770,7 @@ function trimToByteCap(
     const candidate = messages.slice(dropCount)
     const fitted = offloadRequestImagesUntil(candidate, fits)
     if (fits(fitted)) {
-      return { messages: fitted, dropCount, imagesOffloaded: fitted !== candidate }
+      return { messages: fitted, dropCount }
     }
     if (dropCount >= messages.length - 1) {
       let total = headerBytes

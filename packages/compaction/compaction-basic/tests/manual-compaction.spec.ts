@@ -33,6 +33,7 @@ import type {
   SummarizationInput,
   SummaryResult,
 } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
+import { estimateMinimumCompactionRequestBytes } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 
 const MODEL = 'mock'
 const SIGNAL = new AbortController().signal
@@ -383,12 +384,15 @@ describe('compactNow through the real loop', () => {
 
 describe('compactNow transaction and failure classification', () => {
   it('applies the configured summarizer cap before a manual provider call', async () => {
-    const { compact } = detachedService({ auto: false, summarizationInputBytes: 100 })
+    const { compact } = detachedService({
+      auto: false,
+      summarizationInputBytes: estimateMinimumCompactionRequestBytes(),
+    })
     const session = closedConversation(2)
     const agent = fakeAgent(session, () => () => undefined)
 
     await expect(compact.compactNow(agent, SIGNAL))
-      .rejects.toThrow(/cannot accommodate .* compaction instruction/)
+      .rejects.toThrow(/summarizer input cannot fit/)
     expect(compact.calls).toHaveLength(0)
     expect(compactEvents(session)).toEqual([])
   })

@@ -83,7 +83,7 @@ type ManualCompactionErrorCode =
 
 `changed` and `summary` leave the conversation surface unchanged but still close and persist the failed attempt in the log. `commit` may follow partial mutation; `persistence` means the in-memory bracket closed but its flush failed. Cancellation remains separate and throws the exact abort reason after required cleanup.
 
-Pressure compaction runs at serial `agent/pre-step` before request derivation. Once pressure, semantic context overflow, HTTP 413, or configured large-request timeout qualifies, compaction-basic invokes optional [`ctx.toolResultPruner`](../../packages/compaction/compaction-tool-result-pruner/README.md) before range selection, remeasures through `ctx.tokenMeter`, and can advance the surface without a summary. Failed-request recovery runs through `agent/request-error` while the failed request's turn and step remain open, and returns a retry action only when the surface replacement generation advances, even if later summary work throws after pruning; cancellation still wins. HTTP 413 and eligible timeout recovery learn a lower proactive byte budget, while semantic overflow does not. Region boundaries preserve tool-call/result pairing but not whole turns, allowing early closed steps of one oversized turn to compact. `dsh-compaction-basic` owns thresholds, retained-tail policy, recovery caps, and failure handling.
+Pressure compaction runs at the serial `agent/pre-step` waterfall before request derivation. Once token or byte pressure qualifies, compaction-basic invokes optional [`ctx.toolResultPruner`](../../packages/compaction/compaction-tool-result-pruner/README.md) before range selection, remeasures through `ctx.tokenMeter`, and can advance the surface without a summary. Failed-request recovery runs through `agent/request-error` while the failed request's turn and step remain open; semantic context overflow, HTTP 413, and an eligible large-request timeout bypass normal pressure and retention. It returns a retry action only when the surface replacement generation advances, even if later summary work throws after pruning; cancellation still wins. HTTP 413 and eligible timeout recovery learn a lower proactive byte budget, while semantic overflow does not. Region boundaries preserve tool-call/result pairing but not whole turns, allowing early closed steps of one oversized turn to compact. `dsh-compaction-basic` owns thresholds, retained-tail policy, recovery caps, and failure handling.
 
 The Service Definition exports `toolPairingBalancedBefore(session, seq)` and `toolPairingBalancedAfter(session, seq)` for the tool-call/result pairing checks before and after a seq. Both validate current surface membership and reject missing seqs and orphan results; the [package contract](../../packages/compaction/compaction/README.md#tool-pairing-boundaries) defines their cache behavior.
 
@@ -99,7 +99,7 @@ interface PrunedEntry {
   /** Newly appended pruned tool-result event. */
   readonly replacementSeq: number
   /** Tool call shared by the original and replacement. */
-  readonly callId: CallId
+  readonly callId: ToolCallId
   /** Original text size in Unicode code points. */
   readonly charsBefore: number
   /** Replacement text size in Unicode code points. */

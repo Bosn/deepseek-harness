@@ -1,78 +1,49 @@
+---
+description: "Automatic conversation condensation for deployments choosing, tuning, or debugging how older history is summarized as token pressure builds."
+kind: "package-reference"
+---
+
 # @deepseek-ai/dsh-compaction-basic
 
 English | [中文](README.zh.md)
 
-The **basic compaction backend**: a `BasicCompactionEngine` implementing the `@deepseek-ai/dsh-compaction` Service Definition with reusable `ctx.tokenMeter` pressure, token-budget retention, and summarization as a direct one-shot `ctx.llm.stream()` call that replays the conversation prefix to reuse the provider's KV cache (interceptable at `llm/stream`).
+## Summary
 
-This package owns the Service Provider role of the compaction capability — see the [Service Definition package](../compaction/README.md) for its contract and the [capability-seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.md) for the design.
+`dsh-compaction-basic` keeps long agent conversations working near model context and gateway request-body limits. As token or configured byte pressure builds, it automatically condenses the oldest part of the conversation into a summary and keeps the recent part intact; after semantic context overflow, HTTP 413, or an eligible large-request timeout it condenses and retries. You can also condense on demand with `/compact` from `dsh-command-compact`, and mount `dsh-compaction-tool-result-pruner` to trim oversized tool outputs first. Condensation costs one extra model request that reads the selected history and writes the summary; only the summary text is kept. It condenses derived history only — it cannot shrink the system prompt, tools, or session prefix, and one indivisible unit such as a single huge tool call cannot be split.
 
-## What it owns
+## Table of Contents
 
-This backend owns the compaction policy:
+- [Use this package](#use-this-package)
+- [Understand the implementation](#understand-the-implementation)
+- [Further Exploration](#further-exploration)
+- [Model Experience](#model-experience)
+- [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+- [Dev Note](#dev-note)
 
-- **Measurement** — the singleton `ctx.tokenMeter` prices the latest canonical logged envelope and current surface at one consumed-log revision. Step-boundary pressure therefore includes the actual system prompt, tools, routing, assistant completion, tool results, buffered context, and steering.
-- **Routed policy** — proactive pressure resolves capacity from the adapter that owns the latest durable provider/model route, then scales the default policy plus an optional exact-target override into concrete token budgets. Model discovery remains advisory and is not consulted.
-- **Model-free pruning** — after pressure or failed-request recovery qualifies, the optional [`ctx.toolResultPruner`](../compaction-tool-result-pruner/README.md) service rewrites oversized tool results before range selection. Compact-basic remeasures through `ctx.tokenMeter`, skips summarization when pressure becomes safe, and otherwise summarizes the pruned surface. Below-pressure step checks never prune.
-- **Retention** — compact the oldest whole surface units while preserving a recent tail and balanced tool-call/result cuts through the [`dsh-compaction` boundary helpers](../compaction/README.md#tool-pairing-boundaries). Turn boundaries do not protect old steps inside a runaway turn. An open indivisible tail declines until it closes. The optional pruner can repair an oversized closed tool unit when its text-bearing result is the removable bulk; indivisible non-tool units and non-prunable tool remainders remain out of scope.
-- **Convergence** — retry head-checkpoint compaction up to `compactionRetries`; reject a summary that does not shrink its source, and throw if retries cannot return below threshold. A capped transaction requires its framed checkpoint to fit the next header-plus-instruction request and to shrink the durable selected bytes. Without image offload, token shrink and post-offload byte shrink both remain mandatory. A final checkpoint built from an image-offloaded projection may use durable pre-offload byte shrink instead of the distorted image-metadata token comparison, while a prefix checkpoint consumed by a later bounded transaction must still strictly shrink its post-offload messages. One hierarchical operation permits at most one summarizer call per surface node selected at entry, so repeated checkpoint-only folds terminate without an unbounded provider-call path.
-- **Summarization** — a direct `llm/stream` call uses the configured provider/model pair and cap, falling back to the latest logged request target and then the agent target, without running the loop-only `agent/request` extension point. The call replays the conversation's own system prompt, tools, and shadowed-region messages and appends the compaction instruction as the final user message, so it reuses the provider's warm prefix cache instead of invalidating it. Automatic pressure, explicit-region, and `compactNow()` entry points all enforce the routed `summarizationInputBytes` cap. For a capped request, the complete header-plus-message-plus-instruction estimate is checked first; oldest image references become the shared omission placeholder one at a time until that complete request fits, then older balanced message ranges compact in separate bounded transactions when necessary. Each generated checkpoint enters the next bounded transaction, so partitions converge to one replacement instead of accumulating on the rebuilt surface. Every removed message is summarized, and an indivisible oversized request fails before dispatch. The selected adapter must resolve or explicitly reject images that remain. It sets `GenerateOptions.purpose` to `compaction`, which adapters may forward as request attribution (the DeepSeek adapter sends `x-deepseek-harness-compact: 1`) without touching the model-visible body. Only returned text enters the checkpoint, excluding reasoning and tool calls that would leak private reasoning or create an orphaned call; image output fails with `UNSUPPORTED_CONTENT` rather than disappearing.
-- **Framing** — the replacement user message marks established checkpoint context with `<compacted-summary>` tags. The raw summary remains on the `compaction/summary` event, and later automatic cycles merge the prior checkpoint.
-- **Lifecycle** — all entry points use bracket-first region transactions; an oversized range forms a hierarchy of bounded transactions. Immediately before synchronously appending `compaction/start` for each transaction, the engine rereads the durable lock and turn state and requires the numeric-or-null owner captured when the hierarchical operation began to remain unchanged; the check and append have no intervening `await`. A competing `compaction/start` or closed/replaced turn therefore fails before another start, summary, or replacement. After opening, the transaction awaits the summary, revalidates, appends `compaction/summary` plus the replacement, and makes exactly one closing attempt. Automatic and explicit-region calls require a numeric open-turn owner and whole-surface stability; the serial `agent/pre-step` listener checks pressure before request derivation, while semantic context overflow, HTTP 413, and configured large-request `TIMEOUT` recovery enter through `agent/request-error` and authorize retry only after durable surface progress passes the failed-request readiness checks below. `compactNow()` reserves idle admission, uses `turn: null`, accepts append-only context outside its selected span, flushes every closed attempt, and releases admission in `finally`.
-- **Failed-request recovery** — semantic context overflow needs no capacity metadata. HTTP 413 always selects request-size recovery; `TIMEOUT` selects it only when the adapter-converted request estimate, or the surfaced-request fallback, meets `timeoutRecoveryBytes`. Both paths bypass normal pressure and retention, prune, then attempt one maximal balanced head reduction while leaving the newest indivisible unit. After a completed replacement or partial durable progress, retry is authorized only while the original request-error turn and step remain open and no durable compaction lock is active. A thrown `busy` failure additionally blocks partial-progress retry; otherwise a failed readiness check preserves the original provider failure instead of racing a competing summary.
-- **Failure handling** — a live unmatched `compaction/start` is the durable lock. An unmatched marker before a newer `session/end-seed` is stale evidence from a prior lifecycle and does not block; one after that boundary reports `busy`. Summary and changed-span failures close with an error and leave their selected span untouched, though earlier bounded prefixes may already have committed and every attempt remains in the log. A failed close deliberately leaves a blocking orphan. Operational pressure failures warn and continue; failed-request recovery applies the request-ownership checks above before retrying from any durable progress. Cancellation remains authoritative after cleanup and durability.
+-----
 
-The protected `summarize()` method is the sole subclass hook. A template- or remote-summarizer subclass can override it while pressure, retention, cited source events, shrink validation, and shadowed-token accounting stay on `ctx.tokenMeter`. The hook returns the safe summary plus the complete provider output, call envelope, and usage when available (`{ summary, rawOutput?, llmStreamCall?, provider, model, maxTokens?, usage? }`); `llmStreamCall: true` means producing that result consumed exactly one call through this context's `ctx.llm.stream()` and requires complete `rawOutput`, while unmarked `rawOutput` does not identify the call path. The transaction preserves those fields on `compaction/summary`.
+<a id="use-this-package"></a>
+## Use this package
 
-## Config (`BasicCompactionConfig`)
+Mount this package to get automatic conversation condensation in a composition that already provides an LLM, session storage, and token measurement. The shipped `dsh` base enables it by default; mount it explicitly to control when condensation starts.
 
-Every setting is optional. Top-level policy fields are defaults for every routed model; `modelPolicies` applies partial overrides to exact provider/model pairs. At pressure time, compaction-basic asks the owning LLM adapter for that route's context capacity and resolves absolute budgets. Unrecognized keys, duplicate targets, mutually exclusive retention forms, and a merged `retainRatio` that is not below `thresholdRatio` fail plugin load. An absolute `retainTokens` budget that is not below its scaled threshold fails on the first resolvable target because that comparison requires model capacity.
+### What you get
 
-| Key | Required | Meaning |
-|---|---|---|
-| `thresholdRatio` | no (default `0.8`) | Compact at `floor(routedContextWindow × ratio)`. |
-| `retainRatio` | no (default `0.16`) | Recent surface budget kept verbatim as a fraction of the routed context window; mutually exclusive with `retainTokens`. |
-| `retainTokens` | no | Absolute recent surface budget kept verbatim; mutually exclusive with `retainRatio` and must be below the resolved threshold. |
-| `summarizationProvider` | no (default `''`) | Set together with `summarizationModel`; an empty pair resolves the latest logged request target, then the `AgentOptions` pair. |
-| `summarizationModel` | no (default `''`) | Set together with `summarizationProvider`; an empty pair resolves the latest logged request target, then the `AgentOptions` pair. |
-| `maxTokens` | no (default `8192`) | Provider generation cap for the summarization call; may include reasoning tokens. |
-| `compactionRetries` | no (default `1`) | Extra attempts after the first when pressure remains above threshold. |
-| `maxOverflowRetries` | no (default `1`) | Maximum retries after semantic context overflow or request-size recovery; `0` disables failed-request recovery only. |
-| `maxRequestBytes` | no | Optional bound on the estimated wire-byte size of the routed model request. Gateways answer oversized bodies with HTTP 413, which token pressure alone cannot predict on mega-context models; when set, pressure compaction also fires at this byte bound. |
-| `summarizationInputBytes` | no (default `524288`) | Cap on each complete summarizer request: header, replay messages, and fixed instruction. Oversized ranges compact through bounded transactions that fold each prior checkpoint into the next pass and converge to one replacement; an indivisible request over the cap fails before provider dispatch. |
-| `timeoutRecoveryBytes` | no (default `524288`) | Minimum estimated routed-request bytes at which a `TIMEOUT` may use request-size compaction before generic retry. |
-| `learnedByteSafetyRatio` | no (default `0.75`) | Top-level fraction of a rejected request's estimated bytes adopted as the proactive byte budget after HTTP 413 or configured large-request timeout recovery; must be in `(0, 1)`. |
-| `modelPolicies` | no (default `[]`) | Exact `{ provider, model, ...partialPolicy }` overrides; matching uses both fields and does not depend on `listModels()`. |
-| `auto` | no (default `true`) | Register step-boundary pressure and overflow-recovery listeners. Set `false` for manual-only. |
+With the default settings you get automatic token-pressure condensation; failed-request recovery after semantic overflow, HTTP 413, or a sufficiently large timed-out request; on-demand condensation through `/compact`; and — when the pruner is mounted — trimming of oversized tool outputs before summarization. A confirmed 413 learns a lower proactive byte budget for the exact route, while semantic overflow does not.
 
-Every `modelPolicies` entry accepts the policy fields above except `learnedByteSafetyRatio`, `auto`, and `modelPolicies` itself. If an entry supplies either retention field, it replaces the default policy's retention choice; otherwise retention is inherited. Summarization provider/model remain a pair inside each entry.
+### Smallest working composition
 
-An adapter may return no capacity for a valid dynamic route, and resolved capacity may expose an invalid absolute retention budget. Manual pressure checks then throw a target-specific configuration error; the automatic listener warns once for that exact target and continues with full history. Unrelated operational failures remain independently visible. Canonical provider overflow still attempts recovery because the provider has already established that compaction is necessary.
+Mount session storage, token measurement, the optional pruner, this backend, and optionally the on-demand command:
 
-An HTTP 413 request-body rejection enters request-size recovery even on a mega-context route whose token pressure is low. A `TIMEOUT` enters the same path only at or above `timeoutRecoveryBytes`, preferring an adapter-supplied post-conversion estimate so transient image offload is reflected, and preventing a large unchanged envelope from consuming the generic retry budget. Every positive budget derived from a confirmed 413 constrains that recovery's summarizer, including values below 64 KiB; budgets below that usefulness floor are not retained for later proactive pressure. Recovery that durably advances the surface learns a lower proactive byte budget from that estimate using `learnedByteSafetyRatio`; the retained budget is isolated to that agent and exact provider/model route, and semantic context overflow does not alter it.
-
-## Usage
-
-`BasicCompactionEngine` requires `ctx.llm`, `ctx.tokenMeter`, and `ctx.sessions`. The composition below receives `ctx.llm` from its host and installs the other two services:
-
-```ts
-import type { Context } from '@deepseek-ai/cordis'
-import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
-import SessionStore from '@deepseek-ai/dsh-session'
-import TokenMeter from '@deepseek-ai/dsh-token-meter'
-
-export const name = 'compaction-basic'
-export const inject = ['llm']
-
-export function apply(ctx: Context): void {
-  ctx.plugin(SessionStore)
-  ctx.plugin(TokenMeter)
-  ctx.plugin(BasicCompactionEngine)
-}
+```yaml
+- name: '@deepseek-ai/dsh-session'
+- name: '@deepseek-ai/dsh-token-meter'
+- name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+- name: '@deepseek-ai/dsh-compaction-basic'
+- name: '@deepseek-ai/dsh-command-compact'
 ```
 
-Loading the plugin registers `ctx.compaction`. Add [`dsh-compaction-tool-result-pruner`](../compaction-tool-result-pruner/README.md) as a sibling before this plugin to enable the optional model-free pass. With `auto: true` (the default) it compacts automatically under token pressure. The sibling [`dsh-command-compact`](../command-compact/README.md) calls `ctx.compaction.compactNow(...)`; programmatic callers may also use any seam operation directly.
-
-For example, the same compact plugin can safely serve models with different capacities and one target-specific policy:
+You can verify success by watching the conversation continue past the point where it would otherwise overflow, and by running `/compact` for an immediate condensation. If the composition lacks an LLM, session storage, or token measurement, the plugin fails to load. One backend can serve models with different context sizes; give each route its own threshold and retention with a per-model override:
 
 ```yaml
 - name: '@deepseek-ai/dsh-compaction-basic'
@@ -86,6 +57,108 @@ For example, the same compact plugin can safely serve models with different capa
         retainTokens: 2048
 ```
 
+### Tuning when condensation starts
+
+All settings are optional. The defaults start condensing at 80% of the routed model's context window and keep the newest 16% verbatim; the table below is the complete policy surface, and the generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-compaction-basic) is the exhaustive source.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `thresholdRatio` | `0.8` | Start condensing at `floor(routedContextWindow × ratio)`. |
+| `retainRatio` | `0.16` | Recent conversation kept verbatim as a fraction of the routed context window; mutually exclusive with `retainTokens`. |
+| `retainTokens` | — | Absolute recent-conversation budget kept verbatim; mutually exclusive with `retainRatio` and must be below the resolved threshold. |
+| `summarizationProvider` | `''` | Set together with `summarizationModel`; an empty pair uses the latest routed request target, then the `AgentOptions` pair. |
+| `summarizationModel` | `''` | Set together with `summarizationProvider`; an empty pair uses the latest routed request target, then the `AgentOptions` pair. |
+| `maxTokens` | `8192` | Output cap for the summarization request; may include reasoning tokens. |
+| `compactionRetries` | `1` | Extra condensation attempts after the first when pressure remains above threshold. |
+| `maxOverflowRetries` | `1` | Maximum retries after semantic overflow or request-size recovery; `0` disables recovery only. |
+| `maxRequestBytes` | — | Optional proactive bound on estimated routed request bytes; it also limits summarizer requests and must hold one minimal replay message plus the fixed instruction. Unset keeps token-only pressure. |
+| `summarizationInputBytes` | `524,288` | Maximum estimated bytes in each complete summarizer request; after policy inheritance, its minimum with `maxRequestBytes` must hold one minimal replay message plus the fixed instruction. Oversized ranges use bounded hierarchical transactions. |
+| `timeoutRecoveryBytes` | `524,288` | Minimum failed-request estimate that makes `TIMEOUT` eligible for request-size recovery. |
+| `learnedByteSafetyRatio` | `0.75` | Fraction of a failed request estimate adopted as the learned proactive budget after HTTP 413 or eligible timeout recovery. |
+| `modelPolicies` | `[]` | Exact `{ provider, model, ...partialPolicy }` overrides for individual model routes. |
+| `auto` | `true` | Enable automatic token/byte pressure and failed-request recovery; set `false` for manual-only operation. |
+
+Misconfiguration fails fast: an unknown setting, a duplicate per-model override, both retention forms together, an effective `min(summarizationInputBytes, maxRequestBytes)` cap that cannot hold one minimal replay message plus the fixed instruction, another invalid byte policy, or a ratio retention that is not below the threshold all reject the plugin at load. The same validation runs after inheritance for top-level and per-model policies. `modelPolicies` inherit unspecified token and byte fields independently from the top-level policy. An absolute `retainTokens` budget — top-level or per-model — that is not below its threshold fails when that model is first used, because the comparison needs the model's context size.
+
+### What happens when condensation runs
+
+The oldest balanced span is replaced by one summary message and the recent tail stays verbatim; the conversation continues from the summary. The operation reports how many history items were condensed and the estimated tokens freed. If nothing can be condensed safely — for example the whole conversation is one indivisible unit — nothing changes and nothing is written to the session log. If no model is available to write the summary (no configured target and no routed request yet), condensation fails with a clear error telling you to configure the summarization provider and model or route one request.
+
+### On-demand condensation with /compact
+
+With `dsh-command-compact` mounted, type `/compact` in a chat UI to condense immediately, even below the pressure threshold. The command reports how many history items were condensed and the estimated tokens saved. While the agent is mid-turn or condensation is already running, `/compact` reports that condensation is unavailable; prompts you send while it runs are accepted and start after it finishes.
+
+### Trimming oversized tool outputs
+
+Mount `dsh-compaction-tool-result-pruner` before this package to trim oversized tool results as part of condensation. Trimming makes no model call and can remove the need to summarize at all: when the trimmed conversation fits within the threshold, condensation skips the summary. Trimming only runs after a condensation trigger qualifies — a below-pressure conversation is never touched.
+
+-----
+
+<a id="understand-the-implementation"></a>
+## Understand the implementation
+
+<details>
+<summary>Implementation internals — click to expand</summary>
+
+This section explains the design decisions behind the backend; the observable behavior is fully covered in [Use this package](#use-this-package).
+
+### Design philosophy
+
+The backend is built on four commitments:
+
+- **One measurement service prices every decision.** The singleton `ctx.tokenMeter` measures the latest canonical logged envelope and current surface at one consumed-log revision. When the routed adapter declares request-image pricing, the meter applies it to image history. Pressure, recent-tail retention, range selection, and shrink validation use the same route-priced node figures; logged replacement shadow prices stay on the route-independent heuristic so pure projection folds remain consistent.
+- **The log-recorded bracket is the transaction.** All entry points share one bracket-first region transaction: validate the range and live lock, append `compaction/start` synchronously, prepare and await the summary, revalidate, append `compaction/summary` plus the replacement, and make exactly one closing attempt. Automatic and explicit-region calls require a numeric open-turn owner and whole-surface stability; `compactNow()` reserves idle admission, uses `turn: null`, accepts append-only context outside its selected span, flushes every closed attempt, and releases admission in `finally`.
+- **Summarization reuses the provider's warm prefix.** Replaying the last routed request's system prompt, tools, and shadowed-region messages byte-for-byte makes the auxiliary call a genuine prefix of the conversation, so only the trailing instruction and the summary output are uncached.
+- **`summarize()` is the sole subclass hook.** A template- or remote-summarizer subclass can override it while pressure, retention, cited source events, shrink validation, and shadowed-token accounting stay on the token meter.
+
+### Automatic triggers and overflow recovery
+
+With `auto: true`, a serial `agent/pre-step` listener checks pressure before request derivation: it prices the latest durable routed request envelope through `ctx.tokenMeter`, and when token pressure or the effective proactive byte budget is crossed it prunes, then summarizes the oldest balanced span while keeping a priced recent tail. The `agent/request-error` listener runs while the failed request's turn and step remain open. It reacts to semantic `CONTEXT_WINDOW_EXCEEDED`, HTTP 413, and `TIMEOUT` whose post-conversion request estimate reaches `timeoutRecoveryBytes`; it bypasses normal pressure and retention, attempts a maximal balanced head reduction, and authorizes a retry only after the surface replacement generation advances. Confirmed 413 and eligible timeout recovery learn a lower exact-route byte budget; cancellation stays authoritative throughout.
+
+Pressure policy resolves capacity from the adapter that owns the durable route. An adapter that returns no capacity for a valid dynamic route makes the manual pressure path throw a target-specific configuration error; the automatic listener warns once for that exact target and continues with full history.
+
+### Summarization mechanics
+
+A direct `ctx.llm.stream()` call uses the configured provider/model pair and cap, falling back to the latest logged request target and then the `AgentOptions` pair, without running the loop-only `agent/request` extension point. The call replays the conversation's own system prompt, tools, and shadowed-region messages verbatim — including image references, which the selected adapter must resolve or explicitly reject — and appends the compaction instruction as the final user message, so it reuses the provider's warm prefix cache instead of invalidating it. The complete replay, tools, prompt, and instruction must fit the active `summarizationInputBytes` cap; oversized balanced ranges are reduced through bounded hierarchical transactions, and an indivisible over-cap unit fails before provider dispatch. The call sets `GenerateOptions.purpose` to `compaction`; only returned text enters the checkpoint, excluding reasoning and tool calls. Image output fails with `UNSUPPORTED_CONTENT` rather than disappearing. The replacement user message frames the summary with `<compacted-summary>` tags; the raw summary remains on the `compaction/summary` event.
+
+### The region transaction
+
+The transaction validates the surface span and the durable lock, appends `compaction/start`, summarizes through the hook, revalidates stability (whole-surface for automatic calls, selected-span for manual calls), rejects a summary that does not strictly shrink the exact post-offload replay in route-priced tokens and estimated bytes, appends `compaction/summary` plus the replacement `user/message`, and makes exactly one `compaction/end` attempt. Logged replacement shadow prices remain route-independent so replay projection is deterministic. A live unmatched start is the durable lock: an unmatched marker before a newer `session/end-seed` is stale evidence from a prior lifecycle and does not block; one after that boundary reports `busy`. A failed close deliberately leaves a blocking orphan. Cancellation remains authoritative after cleanup and durability.
+
+### Config resolution
+
+`resolveConfig` validates and detaches the defaults, `resolveTargetPolicy` merges an exact provider/model override over them, and `resolveCompactSpec` scales the merged policy into concrete token budgets using the adapter-owned context capacity. Model discovery (`listModels()`) is never consulted for policy; only the durable route's capacity matters.
+
+### Source map
+
+| File | Role |
+|---|---|
+| [`src/index.ts`](src/index.ts) | Plugin entry: `BasicCompactionEngine`, automatic listeners, entry-point dispatch |
+| [`src/region.ts`](src/region.ts) | Retention selection and the shared bracket-first compaction transaction |
+| [`src/summarizer.ts`](src/summarizer.ts) | Default `ctx.llm.stream()` summarization, checkpoint framing, safe-summary projection |
+| [`src/config.ts`](src/config.ts) | Load-time validation and routed-model policy resolution |
+| [`src/types.ts`](src/types.ts) | `BasicCompactionConfig` and resolved policy vocabulary |
+| [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; the durable bracket is observable in the session log) |
+
+</details>
+
+-----
+
+<a id="further-exploration"></a>
+## Further Exploration
+
+Read these pages when the package-level contract is not enough; they move from the shared seam to the optional companions and the decision evidence.
+
+- [Compaction seam](../compaction/README.md) — the condensation contract this backend implements.
+- [Compaction subsystem reference](../../../docs/subsystems/compaction.md) — the condensation vocabulary, results, and service behavior.
+- [Tool-result pruner](../compaction-tool-result-pruner/README.md) — the optional companion that trims oversized tool outputs first.
+- [Human /compact command](../command-compact/README.md) — on-demand condensation without waiting for pressure.
+- [Token meter](../../llm/token-meter/README.md) — the measurement service that decides when to condense.
+- [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-compaction-basic) — every accepted config field and its source declaration.
+
+-----
+
+<a id="model-experience"></a>
 ## Model Experience
 
 ### Conversation history
@@ -159,12 +232,31 @@ This is a separate model call: the replayed conversation prefix plus the fixed i
 
 #### KV Cache effect
 
-Without cap-driven image offload, the replayed system prompt, tools, and shadowed-region messages match the conversation's last routed request byte-for-byte, so the provider's warm prefix cache is reused up to the trailing instruction; only that instruction, and the summary output, is uncached. Replacing an oldest image to satisfy the complete-request cap ends reuse at that message. Routing the summarizer to a different provider/model, or compacting a non-head range, likewise forgoes the corresponding reuse.
+The replayed system prompt, tools, and shadowed-region messages match the conversation's last routed request byte-for-byte, so the provider's warm prefix cache is reused up to the trailing instruction; only that instruction, and the summary output, is uncached. Routing the summarizer to a different provider/model, or compacting a non-head range, forgoes this reuse.
 
 ## Known Limitations and Deferred Work
 
-- **Meter accuracy follows the fixed heuristic** — missing reusable provider usage falls back to character count plus structural overhead rather than exact tokenization.
-- **Overflow classification is adapter-maintained** — provider wording can change; both DeepSeek adapters normalize currently recognized context-limit failures to `CONTEXT_WINDOW_EXCEEDED`.
+<a id="known-limitations-and-deferred-work"></a>
+
+
+These limits define when automatic condensation is a poor fit or needs special care; they are the current package constraints.
+
+- **Meter accuracy follows the fixed heuristic** — missing reusable provider usage falls back to character count plus structural overhead rather than exact tokenization; image occurrences carry provider-exact visual tokens only on routes whose adapter declares request-image pricing.
+- **Overflow classification is adapter-maintained** — provider wording can change; both DeepSeek adapters normalize recognized semantic and request-size failures to canonical codes. A large timeout is only a conservative request-size signal above `timeoutRecoveryBytes`.
 - **Some indivisible-unit and envelope-only overflow remains outside surface compaction** — recovery cannot shrink system/tools/prefix, split an indivisible non-tool node, or repair a tool unit whose non-prunable remainder still exceeds the window. The optional pruner can shrink text-bearing tool-result bulk inside an otherwise indivisible pair.
 - **`compactRegion` requires an open turn** — a manual call on a fully-closed session throws ("no open turn") rather than compacting.
 - **Summarization failure preserves the latest durable surface** — before any replacement, the auto path logs a warning and proceeds with full over-budget history. If pruning already landed, a later summarization failure proceeds from that durable pruned surface. Summarization truncation at `maxTokens`, which hidden reasoning tokens can consume, follows the same rule.
+
+<a id="dev-note"></a>
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+This Dev Note is working context for maintainers and is explicitly non-authoritative; shipped behavior lives in the sections above, the package code, and the linked Agent Notes.
+
+- **Default ratios, undecided** — `thresholdRatio: 0.8` and `retainRatio: 0.16` are fixed defaults; per-model tuning via `modelPolicies` exists, but no corpus-backed guidance on ideal values is recorded.
+- **Tokenizer-accurate measurement, deferred** — the token meter's four-characters-per-token heuristic underprices CJK text and JSON schemas; exact tokenization remains an open direction for the measurement service.
+- **Overflow recovery beyond canonical errors, undecided** — recovery triggers on `CONTEXT_WINDOW_EXCEEDED` only; other provider-side context failures are not classified.
+
+</details>

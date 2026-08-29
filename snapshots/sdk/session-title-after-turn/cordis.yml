@@ -1,0 +1,22 @@
+# Session-title snapshot composition: the optional first-prompt provider uses
+# the ordinary DeepSeek route while all other capabilities stay
+# identical to the base example.
+- insert:
+    - id: session-title-provider
+      name: '@deepseek-ai/dsh-session-title-first-prompt-llm'
+      config:
+        targetWords: 5
+        targetCjkCharacters: 10
+        maxInputBytes: 4096
+        maxOutputTokens: 32
+        timeoutMs: 5000
+        provider: deepseek-official
+        model: deepseek-v4-flash
+    - id: turn-notify-wechat
+      name: '@deepseek-ai/dsh-turn-notify-wechat'
+      config:
+        command: !!js "process.cwd() + '/.snapshot-patches/turn-notify-wechat-sender.mjs'"
+        routeFile: !!js "process.cwd() + '/.snapshot-patches/turn-notify-wechat-route.env'"
+        timeoutMs: 5000
+        settleDelayMs: 500
+        maxConcurrentDeliveries: 1

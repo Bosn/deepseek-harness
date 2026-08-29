@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { CallId, createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import {
   Session,
@@ -365,7 +365,7 @@ describe('turn-notify-wechat plugin', () => {
       mounted.titles.set(session, '  修复 DSH 微信通知： ')
       const terminal = emitTurn(mounted, session, 1, [
         { type: 'reasoning', text: 'private reasoning' },
-        { type: 'tool-call', id: CallId(`call-${index}`), name: 'bash', arguments: '{"secret":true}' },
+        { type: 'tool-call', id: ToolCallId(`call-${index}`), name: 'bash', arguments: '{"secret":true}' },
         { type: 'text', text: '# 状态\n- [任务](https://example.test)已完成\n![截图](https://example.test/x.png)' },
       ], reason)
       const invocation = advanceToDelivery()
@@ -645,7 +645,7 @@ describe('turn-notify-wechat plugin', () => {
     await vi.runAllTimersAsync()
   })
 
-  it('replaces a queued notice for the same session and drops queued work on teardown', async () => {
+  it('cancels queued notices as soon as a newer terminal arrives and drops queued work on teardown', async () => {
     const mounted = await mount(DEFAULT_ROUTE, { maxConcurrentDeliveries: 1 })
     const active = createSession()
     mounted.titles.set(active, '占用交付槽')
@@ -654,17 +654,23 @@ describe('turn-notify-wechat plugin', () => {
     const queued = createSession()
     mounted.titles.set(queued, '排队会话')
     emitTurn(mounted, queued, 1, [{ type: 'text', text: '旧摘要' }])
+    const textless = createSession()
+    mounted.titles.set(textless, '无文本排队会话')
+    emitTurn(mounted, textless, 1, [{ type: 'text', text: '也不应发送的旧摘要' }])
     vi.advanceTimersByTime(5000)
     expect(invocations).toHaveLength(1)
 
     emitTurn(mounted, queued, 2, [{ type: 'text', text: '新摘要' }])
-    vi.advanceTimersByTime(5000)
+    emitTurn(mounted, textless, 2, [{ type: 'reasoning', text: 'no visible text' }])
+    succeed(invocations[0] as Invocation)
+    await vi.advanceTimersByTimeAsync(0)
     expect(invocations).toHaveLength(1)
 
-    succeed(invocations[0] as Invocation)
-    await vi.runAllTimersAsync()
+    vi.advanceTimersByTime(5000)
     expect(invocations).toHaveLength(2)
     expect(invocationValue(invocations[1] as Invocation, '--message')).toContain('\n新摘要')
+    expect(invocations.map(invocation => invocationValue(invocation, '--message')).join('\n'))
+      .not.toContain('也不应发送的旧摘要')
 
     const neverStarted = createSession()
     mounted.titles.set(neverStarted, '关闭时排队')
