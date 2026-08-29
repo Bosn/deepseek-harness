@@ -38,7 +38,7 @@ async function bench() {
     revision += 1
     return { ok: true as const, value: namespace() }
   })
-  ctx.provide('connection', { api: {}, isLoopback: true } as never)
+  ctx.provide('connection', { isLoopback: true, canUseHostConfiguration: true } as never)
   const events = new TestRemote(ctx, { settings: { describe, mutate } })
   await ctx.plugin({ inject: [...settingsInject], apply: settingsApply }).await()
   return {

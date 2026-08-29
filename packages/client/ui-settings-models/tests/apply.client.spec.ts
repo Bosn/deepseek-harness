@@ -41,7 +41,7 @@ async function bench(isLoopback = true, settings?: object, services: object = {}
     // ui-settings apply also provides the settingsSchema service.
     settings: settings ?? scriptedSettingsRemote().settings,
   })
-  ctx.provide('connection', { api: services, isLoopback } as never)
+  ctx.provide('connection', { api: services, isLoopback, canUseHostConfiguration: isLoopback } as never)
   await ctx.plugin({ inject: [...settingsInject], apply: settingsApply }).await()
   return { ctx, slots: ctx.get('slots') as SlotRegistry, locale, remote }
 }

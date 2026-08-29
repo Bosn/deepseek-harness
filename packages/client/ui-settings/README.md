@@ -51,7 +51,7 @@ The package realizes one ownership rule: the browser keeps one shared mirror of 
 
 ### The describe mirror
 
-The plugin injects `connection` and `remote` and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Cross-namespace surfaces read it through `ctx.settingsScope.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
+The plugin injects `connection` and `remote` and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). The mirror uses Host mode when `ctx.connection.canUseHostConfiguration` is true and otherwise remains process-local in memory without crossing the settings wire. This capability selects whether Host-backed configuration UI is enabled; it is independent of Connection authentication and does not authorize API requests. Cross-namespace surfaces read the mirror through `ctx.settingsScope.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
 
 ### Scope derivation
 
@@ -94,7 +94,7 @@ None; this package neither assembles nor sends a provider request.
 
 These limits define where the settings transport cannot reach; they are current package constraints.
 
-- **Non-loopback pages get no durable settings** — this Client keeps Host persistence disabled there, so a scope starts `unavailable` and never crosses the wire; every row it backs is inert even though Connection authentication covers the API.
+- **Pages without Host configuration capability get no durable settings** — when `canUseHostConfiguration` is false, this Client keeps every scope process-local and Host-backed rows remain unavailable. Connection authentication is a separate concern and does not imply this UI capability.
 
 <a id="dev-note"></a>
 ### Dev Note

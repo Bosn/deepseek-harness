@@ -9,6 +9,7 @@ import { API_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority } from './api-request-trust.ts'
 import { BrowserAuth } from './browser-auth.ts'
+import { PRIVILEGED_HOSTS_GLOBAL } from './privileged-hosts.ts'
 import { HostConnectionService } from './rpc-host.ts'
 
 export type {
@@ -77,6 +78,14 @@ export interface ConnectionConfig {
    * bind. An entry that is not a bare, canonical authority fails plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Remote page authorities where the shipped client may expose Host-backed
+   * configuration UI, in the same `host[:port]` form as
+   * {@link ConnectionConfig.trustedHosts}. Each entry also joins the outer
+   * Host/Origin trust fence, but never bypasses browser-session authentication.
+   * This is a client capability declaration, not a method-specific API grant.
+   */
+  privilegedHosts?: string[]
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -85,6 +94,7 @@ export interface ConnectionConfig {
 
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
+  privilegedHosts: z.array(String).default([]),
   cookieMaxAgeDays: z.natural().min(1).default(30),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
 })
@@ -92,22 +102,26 @@ export const Config: z<ConnectionConfig> = z.object({
 /**
  * Mounts the API gateway under the browser transport prefix. Every request on
  * the prefix passes the Host/Origin browser-trust fence and persistent browser
- * authentication before dispatch.
+ * authentication before dispatch. `privilegedHosts` contributes to the outer
+ * trust fence and client capability injection only; it never replaces the
+ * browser session or creates a method-specific authorization path.
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
 export async function apply(ctx: Context, config?: ConnectionConfig): Promise<void> {
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
+  const privilegedHosts = config?.privilegedHosts ?? []
+  const fenceHosts = [...trustedHosts, ...privilegedHosts]
   const cookieMaxAgeDays = config?.cookieMaxAgeDays ?? 30
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
-  for (const entry of trustedHosts) assertTrustedAuthority(entry)
+  for (const entry of fenceHosts) assertTrustedAuthority(entry)
   assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const connection = new HostConnectionService(
     ctx,
-    trustedHosts,
+    fenceHosts,
     await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays),
   )
   const fetchHandler = connection.createSharedFetchHandler(API_PATH)
@@ -127,5 +141,11 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
   ctx.inject(['attachments'], (attachmentCtx) => {
     assertImageBodyCapacity(attachmentCtx, maxRequestBodyBytes)
+  })
+  // The browser uses this to decide whether the shipped client exposes Host
+  // configuration surfaces. Every request still passes the uniform Host fence
+  // and BrowserAuth session check above.
+  ctx.on('webserver/index-inject', (table) => {
+    table.push({ kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: privilegedHosts })
   })
 }

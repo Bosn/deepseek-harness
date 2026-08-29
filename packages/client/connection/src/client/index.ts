@@ -13,6 +13,7 @@ import {
 import { createFixtureConnectionRpc } from './fixture.ts'
 import { createWebConnectionRpc, type RpcFetch, type RpcStreamOpen } from './rpc.ts'
 import { isLoopbackHostname } from '../loopback-hostname.ts'
+import { isDeclaredAuthority, PRIVILEGED_HOSTS_GLOBAL } from '../privileged-hosts.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -97,6 +98,11 @@ interface ClientTransportGlobal {
   __DSH_TRANSPORT__?: ClientTransportHooks
 }
 
+/** Page global populated by the Host's structured index injection. */
+interface PrivilegedHostsGlobal {
+  [PRIVILEGED_HOSTS_GLOBAL]?: readonly string[]
+}
+
 /**
  * The ctx.connection service API: the API client plus a one-shot controller
  * starter. API Gateway supplies generation readiness and reset callbacks;
@@ -109,6 +115,12 @@ export interface ConnectionHandle {
    * ({@link ClientTransportHooks.ownsHost}), or the context is not a browser.
    */
   readonly isLoopback: boolean
+  /**
+   * Whether the shipped client may expose Host-backed configuration surfaces.
+   * This is a deployment UI capability; Host requests still require the
+   * uniform trusted-authority and browser-session checks.
+   */
+  readonly canUseHostConfiguration: boolean
   /** Current Remote event generation and the Host facts carried by its opening frame. */
   readonly generation: ConnectionGenerationState
   /** Generic logical RPC channels over the same Connection transport. */
@@ -146,6 +158,14 @@ export function apply(ctx: Context): void {
   const fixtureRpc = fixture ? createFixtureConnectionRpc() : undefined
   const transport = (globalThis as ClientTransportGlobal).__DSH_TRANSPORT__
   const rpc = fixtureRpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
+  const isLoopback = transport?.ownsHost === true
+    || pageLocation === undefined
+    || isLoopbackHostname(pageLocation.hostname)
+  const injectedPrivilegedHosts = (globalThis as PrivilegedHostsGlobal)[PRIVILEGED_HOSTS_GLOBAL]
+  const privilegedHosts = Array.isArray(injectedPrivilegedHosts)
+    ? injectedPrivilegedHosts.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const canUseHostConfiguration = isLoopback || isDeclaredAuthority(pageLocation, privilegedHosts)
   let generationSource: ConnectionGenerationSource | undefined
   let owner: ConnectionOwner | undefined
   let generationId = 0
@@ -169,7 +189,8 @@ export function apply(ctx: Context): void {
     publishGeneration(undefined)
   }
   const handle: ConnectionHandle = {
-    isLoopback: transport?.ownsHost === true || pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
+    isLoopback,
+    canUseHostConfiguration,
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {

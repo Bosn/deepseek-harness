@@ -7,10 +7,11 @@ import { describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
-import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { IndexInjection, WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { API_PATH, RpcId, apply, inject, type ClientRequest, type HostConnectionHandle } from '../src/index.ts'
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
 import { provideBrowserCredentials } from './browser-credentials.ts'
+import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
@@ -81,7 +82,8 @@ function fakeResponse(): {
   return { response, state }
 }
 
-async function mounted(config?: { trustedHosts?: string[] }): Promise<{
+async function mounted(config?: { trustedHosts?: string[]; privilegedHosts?: string[] }): Promise<{
+  ctx: Context
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   connection: HostConnectionHandle
@@ -95,6 +97,7 @@ async function mounted(config?: { trustedHosts?: string[] }): Promise<{
   const fiber = ctx.plugin({ inject: [...inject], apply }, config)
   await fiber.await()
   return {
+    ctx,
     routes,
     upgrades,
     connection: ctx.get('connection') as HostConnectionHandle,
@@ -140,7 +143,9 @@ describe('connection node half', () => {
     provideBrowserCredentials(ctx)
     ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
     const fiber = ctx.plugin({ inject: [...inject], apply }, { trustedHosts: ['harness.internal/path'] })
-    await expect(fiber).rejects.toThrow(/not a bare host\[:port\] authority/)
+    await expect(fiber).rejects.toThrow(
+      'client-connection: configured authority "harness.internal/path" is not a bare host[:port] authority',
+    )
     expect(routes).toHaveLength(0)
     expect(upgrades).toHaveLength(0)
   })
@@ -192,6 +197,51 @@ describe('connection node half', () => {
     await routes[0]!.handler(fakeRequest({ host: 'localhost:3080' }), forged.response)
     expect(forged.state).toMatchObject({ status: 401, body: 'unauthorized' })
     await dispose()
+  })
+
+  it('trusts a declared configuration authority, still requires its browser session, and injects the client fact', async () => {
+    // A privileged declaration joins the ordinary Host fence, so no duplicate
+    // trustedHosts entry is required. It does not bypass BrowserAuth.
+    const { ctx, routes, connection, upgrades, dispose } = await mounted({
+      privilegedHosts: ['harness.example'],
+    })
+    const unauthenticated = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({ host: 'harness.example' }, `${API_PATH}/settings/describe`),
+      unauthenticated.response,
+    )
+    expect(unauthenticated.state).toMatchObject({ status: 401, body: 'unauthorized' })
+
+    const authenticated = fakeResponse()
+    await routes[0]!.handler(fakeRequest({
+      host: 'harness.example',
+      cookie: browserCookie(connection, 'harness.example'),
+    }, `${API_PATH}/settings/describe`), authenticated.response)
+    expect(authenticated.state.status).toBe(404)
+
+    const table: IndexInjection[] = []
+    ctx.emit('webserver/index-inject', table)
+    expect(table).toContainEqual({
+      kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: ['harness.example'],
+    })
+    expect(upgrades).toHaveLength(0)
+    await dispose()
+  })
+
+  it('fails the load on a privilegedHosts entry that is not a bare authority', async () => {
+    const routes: WebRoute[] = []
+    const upgrades: WebUpgradeRoute[] = []
+    const ctx = new Context()
+    provideBrowserCredentials(ctx)
+    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+    const fiber = ctx.plugin({ inject: [...inject], apply }, {
+      privilegedHosts: ['harness.internal/path'],
+    })
+    await expect(fiber).rejects.toThrow(
+      'client-connection: configured authority "harness.internal/path" is not a bare host[:port] authority',
+    )
+    expect(routes).toHaveLength(0)
+    expect(upgrades).toHaveLength(0)
   })
 
   it('passes loopback and declared-authority requests through to the bridge', async () => {

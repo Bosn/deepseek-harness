@@ -44,6 +44,7 @@ async function bench(isLoopback = true) {
   }))
   ctx.provide('connection', {
     isLoopback,
+    canUseHostConfiguration: isLoopback,
   } as never)
   new TestRemote(ctx, {
     settings: { describe: settingsDescribe, openSettingsDocument: settingsOpenDocument },
