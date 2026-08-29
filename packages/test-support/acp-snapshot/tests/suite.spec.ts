@@ -88,8 +88,12 @@ const REPLAY_SCENARIOS: Scenario[] = [
     pinsChildToolSchemas: [1],
     pinsChildSystemPrompts: [1],
     prepareWorkspace: (cwd) => {
-      writeFileSync(join(cwd, 'seed.txt'), 'prepared at runtime')
+      writeFileSync(join(cwd, 'seed.txt'), 'prepared at runtime\n')
     },
+    workspaceOutputSnapshots: [{
+      path: 'seed.txt',
+      snapshot: 'workspace-output.expected.txt',
+    }],
   },
   { name: 'no-model', hasModelTurn: false, recorded: false, headerClass: 'main' },
   { name: 'blocked-log', hasModelTurn: false, comparesLog: true, recorded: false, headerClass: 'main' },
@@ -125,6 +129,7 @@ afterAll(async () => {
 
 function staleRefreshFixtures(dir: string): void {
   writeFileSync(join(dir, 'plain-turn', 'stdout.expected.jsonl'), 'stale stdout\n')
+  writeFileSync(join(dir, 'plain-turn', 'workspace-output.expected.txt'), 'stale workspace output\n')
   writeFileSync(join(dir, 'pin-turn', 'system-prompt.expected.md'), 'STALE PROMPT\n')
   writeFileSync(join(dir, 'pin-turn', 'tool-schemas.expected.json'), '{"initial":[{"name":"stale"}],"changes":[]}\n')
   writeFileSync(join(dir, 'plain-turn', 'tool-schemas.1.expected.json'), '{"initial":[{"name":"stale-child"}],"changes":[]}\n')
@@ -169,6 +174,8 @@ describe('defineAcpSnapshotSuite: refresh write-back', () => {
     expect(stdout).not.toContain('\\"mode\\":\\"refresh\\"')
     // The scenario's own env layer reached the subprocess.
     expect(stdout).toContain('\\"permissionMode\\":\\"never\\"')
+    expect(readFileSync(join(refreshDir, 'plain-turn', 'workspace-output.expected.txt'), 'utf8'))
+      .toBe('prepared at runtime\n')
 
     const blocked = readFileSync(join(refreshDir, 'blocked-log', 'session.jsonl'), 'utf8')
     expect(blocked).toContain('"decision":"block"')
@@ -275,6 +282,80 @@ describe('defineAcpSnapshotSuite: registration contract', () => {
         mode: 'replay',
       })
     }).toThrow(/duplicate scenario name "duplicate"/)
+  })
+
+  it.each([
+    '',
+    '.',
+    '..',
+    '../outside.expected.txt',
+    'nested/output.expected.txt',
+    'nested\\output.expected.txt',
+    'nul\0output.expected.txt',
+  ])('rejects workspace snapshot filenames outside the scenario directory: %j', (snapshot) => {
+    expect(() => {
+      defineAcpSnapshotSuite({
+        agent: AGENT,
+        snapshotsDir: REPLAY_DIR,
+        scenarios: [{
+          name: 'unsafe-workspace-snapshot',
+          hasModelTurn: true,
+          recorded: true,
+          pinsHeader: true,
+          workspaceOutputSnapshots: [{ path: 'artifact.txt', snapshot }],
+        }],
+        mode: 'replay',
+      })
+    }).toThrow(/snapshot must be a direct filename inside the scenario directory/)
+  })
+
+  it.each([
+    'input.json',
+    'replay.override.json',
+    'workspace',
+    'stdout.expected.jsonl',
+    'stdout.expected.windows.jsonl',
+    'session.jsonl',
+    'session.1.jsonl',
+    'system-prompt.expected.md',
+    'system-prompt.1.expected.md',
+    'tool-schemas.expected.json',
+    'tool-schemas.1.expected.json',
+  ])('rejects workspace snapshots that collide with reserved fixture %s', (snapshot) => {
+    expect(() => {
+      defineAcpSnapshotSuite({
+        agent: AGENT,
+        snapshotsDir: REPLAY_DIR,
+        scenarios: [{
+          name: 'reserved-workspace-snapshot',
+          hasModelTurn: true,
+          recorded: true,
+          pinsHeader: true,
+          workspaceOutputSnapshots: [{ path: 'artifact.txt', snapshot }],
+        }],
+        mode: 'replay',
+      })
+    }).toThrow(`snapshot collides with reserved scenario fixture "${snapshot}"`)
+  })
+
+  it('rejects duplicate workspace snapshot filenames', () => {
+    expect(() => {
+      defineAcpSnapshotSuite({
+        agent: AGENT,
+        snapshotsDir: REPLAY_DIR,
+        scenarios: [{
+          name: 'duplicate-workspace-snapshot',
+          hasModelTurn: true,
+          recorded: true,
+          pinsHeader: true,
+          workspaceOutputSnapshots: [
+            { path: 'first.txt', snapshot: 'artifact.expected.txt' },
+            { path: 'second.txt', snapshot: 'artifact.expected.txt' },
+          ],
+        }],
+        mode: 'replay',
+      })
+    }).toThrow(/duplicates snapshot filename "artifact\.expected\.txt"/)
   })
 
   it.each(['systemPromptSource', 'toolSchemasSource'] as const)(

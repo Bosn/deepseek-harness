@@ -3037,6 +3037,44 @@ export type ToolPresentationMode = 'native' | 'code' | 'both'
 
 来源：[`packages/core/tools/src/index.ts:654`](../packages/core/tools/src/index.ts)
 
+<a id="deepseek-aidsh-turn-notify-wechat"></a>
+
+## `@deepseek-ai/dsh-turn-notify-wechat`
+
+需要：`sessions` · `sessionTitle`
+
+```ts config-catalog
+/** Deployment route, presentation bounds, and sender configuration. */
+export interface Config {
+  /** Absolute owner wrapper or OpenClaw CLI path. */
+  command: string
+  /** Owner-only constants file containing the configured account and target. */
+  routeFile: string
+  /** Constants-file key holding the WeChat account id. */
+  accountKey?: string
+  /** Constants-file key holding the private owner target. */
+  targetKey?: string
+  /** Non-empty NUL-free OpenClaw channel name. */
+  channel?: string
+  /** Maximum wall time for one delivery subprocess. */
+  timeoutMs?: number
+  /** Maximum Unicode characters retained from the resolved session title. */
+  titleMaxChars?: number
+  /** Maximum Unicode characters retained from the final assistant message. */
+  summaryMaxChars?: number
+  /** Maximum UTF-8 bytes retained from the assembled channel message. */
+  messageMaxBytes?: number
+  /** Quiet time before title resolution and delivery; a newer turn replaces the pending notice. */
+  settleDelayMs?: number
+  /** Maximum number of notification subprocesses allowed to run at once. */
+  maxConcurrentDeliveries?: number
+  /** Maximum number of pending and queued deliveries retained across sessions. */
+  maxRetainedDeliveries?: number
+}
+```
+
+来源：[`packages/session/turn-notify-wechat/src/index.ts:42`](../packages/session/turn-notify-wechat/src/index.ts)
+
 <a id="deepseek-aidsh-typert-loader"></a>
 
 ## `@deepseek-ai/dsh-typert-loader`
