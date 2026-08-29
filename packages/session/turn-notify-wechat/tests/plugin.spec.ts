@@ -399,6 +399,16 @@ describe('turn-notify-wechat plugin', () => {
     expect(characterLength(bounded ?? '')).toBe(8)
     succeed(invocations[0] as Invocation)
     await vi.runAllTimersAsync()
+
+    invocations = []
+    const processSafe = createSession()
+    mounted.titles.set(processSafe, '\0任务\0')
+    emitTurn(mounted, processSafe, 1, [{ type: 'text', text: '\0完成\0' }])
+    vi.advanceTimersByTime(5000)
+    expect(invocationValue(invocations[0] as Invocation, '--message'))
+      .toBe('DSH任务 [完成]：任务\n完成')
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
   })
 
   it('supports one-character bounds, mixed summary ranking, and future terminal tags', async () => {
@@ -684,8 +694,19 @@ describe('turn-notify-wechat plugin', () => {
   it('contains command exits and timeouts, and suppresses teardown abort warnings', async () => {
     const mounted = await mount()
     const session = createSession()
+    const privateSummary = 'PRIVATE SUMMARY MUST NOT REACH LOGS'
+    execFileMock.mockImplementationOnce(() => {
+      throw new TypeError(`invalid argv: ${privateSummary}`)
+    })
+    mounted.titles.set(session, '启动校验')
+    emitTurn(mounted, session, 1, [{ type: 'text', text: privateSummary }])
+    vi.advanceTimersByTime(5000)
+    await vi.runAllTimersAsync()
+    expect(mounted.warn).toHaveBeenLastCalledWith(expect.stringContaining('(spawn validation)'))
+    expect(mounted.warn).toHaveBeenLastCalledWith(expect.not.stringContaining(privateSummary))
+
     mounted.titles.set(session, '命令失败')
-    emitTurn(mounted, session, 1, [{ type: 'text', text: '完成' }])
+    emitTurn(mounted, session, 2, [{ type: 'text', text: '完成' }])
     const failed = advanceToDelivery()
     failed.callback(Object.assign(new Error('exit'), {
       name: 'ExitError',
@@ -695,7 +716,7 @@ describe('turn-notify-wechat plugin', () => {
     expect(mounted.warn).toHaveBeenLastCalledWith(expect.stringContaining('(ExitError)'))
 
     invocations = []
-    emitTurn(mounted, session, 2, [{ type: 'text', text: '再次完成' }])
+    emitTurn(mounted, session, 3, [{ type: 'text', text: '再次完成' }])
     const timedOut = advanceToDelivery()
     timedOut.callback(Object.assign(new Error('timeout'), { killed: true }), '')
     await vi.runAllTimersAsync()
@@ -703,7 +724,7 @@ describe('turn-notify-wechat plugin', () => {
 
     mounted.warn.mockClear()
     invocations = []
-    emitTurn(mounted, session, 3, [{ type: 'text', text: '关闭中' }])
+    emitTurn(mounted, session, 4, [{ type: 'text', text: '关闭中' }])
     const pending = advanceToDelivery()
     const disposal = mounted.cleanup()
     pending.callback(Object.assign(new Error('aborted'), { name: 'AbortError' }), '')

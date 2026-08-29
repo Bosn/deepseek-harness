@@ -157,12 +157,13 @@ function ellipsize(value: string, limit: number): string {
 }
 
 function normalizeTaskTitle(value: string, limit: number): string {
-  const normalized = value.replace(/\s+/gu, ' ').trim().replace(/[:：]+$/u, '').trim()
+  const normalized = value.replace(/\0/gu, '').replace(/\s+/gu, ' ').trim().replace(/[:：]+$/u, '').trim()
   return ellipsize(normalized, limit)
 }
 
 function summarizeMessage(message: string, limit: number): string {
   const cleaned = message
+    .replace(/\0/gu, '')
     .replace(/!\[([^\]]*)\]\([^)]+\)/gu, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/gu, '$1')
     .replace(/[#>*`]+/gu, '')
@@ -331,26 +332,30 @@ function sendCompletion(
     '--json',
   ]
   return new Promise((resolve, reject) => {
-    execFile(config.command, args, {
-      encoding: 'utf8',
-      env: scrubbedEnvironment(),
-      maxBuffer: MAX_RECEIPT_BYTES,
-      signal,
-      timeout: config.timeoutMs,
-      windowsHide: true,
-    }, (error, stdout) => {
-      if (error !== null) {
-        const reason = error.killed ? 'timeout' : error.name
-        reject(new Error(`turn-notify-wechat: delivery command failed (${reason})`))
-        return
-      }
-      try {
-        parseReceipt(stdout, config.channel)
-        resolve()
-      } catch (receiptError: unknown) {
-        reject(new Error(String(receiptError).replace(/^Error: /u, '')))
-      }
-    })
+    try {
+      execFile(config.command, args, {
+        encoding: 'utf8',
+        env: scrubbedEnvironment(),
+        maxBuffer: MAX_RECEIPT_BYTES,
+        signal,
+        timeout: config.timeoutMs,
+        windowsHide: true,
+      }, (error, stdout) => {
+        if (error !== null) {
+          const reason = error.killed ? 'timeout' : error.name
+          reject(new Error(`turn-notify-wechat: delivery command failed (${reason})`))
+          return
+        }
+        try {
+          parseReceipt(stdout, config.channel)
+          resolve()
+        } catch (receiptError: unknown) {
+          reject(new Error(String(receiptError).replace(/^Error: /u, '')))
+        }
+      })
+    } catch {
+      reject(new Error('turn-notify-wechat: delivery command failed (spawn validation)'))
+    }
   })
 }
 
