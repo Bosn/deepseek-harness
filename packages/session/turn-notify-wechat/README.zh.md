@@ -29,7 +29,7 @@ DSH任务 [完成]：<session title>
 | `routeFile` | 必填 | 插件加载时读取一次的 owner-only constants 文件 |
 | `accountKey` | `WEIXIN_ACCOUNT_ID` | route 文件中保存微信 account id 的 key |
 | `targetKey` | `WEIXIN_BOSN_TARGET` | route 文件中保存私人 owner target 的 key |
-| `channel` | `openclaw-weixin` | 传给 `message send` 的 OpenClaw channel |
+| `channel` | `openclaw-weixin` | 传给 `message send` 的非空且不含 NUL 的 OpenClaw channel |
 | `timeoutMs` | `45000` | 正整数子进程超时 |
 | `titleMaxChars` | `80` | session 标题的正整数 Unicode 字符上限 |
 | `summaryMaxChars` | `100` | assistant 摘要的正整数 Unicode 字符上限 |

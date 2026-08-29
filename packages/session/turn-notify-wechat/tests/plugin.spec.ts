@@ -321,6 +321,9 @@ describe('turn-notify-wechat plugin', () => {
     for (const messageMaxBytes of [255, 256.5, 16_385]) {
       expect(() => ConfigSchema({ ...base, messageMaxBytes })).toThrow()
     }
+    for (const channel of ['', 'openclaw\0weixin']) {
+      expect(() => ConfigSchema({ ...base, channel })).toThrow()
+    }
   })
 
   it('cancels a pending settle timer during disposal', async () => {

@@ -3054,7 +3054,7 @@ export interface Config {
   accountKey?: string
   /** Constants-file key holding the private owner target. */
   targetKey?: string
-  /** OpenClaw channel name. */
+  /** Non-empty NUL-free OpenClaw channel name. */
   channel?: string
   /** Maximum wall time for one delivery subprocess. */
   timeoutMs?: number
@@ -3073,7 +3073,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/session/turn-notify-wechat/src/index.ts:40`](../packages/session/turn-notify-wechat/src/index.ts)
+来源：[`packages/session/turn-notify-wechat/src/index.ts:41`](../packages/session/turn-notify-wechat/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 

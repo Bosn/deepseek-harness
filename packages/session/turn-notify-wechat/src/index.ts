@@ -34,6 +34,7 @@ const DEFAULT_MAX_QUEUED_DELIVERIES = 64
 const MAX_CONFIGURED_MESSAGE_BYTES = 16 * 1024
 const MAX_CONFIGURED_QUEUED_DELIVERIES = 256
 const MAX_RECEIPT_BYTES = 64 * 1024
+const PROCESS_ARGUMENT_PATTERN = /^[^\0]+$/u
 const CHARACTER_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
 /** Deployment route, presentation bounds, and sender configuration. */
@@ -46,7 +47,7 @@ export interface Config {
   accountKey?: string
   /** Constants-file key holding the private owner target. */
   targetKey?: string
-  /** OpenClaw channel name. */
+  /** Non-empty NUL-free OpenClaw channel name. */
   channel?: string
   /** Maximum wall time for one delivery subprocess. */
   timeoutMs?: number
@@ -70,7 +71,7 @@ export const Config: z<Config> = z.object({
   routeFile: z.string().required(),
   accountKey: z.string().default(DEFAULT_ACCOUNT_KEY),
   targetKey: z.string().default(DEFAULT_TARGET_KEY),
-  channel: z.string().default(DEFAULT_CHANNEL),
+  channel: z.string().pattern(PROCESS_ARGUMENT_PATTERN).default(DEFAULT_CHANNEL),
   timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
   titleMaxChars: z.number().step(1).min(1).default(DEFAULT_TITLE_MAX_CHARS),
   summaryMaxChars: z.number().step(1).min(1).default(DEFAULT_SUMMARY_MAX_CHARS),

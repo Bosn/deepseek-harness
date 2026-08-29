@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/session/turn-notify-wechat/README.md
-README.md: e56d8640521567298be6b143a70a3820fdffd1f7
-README.zh.md: 921233d8fa9d80c4089dbb4eb60b297cb0fe8f58
+README.md: 1056b1aed8933eeb4aedcb6f08e062d423f5a35a
+README.zh.md: 70c5469bfa5f0c660d392cdf8537106c4a894f5e

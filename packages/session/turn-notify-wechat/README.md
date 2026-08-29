@@ -29,7 +29,7 @@ The subprocess receives an allowlisted environment rather than the ambient DSH e
 | `routeFile` | required | Owner-only constants file read once at plugin load |
 | `accountKey` | `WEIXIN_ACCOUNT_ID` | Route-file key containing the WeChat account id |
 | `targetKey` | `WEIXIN_BOSN_TARGET` | Route-file key containing the private owner target |
-| `channel` | `openclaw-weixin` | OpenClaw channel passed to `message send` |
+| `channel` | `openclaw-weixin` | Non-empty NUL-free OpenClaw channel passed to `message send` |
 | `timeoutMs` | `45000` | Positive integer subprocess timeout |
 | `titleMaxChars` | `80` | Positive Unicode character bound for the session title |
 | `summaryMaxChars` | `100` | Positive Unicode character bound for the assistant summary |
