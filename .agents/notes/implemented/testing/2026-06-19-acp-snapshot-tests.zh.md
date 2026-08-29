@@ -46,14 +46,15 @@ Status: implemented
 
 回放使用 `cordis.snapshot.yml` overlay，以 `llm-replay` 替换真实适配器，同时保留实际组合。记录使用普通配置和由 harness 提供的持久化根目录。回放模式跳过 `.env` 加载，因此意外存在的 API 密钥不会触发真实调用。参见[单一来源配置 Agent Note](../../archived/testing/2026-07-04-single-source-acp-replay-config.md)。
 
-### 两个表面：归一化后比对
+### 两个必需表面与可选 workspace 产物：归一化后比对
 
-快照运行断言**两个**归一化后的表面，因为 harness 的外部表面是不同的：
+快照运行会断言两个归一化后的必需表面，因为 harness 的外部 API 不同；还可以断言两个 API 都不承载的生成 workspace 产物：
 
 1. **stdout transcript**——自动化客户端收到的、分帧后的 ACP JSON-RPC 响应与已提交的消息更新。它捕获传输约定的回归，与已提交的 `stdout.expected.jsonl` 比较。
 2. **重新持久化的会话 JSONL**，经过规范化后与 `session.jsonl` 比较。同一 fixture 同时作为回放来源和预期日志。提示词与工具的主体内容会被清理；每种请求头类别由一个场景固定余下的请求头序列。该 pin 默认拥有可读的提示词与工具 schema 伴随文件；当完整的对应序列相同时，也可将另一个 pin 指定为其中任一来源，因此每个不同的伴随文件版本只提交一次。fixture 守卫会拒绝重复的伴随文件内容，录制/刷新会拒绝生成不同字节的共享引用方。最初的请求头固定理由保留在[请求头固定 Agent Note](../../archived/testing/2026-07-06-pin-request-header-content-in-one-scenario.md)中。Override 场景仅从其伴随文件派生模型行为。
+3. 可选的 **workspace 输出快照**会在优雅关闭后捕获生成 workspace 中文本产物的完整内容。每个产物路径都相对于 cwd，其预期输出是场景目录中唯一的直接文件名。在 record 或 refresh 能够写入之前，注册过程会拒绝路径穿越、重复名称和套件自有 fixture 名称；refresh 会写回捕获文本的完整内容。
 
-两个表面互补：stdout 覆盖精简的自动化协议格式，JSONL 覆盖协议格式有意省略的循环、工具和边界结构。
+两个必需表面互补：stdout 覆盖精简的自动化协议格式，JSONL 覆盖协议格式有意省略的循环、工具和边界结构。workspace 输出快照会固定两个必需表面都不承载的生成产物。
 
 规范化会替换会话、cwd、协议 id、时间戳、路径和进程易变值；fixture 投影会省略正文序号／时间 envelope，而不修改 payload 引用。录制与刷新还会在回放 fixture 中将生成的 workspace 及其文件系统解析出的别名存储为 `{{cwd}}`，使平台临时根目录和随机 basename 不影响录制结果；手工编写的临时路径与显式 `workspaceParent` 下的 cwd 值仍保留字面值。场景把真实 bash 使用限制在稳定命令上。stdout 预期输出仍是符合协议格式的 JSONL，每个原始行都必须可解析为 JSON。普通 Vitest 快照更新只写入 stdout 预期输出；回放 fixture 的写入由显式 `record` 和 `refresh` 模式负责。
 

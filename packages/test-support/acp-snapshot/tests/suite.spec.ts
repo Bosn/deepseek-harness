@@ -284,6 +284,80 @@ describe('defineAcpSnapshotSuite: registration contract', () => {
     }).toThrow(/duplicate scenario name "duplicate"/)
   })
 
+  it.each([
+    '',
+    '.',
+    '..',
+    '../outside.expected.txt',
+    'nested/output.expected.txt',
+    'nested\\output.expected.txt',
+    'nul\0output.expected.txt',
+  ])('rejects workspace snapshot filenames outside the scenario directory: %j', (snapshot) => {
+    expect(() => {
+      defineAcpSnapshotSuite({
+        agent: AGENT,
+        snapshotsDir: REPLAY_DIR,
+        scenarios: [{
+          name: 'unsafe-workspace-snapshot',
+          hasModelTurn: true,
+          recorded: true,
+          pinsHeader: true,
+          workspaceOutputSnapshots: [{ path: 'artifact.txt', snapshot }],
+        }],
+        mode: 'replay',
+      })
+    }).toThrow(/snapshot must be a direct filename inside the scenario directory/)
+  })
+
+  it.each([
+    'input.json',
+    'replay.override.json',
+    'workspace',
+    'stdout.expected.jsonl',
+    'stdout.expected.windows.jsonl',
+    'session.jsonl',
+    'session.1.jsonl',
+    'system-prompt.expected.md',
+    'system-prompt.1.expected.md',
+    'tool-schemas.expected.json',
+    'tool-schemas.1.expected.json',
+  ])('rejects workspace snapshots that collide with reserved fixture %s', (snapshot) => {
+    expect(() => {
+      defineAcpSnapshotSuite({
+        agent: AGENT,
+        snapshotsDir: REPLAY_DIR,
+        scenarios: [{
+          name: 'reserved-workspace-snapshot',
+          hasModelTurn: true,
+          recorded: true,
+          pinsHeader: true,
+          workspaceOutputSnapshots: [{ path: 'artifact.txt', snapshot }],
+        }],
+        mode: 'replay',
+      })
+    }).toThrow(`snapshot collides with reserved scenario fixture "${snapshot}"`)
+  })
+
+  it('rejects duplicate workspace snapshot filenames', () => {
+    expect(() => {
+      defineAcpSnapshotSuite({
+        agent: AGENT,
+        snapshotsDir: REPLAY_DIR,
+        scenarios: [{
+          name: 'duplicate-workspace-snapshot',
+          hasModelTurn: true,
+          recorded: true,
+          pinsHeader: true,
+          workspaceOutputSnapshots: [
+            { path: 'first.txt', snapshot: 'artifact.expected.txt' },
+            { path: 'second.txt', snapshot: 'artifact.expected.txt' },
+          ],
+        }],
+        mode: 'replay',
+      })
+    }).toThrow(/duplicates snapshot filename "artifact\.expected\.txt"/)
+  })
+
   it.each(['systemPromptSource', 'toolSchemasSource'] as const)(
     'rejects %s away from a header pin',
     (field) => {

@@ -55,6 +55,16 @@ function childSystemPromptSnapshot(index: number): string {
 /** The optional full Windows-native stdout transcript. */
 const WINDOWS_STDOUT_SNAPSHOT = 'stdout.expected.windows.jsonl'
 
+/** Direct filenames accepted for scenario-owned workspace snapshots. */
+const SAFE_WORKSPACE_SNAPSHOT_FILENAME = /^(?!\.{1,2}$)[^/\\\0]+$/u
+
+/** Suite-owned fixture names and name families unavailable to workspace snapshots. */
+const RESERVED_SCENARIO_FIXTURES = [
+  /^(?:input\.json|replay\.override\.json|workspace)$/u,
+  /^(?:stdout\.expected(?:\.[^.]+)?\.jsonl|session(?:\..*)?\.jsonl)$/u,
+  /^(?:system-prompt(?:\..*)?\.expected\.md|tool-schemas(?:\..*)?\.expected\.json)$/u,
+] as const
+
 /** Stable session-log token standing in for the sidecar's initial schemas. */
 const TOOLS_TOKEN = '{{tools}}'
 
@@ -169,7 +179,7 @@ export interface Scenario {
   workspaceOutputSnapshots?: readonly {
     /** Cwd-relative artifact path captured after graceful application shutdown. */
     path: string
-    /** Expected-output filename stored in this scenario's snapshot directory. */
+    /** Unique direct filename stored in this scenario's directory; suite-owned fixture names are reserved. */
     snapshot: string
   }[]
   /**
@@ -1113,6 +1123,19 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
       throw new Error(`acp-snapshot: duplicate scenario name "${scenario.name}"`)
     }
     scenariosByName.set(scenario.name, scenario)
+    const workspaceSnapshotNames = new Set<string>()
+    for (const output of scenario.workspaceOutputSnapshots ?? []) {
+      if (!SAFE_WORKSPACE_SNAPSHOT_FILENAME.test(output.snapshot)) {
+        throw new Error(`acp-snapshot: ${scenario.name}.workspaceOutputSnapshots snapshot must be a direct filename inside the scenario directory: "${output.snapshot}"`)
+      }
+      if (RESERVED_SCENARIO_FIXTURES.some(pattern => pattern.test(output.snapshot))) {
+        throw new Error(`acp-snapshot: ${scenario.name}.workspaceOutputSnapshots snapshot collides with reserved scenario fixture "${output.snapshot}"`)
+      }
+      if (workspaceSnapshotNames.has(output.snapshot)) {
+        throw new Error(`acp-snapshot: ${scenario.name}.workspaceOutputSnapshots duplicates snapshot filename "${output.snapshot}"`)
+      }
+      workspaceSnapshotNames.add(output.snapshot)
+    }
     for (const field of ['systemPromptSource', 'toolSchemasSource'] as const) {
       if (scenario[field] !== undefined && scenario.pinsHeader !== true) {
         throw new Error(`acp-snapshot: ${scenario.name}.${field} is only valid on a header-pinning scenario`)
