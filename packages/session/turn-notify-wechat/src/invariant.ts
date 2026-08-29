@@ -1,15 +1,15 @@
 /**
- * Package-owned invariant companion for `@deepseek-ai/dsh-job-notify-wechat`.
- * @module @deepseek-ai/dsh-job-notify-wechat/invariant
+ * Package-owned invariant companion for `@deepseek-ai/dsh-turn-notify-wechat`.
+ * @module @deepseek-ai/dsh-turn-notify-wechat/invariant
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = '@deepseek-ai/dsh-job-notify-wechat'
+const PACKAGE_NAME = '@deepseek-ai/dsh-turn-notify-wechat'
 
 /** Cordis companion plugin name. */
-export const name = 'job-notify-wechat-invariant'
+export const name = 'turn-notify-wechat-invariant'
 
 /** Service required before the companion can reserve package ownership. */
 export const inject = ['invariants']

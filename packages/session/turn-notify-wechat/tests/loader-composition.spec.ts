@@ -2,13 +2,14 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
-import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import * as JobNotifyWechat from '../src/index.ts'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import SessionTitleService from '@deepseek-ai/dsh-session-title'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as TurnNotifyWechat from '../src/index.ts'
 
 let root: string | undefined
 let context: Context | undefined
@@ -21,7 +22,7 @@ afterEach(async () => {
 })
 
 async function bootComposition(commandBody: string): Promise<{ ctx: Context; callsPath: string }> {
-  root = await mkdtemp(join(tmpdir(), 'dsh-job-notify-wechat-'))
+  root = await mkdtemp(join(tmpdir(), 'dsh-turn-notify-wechat-'))
   const commandPath = join(root, 'fake-ocw.mjs')
   const callsPath = join(root, 'calls.jsonl')
   const routePath = join(root, 'constants.env')
@@ -38,12 +39,18 @@ ${commandBody}
     '',
   ].join('\n'))
   await writeFile(configPath, [
-    "- name: '@deepseek-ai/dsh-jobs-local'",
-    "- name: '@deepseek-ai/dsh-job-notify-wechat'",
+    "- name: '@deepseek-ai/dsh-session'",
+    "- name: '@deepseek-ai/dsh-session-title'",
+    '  config:',
+    '    fallbackMaxWords: 8',
+    '    fallbackMaxBytes: 80',
+    '    maxTitleBytes: 120',
+    "- name: '@deepseek-ai/dsh-turn-notify-wechat'",
     '  config:',
     `    command: ${JSON.stringify(commandPath)}`,
     `    routeFile: ${JSON.stringify(routePath)}`,
     '    timeoutMs: 2000',
+    '    settleDelayMs: 10',
     '',
   ].join('\n'))
 
@@ -52,8 +59,9 @@ ${commandBody}
   await context.plugin(Loader)
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
-    ['@deepseek-ai/dsh-jobs-local', LocalJobRegistry],
-    ['@deepseek-ai/dsh-job-notify-wechat', JobNotifyWechat],
+    ['@deepseek-ai/dsh-session', SessionStore],
+    ['@deepseek-ai/dsh-session-title', SessionTitleService],
+    ['@deepseek-ai/dsh-turn-notify-wechat', TurnNotifyWechat],
   ])
   context.loader.internal = {
     version: 'v2',
@@ -71,30 +79,42 @@ ${commandBody}
     .filter(entry => entry.fiber === undefined && !entry.disabled)
     .map(entry => entry.options.name)
   expect(unloaded).toEqual([])
-  context.jobs.attachController('test-controller')
   return { ctx: context, callsPath }
 }
 
-function startJob(ctx: Context, label: string): (outcome: JobOutcome) => void {
-  let settle!: (outcome: JobOutcome) => void
-  ctx.jobs.start({
-    kind: 'bash',
-    label,
-    run: () => ({
-      cancel() {},
-      done: new Promise((resolve) => { settle = resolve }),
-    }),
+async function appendCompletedTurn(ctx: Context, id: string, assistantText: string): Promise<Session> {
+  const session = ctx.sessions.create(SessionId(id))
+  session.append('turn/start', { turn: 1 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: '修复 DSH 微信完成通知' }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  await vi.waitFor(() => {
+    expect(ctx.sessionTitle.get(session)?.title).toBe('修复 DSH 微信完成通知')
   })
-  return settle
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: createAssistantMessage({
+      content: [
+        { type: 'reasoning', text: 'private chain of thought' },
+        { type: 'text', text: assistantText },
+      ],
+      source: { provider: 'test', model: 'test' },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  return session
 }
 
-describe('job-notify-wechat through a real Loader composition', () => {
-  it('sends one content-bounded private notice with a stable idempotency key', async () => {
+describe('turn-notify-wechat through a real Loader composition', () => {
+  it('sends the folded task title and final assistant summary from a logged top-level turn', async () => {
     const { ctx, callsPath } = await bootComposition(
       'console.log(JSON.stringify({ action: \'send\', channel: \'openclaw-weixin\', dryRun: false, handledBy: \'plugin\', messageId: \'wechat-1\' }))',
     )
-    const settle = startJob(ctx, 'SECRET_TOKEN=must-not-cross-the-channel')
-    settle({ status: 'completed' })
+    await appendCompletedTurn(ctx, 'loader-turn-notice', '# 已完成\n- 微信只发送标题与摘要')
 
     await vi.waitFor(async () => {
       expect((await readFile(callsPath, 'utf8')).trim()).not.toBe('')
@@ -111,7 +131,7 @@ describe('job-notify-wechat through a real Loader composition', () => {
       message: valueAfter('--message'),
       idempotencyKey: valueAfter('--idempotency-key')?.replace(/[0-9a-f]{64}$/u, '<sha256>'),
       json: args.at(-1),
-      containsLabel: args.join('\n').includes('SECRET_TOKEN'),
+      containsReasoning: args.join('\n').includes('private chain of thought'),
     }).toMatchInlineSnapshot(`
       {
         "account": "owner-account",
@@ -120,26 +140,27 @@ describe('job-notify-wechat through a real Loader composition', () => {
           "message",
           "send",
         ],
-        "containsLabel": false,
-        "idempotencyKey": "dsh-job-wechat/v1/<sha256>",
+        "containsReasoning": false,
+        "idempotencyKey": "dsh-turn-wechat/v1/<sha256>",
         "json": "--json",
-        "message": "DSH任务 [完成]：bash-1（bash）",
+        "message": "DSH任务 [完成]：修复 DSH 微信完成通知
+      已完成；微信只发送标题与摘要",
         "target": "owner-target@im.wechat",
       }
     `)
   })
 
-  it('keeps a failed channel subprocess outside job settlement', async () => {
+  it('keeps a failed channel subprocess outside the committed turn result', async () => {
     const { ctx, callsPath } = await bootComposition('process.exitCode = 7')
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => undefined)
-    const settle = startJob(ctx, 'private command')
-    settle({ status: 'failed', detail: 'exit code: 1' })
+    const session = await appendCompletedTurn(ctx, 'loader-failed-notice', '任务完成')
 
     await vi.waitFor(async () => {
       expect((await readFile(callsPath, 'utf8')).trim()).not.toBe('')
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('notification failed for bash-1'))
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('notification failed for session loader-failed-notice turn 1'))
     })
-    expect(ctx.jobs.get('bash-1' as never).status).toBe('failed')
-    expect(warn.mock.calls.flat().join('\n')).not.toContain('private command')
+    expect(session.events.findLast(event => event.type === 'turn/end'))
+      .toMatchObject({ data: { reason: { kind: 'completed' } } })
+    expect(warn.mock.calls.flat().join('\n')).not.toContain('任务完成')
   })
 })

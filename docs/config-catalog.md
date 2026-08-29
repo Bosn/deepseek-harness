@@ -925,32 +925,6 @@ export interface Config {
 
 Source: [`packages/runtime-diagnostics/invariants/src/index.ts:15`](../packages/runtime-diagnostics/invariants/src/index.ts)
 
-<a id="deepseek-aidsh-job-notify-wechat"></a>
-
-## `@deepseek-ai/dsh-job-notify-wechat`
-
-Requires: `jobs`
-
-```ts config-catalog
-/** Deployment route and bounded sender configuration. */
-export interface Config {
-  /** Absolute owner wrapper or OpenClaw CLI path. */
-  command: string
-  /** Owner-only constants file containing the configured account and target. */
-  routeFile: string
-  /** Constants-file key holding the WeChat account id. */
-  accountKey?: string
-  /** Constants-file key holding the private owner target. */
-  targetKey?: string
-  /** OpenClaw channel name. */
-  channel?: string
-  /** Maximum wall time for one delivery subprocess. */
-  timeoutMs?: number
-}
-```
-
-Source: [`packages/jobs/job-notify-wechat/src/index.ts:28`](../packages/jobs/job-notify-wechat/src/index.ts)
-
 <a id="deepseek-aidsh-jobs-local"></a>
 
 ## `@deepseek-ai/dsh-jobs-local`
@@ -3060,6 +3034,38 @@ export type ToolPresentationMode = 'native' | 'code' | 'both'
 ```
 
 Source: [`packages/core/tools/src/index.ts:654`](../packages/core/tools/src/index.ts)
+
+<a id="deepseek-aidsh-turn-notify-wechat"></a>
+
+## `@deepseek-ai/dsh-turn-notify-wechat`
+
+Requires: `sessions` · `sessionTitle`
+
+```ts config-catalog
+/** Deployment route, presentation bounds, and sender configuration. */
+export interface Config {
+  /** Absolute owner wrapper or OpenClaw CLI path. */
+  command: string
+  /** Owner-only constants file containing the configured account and target. */
+  routeFile: string
+  /** Constants-file key holding the WeChat account id. */
+  accountKey?: string
+  /** Constants-file key holding the private owner target. */
+  targetKey?: string
+  /** OpenClaw channel name. */
+  channel?: string
+  /** Maximum wall time for one delivery subprocess. */
+  timeoutMs?: number
+  /** Maximum Unicode characters retained from the resolved session title. */
+  titleMaxChars?: number
+  /** Maximum Unicode characters retained from the final assistant message. */
+  summaryMaxChars?: number
+  /** Quiet time before title resolution and delivery; a newer turn replaces the pending notice. */
+  settleDelayMs?: number
+}
+```
+
+Source: [`packages/session/turn-notify-wechat/src/index.ts:34`](../packages/session/turn-notify-wechat/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 

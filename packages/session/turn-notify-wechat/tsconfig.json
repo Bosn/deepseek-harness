@@ -18,7 +18,10 @@
       "path": "../../../vendor/schemastery"
     },
     {
-      "path": "../jobs"
+      "path": "../../core/session"
+    },
+    {
+      "path": "../session-title"
     },
     {
       "path": "../../runtime-diagnostics/invariants"
