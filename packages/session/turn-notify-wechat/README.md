@@ -19,7 +19,7 @@ The label follows the durable terminal reason: `completed` → `完成`, `aborte
 
 The plugin derives a stable SHA-256 idempotency key from the session id and the exact `turn/end` turn, sequence, timestamp, and reason, then invokes the configured OpenClaw wrapper without a shell. It accepts only a non-dry-run JSON receipt with the configured channel, a message id, and either the OpenClaw CLI `action=send` contract or an explicit sent/delivered or `ok` result.
 
-The subprocess receives an allowlisted environment rather than the ambient DSH environment. Delivery errors become payload-free warnings and never change the durable turn result. Plugin disposal detaches the observer, cancels pending timers, aborts in-flight sends, and waits for them to settle.
+The subprocess receives an allowlisted environment rather than the ambient DSH environment. A validated concurrency limit bounds live delivery subprocesses; later deliveries wait in memory, and a newer queued turn from the same session replaces that session's older queued notice. Delivery errors become payload-free warnings and never change the durable turn result. Plugin disposal detaches the observer, cancels pending timers, drops queued deliveries, aborts in-flight sends, and waits for them to settle.
 
 ## Config
 
@@ -34,8 +34,9 @@ The subprocess receives an allowlisted environment rather than the ambient DSH e
 | `titleMaxChars` | `80` | Positive Unicode character bound for the session title |
 | `summaryMaxChars` | `100` | Positive Unicode character bound for the assistant summary |
 | `settleDelayMs` | `5000` | Non-negative delay before title resolution and delivery |
+| `maxConcurrentDeliveries` | `2` | Positive integer cap on simultaneous delivery subprocesses |
 
-Missing route keys or an unreadable route file fail plugin load. The live account and target belong in the deployment-owned route file, not repository config.
+A non-absolute `command`, missing route keys, or an unreadable route file fail plugin load. The live account and target belong in the deployment-owned route file, not repository config.
 
 ## Model Experience
 

@@ -510,6 +510,34 @@ describe('runScenario', () => {
     expect(result.rawStdout).toContain('workspace:committed.txt,runtime.txt')
   })
 
+  it('captures declared workspace text outputs before cleanup and rejects escaping paths', { timeout: 20_000 }, async () => {
+    const { fixtureFile } = await scenario({})
+    const result = await runScenario(
+      { steps: boot },
+      {
+        agent: AGENT,
+        mode: 'replay',
+        fixtureFile,
+        prepareWorkspace: async (cwd) => {
+          await writeFile(join(cwd, 'notice.txt'), 'DSH snapshot notice\n')
+        },
+        captureWorkspaceFiles: ['notice.txt'],
+      },
+    )
+    expect(result.workspaceFiles).toEqual({ 'notice.txt': 'DSH snapshot notice\n' })
+
+    const escaped = await scenario({})
+    await expect(runScenario(
+      { steps: boot },
+      {
+        agent: AGENT,
+        mode: 'replay',
+        fixtureFile: escaped.fixtureFile,
+        captureWorkspaceFiles: ['../outside.txt'],
+      },
+    )).rejects.toThrow('workspace capture path must name a cwd-relative file')
+  })
+
   it('creates the generated workspace under an explicit parent', { timeout: 20_000 }, async () => {
     const { fixtureFile } = await scenario({})
     const workspaceParent = await mkdtemp(join(tmpdir(), 'acp-snap-parent-'))

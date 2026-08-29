@@ -598,6 +598,9 @@ importers:
       '@deepseek-ai/dsh-session-title-first-prompt-llm':
         specifier: workspace:*
         version: link:../packages/session/session-title-first-prompt-llm
+      '@deepseek-ai/dsh-turn-notify-wechat':
+        specifier: workspace:*
+        version: link:../packages/session/turn-notify-wechat
       '@deepseek-ai/dsh-settings-file':
         specifier: workspace:*
         version: link:../packages/settings/settings-file

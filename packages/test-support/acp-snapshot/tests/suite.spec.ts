@@ -88,8 +88,12 @@ const REPLAY_SCENARIOS: Scenario[] = [
     pinsChildToolSchemas: [1],
     pinsChildSystemPrompts: [1],
     prepareWorkspace: (cwd) => {
-      writeFileSync(join(cwd, 'seed.txt'), 'prepared at runtime')
+      writeFileSync(join(cwd, 'seed.txt'), 'prepared at runtime\n')
     },
+    workspaceOutputSnapshots: [{
+      path: 'seed.txt',
+      snapshot: 'workspace-output.expected.txt',
+    }],
   },
   { name: 'no-model', hasModelTurn: false, recorded: false, headerClass: 'main' },
   { name: 'blocked-log', hasModelTurn: false, comparesLog: true, recorded: false, headerClass: 'main' },
@@ -125,6 +129,7 @@ afterAll(async () => {
 
 function staleRefreshFixtures(dir: string): void {
   writeFileSync(join(dir, 'plain-turn', 'stdout.expected.jsonl'), 'stale stdout\n')
+  writeFileSync(join(dir, 'plain-turn', 'workspace-output.expected.txt'), 'stale workspace output\n')
   writeFileSync(join(dir, 'pin-turn', 'system-prompt.expected.md'), 'STALE PROMPT\n')
   writeFileSync(join(dir, 'pin-turn', 'tool-schemas.expected.json'), '{"initial":[{"name":"stale"}],"changes":[]}\n')
   writeFileSync(join(dir, 'plain-turn', 'tool-schemas.1.expected.json'), '{"initial":[{"name":"stale-child"}],"changes":[]}\n')
@@ -169,6 +174,8 @@ describe('defineAcpSnapshotSuite: refresh write-back', () => {
     expect(stdout).not.toContain('\\"mode\\":\\"refresh\\"')
     // The scenario's own env layer reached the subprocess.
     expect(stdout).toContain('\\"permissionMode\\":\\"never\\"')
+    expect(readFileSync(join(refreshDir, 'plain-turn', 'workspace-output.expected.txt'), 'utf8'))
+      .toBe('prepared at runtime\n')
 
     const blocked = readFileSync(join(refreshDir, 'blocked-log', 'session.jsonl'), 'utf8')
     expect(blocked).toContain('"decision":"block"')

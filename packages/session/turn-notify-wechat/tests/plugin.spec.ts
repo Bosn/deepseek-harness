@@ -18,7 +18,7 @@ const characterSegmenter = new Intl.Segmenter(undefined, { granularity: 'graphem
 
 vi.mock('node:child_process', () => ({ execFile: execFileMock }))
 
-import { apply } from '../src/index.ts'
+import { apply, type Config } from '../src/index.ts'
 import * as Invariant from '../src/invariant.ts'
 
 type SessionEventListener = (session: Session, event: SessionEvent) => void
@@ -142,7 +142,7 @@ function contextHarness(): {
   }
 }
 
-function applyAt(ctx: Context, routeFile: string, overrides: Record<string, number> = {}): void {
+function applyAt(ctx: Context, routeFile: string, overrides: Partial<Config> = {}): void {
   apply(ctx, {
     command: '/owner/bin/ocw',
     routeFile,
@@ -153,13 +153,14 @@ function applyAt(ctx: Context, routeFile: string, overrides: Record<string, numb
     titleMaxChars: 80,
     summaryMaxChars: 100,
     settleDelayMs: 5000,
+    maxConcurrentDeliveries: 2,
     ...overrides,
   })
 }
 
 async function mount(
   route = DEFAULT_ROUTE,
-  overrides: Record<string, number> = {},
+  overrides: Partial<Config> = {},
 ): Promise<MountedPlugin> {
   routeSequence += 1
   const routeFile = join(root, `route-${routeSequence}.env`)
@@ -288,6 +289,12 @@ describe('turn-notify-wechat plugin', () => {
   })
 
   it('fails load for an unavailable, missing, empty, or control-character route', async () => {
+    const validRouteFile = join(root, 'valid-route.env')
+    await writeFile(validRouteFile, DEFAULT_ROUTE)
+    const relativeCommand = contextHarness()
+    expect(() => { applyAt(relativeCommand.ctx, validRouteFile, { command: 'ocw' }) })
+      .toThrow('command must be an absolute path')
+
     const unavailable = contextHarness()
     expect(() => { applyAt(unavailable.ctx, join(root, 'missing.env')) })
       .toThrow('route file is unavailable')
@@ -466,6 +473,71 @@ describe('turn-notify-wechat plugin', () => {
     emitTurn(mounted, session, 4, [{ type: 'reasoning', text: 'no visible text' }])
     vi.advanceTimersByTime(5000)
     expect(invocations).toHaveLength(0)
+  })
+
+  it('bounds delivery subprocess concurrency and drains queued notices as slots settle', async () => {
+    const mounted = await mount(DEFAULT_ROUTE, { maxConcurrentDeliveries: 2 })
+    for (let index = 1; index <= 4; index += 1) {
+      const session = createSession()
+      mounted.titles.set(session, `并发任务 ${index}`)
+      emitTurn(mounted, session, 1, [{ type: 'text', text: `完成 ${index}` }])
+    }
+
+    vi.advanceTimersByTime(5000)
+    expect(invocations).toHaveLength(2)
+    expect(invocations.filter(invocation => !invocation.settled)).toHaveLength(2)
+
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(3)
+    expect(invocations.filter(invocation => !invocation.settled)).toHaveLength(2)
+
+    succeed(invocations[1] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(4)
+    expect(invocations.filter(invocation => !invocation.settled)).toHaveLength(2)
+
+    succeed(invocations[2] as Invocation)
+    succeed(invocations[3] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(mounted.warn).not.toHaveBeenCalled()
+  })
+
+  it('replaces a queued notice for the same session and drops queued work on teardown', async () => {
+    const mounted = await mount(DEFAULT_ROUTE, { maxConcurrentDeliveries: 1 })
+    const active = createSession()
+    mounted.titles.set(active, '占用交付槽')
+    emitTurn(mounted, active, 1, [{ type: 'text', text: '占用中' }])
+
+    const queued = createSession()
+    mounted.titles.set(queued, '排队会话')
+    emitTurn(mounted, queued, 1, [{ type: 'text', text: '旧摘要' }])
+    vi.advanceTimersByTime(5000)
+    expect(invocations).toHaveLength(1)
+
+    emitTurn(mounted, queued, 2, [{ type: 'text', text: '新摘要' }])
+    vi.advanceTimersByTime(5000)
+    expect(invocations).toHaveLength(1)
+
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(2)
+    expect(invocationValue(invocations[1] as Invocation, '--message')).toContain('\n新摘要')
+
+    const neverStarted = createSession()
+    mounted.titles.set(neverStarted, '关闭时排队')
+    emitTurn(mounted, neverStarted, 1, [{ type: 'text', text: '不应启动' }])
+    vi.advanceTimersByTime(5000)
+    expect(invocations).toHaveLength(2)
+
+    const disposal = mounted.cleanup()
+    ;(invocations[1] as Invocation).callback(
+      Object.assign(new Error('aborted'), { name: 'AbortError' }),
+      '',
+    )
+    await disposal
+    expect(invocations).toHaveLength(2)
+    expect(mounted.warn).not.toHaveBeenCalled()
   })
 
   it('suppresses subagent, textless, and titleless turn notices', async () => {

@@ -19,7 +19,7 @@ DSH任务 [完成]：<session title>
 
 插件根据 session id 及精确 `turn/end` 的 turn、sequence、timestamp 和 reason 生成稳定的 SHA-256 幂等键，然后在不经过 shell 的情况下调用配置的 OpenClaw wrapper。它只接受非 dry-run 的 JSON 回执；回执必须包含配置的 channel、message id，以及 OpenClaw CLI 的 `action=send` 约定或明确的 sent/delivered/`ok` 结果。
 
-子进程获得的是 allowlist 环境，而不是 DSH 的完整环境。交付错误只生成不含 payload 的 warning，绝不会改变 durable turn result。插件 dispose 时会先移除 observer、取消待发送 timer，再中止正在发送的命令并等待它们结束。
+子进程获得的是 allowlist 环境，而不是 DSH 的完整环境。经过校验的并发上限会限制同时存活的交付子进程；后续交付在内存中排队，同一 session 的较新排队 turn 会替换该 session 的旧排队通知。交付错误只生成不含 payload 的 warning，绝不会改变 durable turn result。插件 dispose 时会先移除 observer、取消待发送 timer、丢弃排队交付，再中止正在发送的命令并等待它们结束。
 
 ## 配置
 
@@ -34,8 +34,9 @@ DSH任务 [完成]：<session title>
 | `titleMaxChars` | `80` | session 标题的正整数 Unicode 字符上限 |
 | `summaryMaxChars` | `100` | assistant 摘要的正整数 Unicode 字符上限 |
 | `settleDelayMs` | `5000` | 解析标题并交付前的非负延迟 |
+| `maxConcurrentDeliveries` | `2` | 同时运行的交付子进程正整数上限 |
 
-route key 缺失或 route 文件不可读会使插件加载失败。live account 与 target 属于部署方管理的 route 文件，不应写进仓库配置。
+`command` 不是绝对路径、route key 缺失或 route 文件不可读都会使插件加载失败。live account 与 target 属于部署方管理的 route 文件，不应写进仓库配置。
 
 ## 模型体验
 

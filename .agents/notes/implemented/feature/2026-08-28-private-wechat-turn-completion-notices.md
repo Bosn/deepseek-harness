@@ -18,7 +18,7 @@ Each eligible terminal selects the last `assistant/message` with the exact compl
 
 One pending completion is retained per top-level session. After a configurable five-second settle delay, the plugin resolves the current `ctx.sessionTitle` title, bounds it, and sends `DSH任务 [<status>]：<title>\n<summary>`. A newer terminal turn replaces an older pending completion. A missing title is a payload-free warning rather than an unidentifiable notification.
 
-The plugin reads account and target from a deployment-owned constants file at load. It spawns the configured OpenClaw wrapper without a shell and with an allowlisted environment, validates a sent receipt carrying the configured channel and message id, and turns delivery failures into payload-free warnings. The idempotency key binds the session id and exact terminal turn, sequence, timestamp, and reason. Disposal removes the observer, cancels pending timers, then aborts and awaits in-flight channel subprocesses.
+The plugin reads account and target from a deployment-owned constants file at load. It spawns the configured OpenClaw wrapper without a shell and with an allowlisted environment, validates a sent receipt carrying the configured channel and message id, and turns delivery failures into payload-free warnings. The idempotency key binds the session id and exact terminal turn, sequence, timestamp, and reason. A configurable limit bounds live delivery subprocesses; later notices wait in memory, and a newer queued turn for the same session replaces its older queued notice. Disposal removes the observer, cancels pending timers, drops queued deliveries, then aborts and awaits live channel subprocesses.
 
 The package stays out of shipped bundles. A deployment opts in through its host profile, which preserves the upstream default and prevents agent presets from owning process-level delivery.
 
@@ -38,6 +38,6 @@ The package stays out of shipped bundles. A deployment opts in through its host 
 
 - One configured host mount observes top-level terminal turns across the process without reporting internal background jobs or subagent work.
 - Notifications carry a bounded session task title and the exact turn's final visible assistant summary; turns without either value are silent.
-- One external subprocess runs per delivered terminal after coalescing; sender failure does not alter the durable turn result.
+- At most the configured number of external subprocesses run concurrently; each delivered terminal still invokes one sender after coalescing, and sender failure does not alter the durable turn result.
 - A process exit before the receipt can lose a notification because this package owns no durable outbox. The stable idempotency key prevents duplicate delivery only when an attempt reaches OpenClaw more than once.
 - Real Loader composition coverage pins the session/title mount, exact-turn selection, bounded presentation, route arguments, receipt validation, stable key form, and fail-open turn-result behavior.

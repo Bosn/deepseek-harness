@@ -20,7 +20,7 @@ import { cp, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { existsSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, delimiter } from 'node:path'
+import { basename, dirname, join, delimiter, resolve } from 'node:path'
 import { vi } from 'vitest'
 import {
   ClientSideConnection,
@@ -36,6 +36,7 @@ export type { AgentUnderTest } from './launcher.ts'
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10_000
 const WAIT_POLL_INTERVAL_MS = 10
+const SAFE_WORKSPACE_CAPTURE = /^(?![\\/]|[A-Za-z]:[\\/])(?!.*(?:^|[\\/])\.\.(?:[\\/]|$)).+$/u
 
 /**
  * One step of a scenario's deterministic input script (`input.json`). The
@@ -136,6 +137,8 @@ export interface RunResult {
   cwd: string
   /** Filesystem-resolved spellings of {@link cwd} that child processes may report. */
   cwdAliases: string[]
+  /** Requested generated-workspace text files captured before teardown. */
+  workspaceFiles: Record<string, string>
   /**
    * Every persisted session log harvested after the run, ordered primary-first:
    * the top-level (parent) session — the one with no `parentSession` — then each
@@ -179,6 +182,8 @@ export interface RunOptions {
    * invalid on Windows); ordinary seeded files belong in `workspaceDir`.
    */
   prepareWorkspace?: (cwd: string) => void | Promise<void>
+  /** Cwd-relative text files to capture after graceful shutdown and before workspace cleanup. */
+  captureWorkspaceFiles?: readonly string[]
   /**
    * Parent directory for the generated session cwd. Defaults to
    * `os.tmpdir()`. A scenario that must distinguish its workspace from the
@@ -238,6 +243,7 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
   let launched: LaunchedAcpTestAgent | undefined
   let sessionId: string | undefined
   let sessionLogs: HarvestedLog[] = []
+  let workspaceFiles: Record<string, string> = {}
   const outcome = await (async (): Promise<RunResult> => {
     // Seed the workspace if the scenario ships one (a file the agent reads/edits).
     // Copied into the generated cwd so the agent's bash tools see it; the expected outputs
@@ -322,6 +328,14 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
     // Done driving: close stdin so the server disposes gracefully (flushing
     // persistence) and exits. Then await exit so the harvested log is complete.
     await active.close()
+    workspaceFiles = Object.fromEntries(await Promise.all(
+      [...opts.captureWorkspaceFiles ?? []].map(async (path) => {
+        if (!SAFE_WORKSPACE_CAPTURE.test(path)) {
+          throw new Error(`snapshot-harness: workspace capture path must name a cwd-relative file: ${path}`)
+        }
+        return [path, await readFile(resolve(cwd, path), 'utf8')] as const
+      }),
+    ))
     // Harvest EVERY persisted log (parent + any subagent children) while the
     // generated dirs still exist, ordered primary-first.
     sessionLogs = await harvestSessionLogs(sessionsRoot)
@@ -330,6 +344,7 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
       stderr: launched.stderr(),
       cwd,
       cwdAliases,
+      workspaceFiles,
       ...sessionId !== undefined ? { sessionId } : {},
       sessionLogs,
     }

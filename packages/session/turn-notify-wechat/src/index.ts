@@ -8,6 +8,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
@@ -27,6 +28,7 @@ const DEFAULT_TIMEOUT_MS = 45_000
 const DEFAULT_TITLE_MAX_CHARS = 80
 const DEFAULT_SUMMARY_MAX_CHARS = 100
 const DEFAULT_SETTLE_DELAY_MS = 5_000
+const DEFAULT_MAX_CONCURRENT_DELIVERIES = 2
 const MAX_RECEIPT_BYTES = 64 * 1024
 const CHARACTER_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
@@ -50,6 +52,8 @@ export interface Config {
   summaryMaxChars?: number
   /** Quiet time before title resolution and delivery; a newer turn replaces the pending notice. */
   settleDelayMs?: number
+  /** Maximum number of notification subprocesses allowed to run at once. */
+  maxConcurrentDeliveries?: number
 }
 
 /** Schemastery validation and supported deployment defaults. */
@@ -63,6 +67,7 @@ export const Config: z<Config> = z.object({
   titleMaxChars: z.number().step(1).min(1).default(DEFAULT_TITLE_MAX_CHARS),
   summaryMaxChars: z.number().step(1).min(1).default(DEFAULT_SUMMARY_MAX_CHARS),
   settleDelayMs: z.number().step(1).min(0).default(DEFAULT_SETTLE_DELAY_MS),
+  maxConcurrentDeliveries: z.number().step(1).min(1).default(DEFAULT_MAX_CONCURRENT_DELIVERIES),
 })
 
 type TurnEndEvent = Extract<SessionEvent, { type: 'turn/end' }>
@@ -85,6 +90,11 @@ interface PendingCompletion {
   terminal: TurnEndEvent
   summary: string
   timer: ReturnType<typeof setTimeout>
+}
+
+interface QueuedDelivery {
+  pending: PendingCompletion
+  title: string
 }
 
 function parseConstants(text: string): Map<string, string> {
@@ -155,7 +165,8 @@ function summarizeMessage(message: string, limit: number): string {
   const cleaned = message
     .replace(/!\[([^\]]*)\]\([^)]+\)/gu, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/gu, '$1')
-    .replace(/[#>*_`]+/gu, '')
+    .replace(/[#>*`]+/gu, '')
+    .replace(/(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])/gu, '')
   const lines: string[] = []
   for (const rawLine of cleaned.split(/\r?\n/u)) {
     const line = rawLine
@@ -352,16 +363,46 @@ function sendCompletion(
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = config as Required<Config>
+  if (!isAbsolute(resolved.command)) {
+    throw new Error('turn-notify-wechat: command must be an absolute path')
+  }
   const route = loadRoute(resolved)
   const abortController = new AbortController()
   const inFlight = new Set<Promise<void>>()
+  const deliveryQueue: QueuedDelivery[] = []
+  const queuedBySession = new Map<Session, QueuedDelivery>()
   const pendingBySession = new Map<Session, PendingCompletion>()
+  let activeDeliveries = 0
   let closing = false
 
   const clearPending = (session: Session): void => {
     const previous = pendingBySession.get(session)
     if (previous !== undefined) clearTimeout(previous.timer)
     pendingBySession.delete(session)
+  }
+
+  const pumpDeliveries = (): void => {
+    while (!closing && activeDeliveries < resolved.maxConcurrentDeliveries) {
+      const delivery = deliveryQueue.shift()
+      if (delivery === undefined) return
+      queuedBySession.delete(delivery.pending.session)
+      activeDeliveries += 1
+      const operation = sendCompletion(
+        resolved,
+        route,
+        delivery.pending,
+        delivery.title,
+        abortController.signal,
+      ).catch((error: unknown) => {
+        if (closing) return
+        ctx.logger.warn(`turn-notify-wechat: notification failed for session ${delivery.pending.session.id} turn ${delivery.pending.terminal.data.turn} (${String(error)})`)
+      }).finally(() => {
+        activeDeliveries -= 1
+        inFlight.delete(operation)
+        pumpDeliveries()
+      })
+      inFlight.add(operation)
+    }
   }
 
   const dispatch = (pending: PendingCompletion): void => {
@@ -378,18 +419,16 @@ export function apply(ctx: Context, config: Config): void {
       ctx.logger.warn(`turn-notify-wechat: notification skipped for session ${pending.session.id} turn ${pending.terminal.data.turn} (session title empty)`)
       return
     }
-    const operation = sendCompletion(
-      resolved,
-      route,
-      pending,
-      title,
-      abortController.signal,
-    ).catch((error: unknown) => {
-      if (closing) return
-      ctx.logger.warn(`turn-notify-wechat: notification failed for session ${pending.session.id} turn ${pending.terminal.data.turn} (${String(error)})`)
-    })
-    inFlight.add(operation)
-    void operation.finally(() => { inFlight.delete(operation) })
+    const queued = queuedBySession.get(pending.session)
+    if (queued === undefined) {
+      const delivery = { pending, title }
+      deliveryQueue.push(delivery)
+      queuedBySession.set(pending.session, delivery)
+    } else {
+      queued.pending = pending
+      queued.title = title
+    }
+    pumpDeliveries()
   }
 
   const detach = ctx.on('session/event', (session, event) => {
@@ -415,6 +454,8 @@ export function apply(ctx: Context, config: Config): void {
       clearTimeout(pending.timer)
     }
     pendingBySession.clear()
+    deliveryQueue.length = 0
+    queuedBySession.clear()
     abortController.abort()
     await Promise.allSettled([...inFlight])
   }, 'turn-notify-wechat teardown')

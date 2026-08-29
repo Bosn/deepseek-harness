@@ -165,6 +165,13 @@ export interface Scenario {
    * scenario files belong under the scenario's `workspace/` directory.
    */
   prepareWorkspace?: (cwd: string) => void | Promise<void>
+  /** Generated-workspace text artifacts whose complete contents are snapshot outputs. */
+  workspaceOutputSnapshots?: readonly {
+    /** Cwd-relative artifact path captured after graceful application shutdown. */
+    path: string
+    /** Expected-output filename stored in this scenario's snapshot directory. */
+    snapshot: string
+  }[]
   /**
    * Whether Windows additionally compares stdout with native separators against
    * `stdout.expected.windows.jsonl`. The shared canonical stdout expected output is still
@@ -1193,6 +1200,9 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
           ...!RECORDING && childFixtureFiles.length > 0 ? { childFiles: childFixtureFiles.map(file => join(dir, file)) } : {},
           ...existsSync(workspaceDir) ? { workspaceDir } : {},
           ...scenario.prepareWorkspace !== undefined ? { prepareWorkspace: scenario.prepareWorkspace } : {},
+          ...scenario.workspaceOutputSnapshots !== undefined ? {
+            captureWorkspaceFiles: scenario.workspaceOutputSnapshots.map(output => output.path),
+          } : {},
           ...scenario.workspaceParent !== undefined ? { workspaceParent: scenario.workspaceParent } : {},
           // A scenario booting an overlay tree passes its own live config; the
           // bin's replay swap derives the sibling `*cordis.snapshot.yml` from it.
@@ -1326,6 +1336,14 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
           await expect(stdout, `${expected.file} mismatch`).toMatchFileSnapshot(join(dir, expected.file))
         }
 
+        for (const output of scenario.workspaceOutputSnapshots ?? []) {
+          const content = result.workspaceFiles[output.path]
+          expect(content, `${output.path} was not captured`).toBeDefined()
+          if (REFRESHING) await writeFile(join(dir, output.snapshot), content as string)
+          await expect(content, `${output.snapshot} mismatch`)
+            .toMatchFileSnapshot(join(dir, output.snapshot))
+        }
+
         // A model turn always produces a log worth comparing; an explicitly
         // authored non-model scenario may opt in independently.
         if (comparesLog) {
@@ -1448,7 +1466,14 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
 
     it('every registered scenario has its required fixture files', async () => {
       // Every scenario needs input, stdout, a primary session fixture, and matching optional sidecars.
-      for (const { name, overridden, pinsNativeWindowsStdout, pinsChildToolSchemas, pinsChildSystemPrompts } of scenarios) {
+      for (const {
+        name,
+        overridden,
+        pinsNativeWindowsStdout,
+        pinsChildToolSchemas,
+        pinsChildSystemPrompts,
+        workspaceOutputSnapshots,
+      } of scenarios) {
         const dir = join(snapshotsDir, name)
         const files = (await readdir(dir, { withFileTypes: true }))
           .filter(entry => entry.isFile())
@@ -1470,6 +1495,9 @@ export function defineAcpSnapshotSuite(options: SnapshotSuiteOptions): void {
         expect(existsSync(join(dir, 'session.jsonl')), `${name}/session.jsonl`).toBe(true)
         expect(existsSync(join(dir, 'replay.override.json')), `${name}/replay.override.json presence must match \`overridden\``)
           .toBe(overridden === true)
+        for (const output of workspaceOutputSnapshots ?? []) {
+          expect(existsSync(join(dir, output.snapshot)), `${name}/${output.snapshot}`).toBe(true)
+        }
         expect(existsSync(join(dir, SYSTEM_PROMPT_SNAPSHOT)), `${name}/${SYSTEM_PROMPT_SNAPSHOT} presence must match snapshot-source ownership`)
           .toBe(promptOwners.has(name))
         expect(existsSync(join(dir, TOOL_SCHEMAS_SNAPSHOT)), `${name}/${TOOL_SCHEMAS_SNAPSHOT} presence must match snapshot-source ownership`)

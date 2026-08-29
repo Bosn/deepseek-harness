@@ -60,7 +60,7 @@ const DEPTH_TWO_CONFIG = fileURLToPath(new URL('../depth-two.cordis.yml', import
 const CHILD_QUESTION_CONFIG = fileURLToPath(new URL('../child-question.cordis.yml', import.meta.url))
 const SESSION_SANDBOX_ROOT_CONFIG = fileURLToPath(new URL('../session-sandbox-root.cordis.yml', import.meta.url))
 const RETRY_CONFIG = fileURLToPath(new URL('../retry.cordis.yml', import.meta.url))
-const SESSION_TITLE_CONFIG = fileURLToPath(new URL('../session-title.cordis.yml', import.meta.url))
+const TURN_NOTIFY_WECHAT_CONFIG = fileURLToPath(new URL('../turn-notify-wechat.cordis.yml', import.meta.url))
 const SUBAGENT_REPORT_CONFIG = fileURLToPath(
   new URL('../subagent-report.cordis.yml', import.meta.url),
 )
@@ -100,6 +100,30 @@ async function prepareDelimiterPathWorkspace(cwd: string): Promise<void> {
   await Promise.all([
     writeFile(join(dir, 'AGENTS.md'), 'Delimiter path snapshot instruction.\n'),
     writeFile(join(dir, 'task.txt'), 'delimiter path snapshot task\n'),
+  ])
+}
+
+async function prepareTurnNotifyWechatWorkspace(cwd: string): Promise<void> {
+  const sender = [
+    '#!/usr/bin/env node',
+    "import { renameSync, writeFileSync } from 'node:fs'",
+    'const args = process.argv.slice(2)',
+    'const valueAfter = flag => args[args.indexOf(flag) + 1]',
+    "const message = valueAfter('--message')",
+    "const channel = valueAfter('--channel')",
+    "if (args[0] !== 'message' || args[1] !== 'send' || typeof message !== 'string' || typeof channel !== 'string') throw new Error('invalid snapshot delivery argv')",
+    "writeFileSync('wechat-notice.tmp', `${message}\\n`, { mode: 0o600 })",
+    "renameSync('wechat-notice.tmp', 'wechat-notice.txt')",
+    "process.stdout.write(JSON.stringify({ action: 'send', channel, messageId: 'snapshot-wechat-1' }))",
+    '',
+  ].join('\n')
+  await Promise.all([
+    writeFile(join(cwd, 'snapshot-wechat-sender.mjs'), sender, { mode: 0o700 }),
+    writeFile(join(cwd, 'snapshot-wechat-route.env'), [
+      'WEIXIN_ACCOUNT_ID=snapshot-owner',
+      'WEIXIN_BOSN_TARGET=snapshot-owner@im.wechat',
+      '',
+    ].join('\n'), { mode: 0o600 }),
   ])
 }
 
@@ -201,7 +225,12 @@ const SCENARIOS: Scenario[] = [
     hasModelTurn: true,
     recorded: false,
     overridden: true,
-    configPath: SESSION_TITLE_CONFIG,
+    configPath: TURN_NOTIFY_WECHAT_CONFIG,
+    prepareWorkspace: prepareTurnNotifyWechatWorkspace,
+    workspaceOutputSnapshots: [{
+      path: 'wechat-notice.txt',
+      snapshot: 'wechat-notice.expected.txt',
+    }],
   },
   { name: 'tool-call-turn', hasModelTurn: true, recorded: true },
   // Authored from the real PACKED_CHUNKS_SOURCE recording under the ordinary
