@@ -6,7 +6,7 @@ Status: implemented
 
 > 范围：对 [Web 配置面](2026-07-30-web-config-plane.zh.md)的边界加固——哪些 namespace 能抵达协议、哪些调用方能抵达它们，以及一个只持有局部且可能陈旧的视图的编辑器该如何写入，才不会毁掉它看不见的东西。
 
-> 调用方边界、脱敏与 revision 设栅依然有效。把「哪些 namespace 能抵达协议」限制为可配置提供方目录这一条，已被[由插件自己拥有的设置表层](2026-08-12-plugin-owned-settings-surface.zh.md)取代——后者服务每一个已注册的 namespace。
+> 浏览器会话调用方边界、脱敏与 revision 设栅依然有效。[部署声明式 Host 配置权威](2026-08-29-deployment-declared-privileged-browser-authority.zh.md)允许已认证远程页面选择 Host 支撑的配置界面，而不改变 API 认证。把「哪些 namespace 能抵达协议」限制为可配置提供方目录这一条，已被[由插件自己拥有的设置表层](2026-08-12-plugin-owned-settings-surface.zh.md)取代——后者服务每一个已注册的 namespace。
 
 ## 问题
 
@@ -21,6 +21,8 @@ Status: implemented
 ## 决策
 
 **读取配置与写入配置同样属于特权操作。**`settings.describe`、`credentials.describe`、模型目录及其他所有 Host 操作都要求同一个浏览器会话。配置面仍独立于认证对 secret 脱敏。这条边界由真实 HTTP 服务器而非手工请求来断言，证明伪造 loopback `Host` 值绝不建立身份。
+
+已认证远程页面只有在自身权威被列入 `privilegedHosts` 时，才会选择 Host 支撑的配置客户端；否则页面保留进程内镜像，且不发送 settings 请求。该声明会加入 Host 与 Origin 可达性集合，但不会授权任何 API 方法。每项 Host 操作仍要求同一个浏览器会话，而 Host 与 Origin 检查仍是请求路由防御，不是调用方身份。
 
 **这个面恰好服务于已注册模型提供方所指向的那些 namespace。**`ctx.llm.listConfigurableProviders()` 就是允许列表，于是产品边界是被执行的，而不是从已安装的插件集合里推断出来的；将来的 namespace 只有加入该目录才会变得可在 Web 上配置。未注册的 namespace 与未暴露的 namespace 得到完全相同的答复（`settings-not-exposed`），因此探测无法枚举注册表。
 
@@ -40,4 +42,4 @@ Status: implemented
 
 ## 影响
 
-`trustedHosts` 部署下的 LAN 客户端已经完全无法渲染设置页；配置表层就是回环。注册了 settings namespace 的插件，在它同时注册可配置提供方之前不会变得可在 Web 上配置——这是刻意的，也正是 `settings-not-exposed` 要在消息里点明这条边界的原因。`SettingsDescriptor` 新增了必填的 `revision`，因此以编程方式构造 descriptor 形状值的地方都必须提供它；`settings/document-updated` 是一个新事件，提供方侧的任何 listener 现在都可以观察它。忽略 `expectedRevision` 的客户端，其后写胜出的语义完全不变。延后事项：fail-closed 的协议 describe（连同它所承载的 `headers` 与信封净化工作），以及一套不含可执行代码的浏览器 schema 协议。
+已认证远程客户端只有在页面权威位于 `privilegedHosts` 时，才能渲染 Host 支撑的设置；该条目无需重复的 `trustedHosts` 条目即可准入路由，而 loopback 默认选择这些控件。注册了 settings namespace 的插件，在它同时注册可配置提供方之前不会变得可在 Web 上配置——这是刻意的，也正是 `settings-not-exposed` 要在消息里点明这条边界的原因。`SettingsDescriptor` 携带必填的 `revision`，因此以编程方式构造 descriptor 形状值的地方必须提供它；`settings/document-updated` 是提供方侧任何 listener 都可以观察的事件。忽略 `expectedRevision` 的客户端，其后写胜出的语义完全不变。延后事项：fail-closed 的协议 describe（连同它所承载的 `headers` 与信封净化工作），以及一套不含可执行代码的浏览器 schema 协议。

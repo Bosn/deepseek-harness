@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { assertTrustedAuthority, isTrustedApiRequest } from '../src/api-request-trust.ts'
+import { isDeclaredAuthority } from '../src/privileged-hosts.ts'
 
 function request(headers: Record<string, string | undefined>): { headers: Record<string, string | undefined> } {
   return { headers }
@@ -47,6 +48,10 @@ describe('isTrustedApiRequest', () => {
     // An unparsable entry never matches; it must not poison the rest of the list.
     expect(isTrustedApiRequest(request({ host: 'harness.internal', origin: 'http://harness.internal' }), ['bad entry', 'harness.internal'])).toBe(true)
     expect(isTrustedApiRequest(request({ host: 'harness.internal', origin: 'http://harness.internal' }), ['bad entry'])).toBe(false)
+  })
+
+  it('fails closed when a page authority cannot be parsed', () => {
+    expect(isDeclaredAuthority({ hostname: 'bad host', port: '' }, ['harness.internal'])).toBe(false)
   })
 
   it('refuses cross-origin browser markers even on a loopback Host', () => {

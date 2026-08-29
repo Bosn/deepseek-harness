@@ -6,7 +6,7 @@ English | [中文](2026-07-30-config-plane-boundaries.zh.md)
 
 > Scope: boundary hardening of the [web configuration plane](2026-07-30-web-config-plane.md) — which namespaces reach the wire, which callers reach them, and how an editor holding a partial, possibly stale view writes without destroying what it cannot see.
 
-> The caller boundary, the redaction, and the revision fencing remain current. Restricting which namespaces reach the wire to the configurable-provider directory is superseded by the [plugin-owned settings surface](2026-08-12-plugin-owned-settings-surface.md), which serves every registered namespace.
+> The browser-session caller boundary, the redaction, and the revision fencing remain current. The [deployment-declared Host configuration authority](2026-08-29-deployment-declared-privileged-browser-authority.md) lets an authenticated remote page select the Host-backed configuration UI without changing API authentication. Restricting which namespaces reach the wire to the configurable-provider directory is superseded by the [plugin-owned settings surface](2026-08-12-plugin-owned-settings-surface.md), which serves every registered namespace.
 
 ## Problem
 
@@ -21,6 +21,8 @@ Three smaller defects sat beside them. `llm/adapters-updated` documented contain
 ## Decision
 
 **Reading configuration is as privileged as writing it.** `settings.describe`, `credentials.describe`, the model catalog, and every other Host operation require one browser session. The configuration plane still redacts secrets independently of authentication. The boundary is asserted over a real HTTP server rather than a hand-assembled request, proving that a forged loopback `Host` value never establishes identity.
+
+An authenticated remote page selects the Host-backed configuration client only when its authority is declared in `privilegedHosts`; otherwise it stays on the process-local mirror and sends no settings request. That declaration joins the Host and Origin reachability set but does not authorize an API method. Every Host operation continues to require the same browser session, while Host and Origin checks remain request-routing defenses rather than caller identity.
 
 **The plane serves exactly the namespaces a registered model provider addresses.** `ctx.llm.listConfigurableProviders()` is the allow-list, so the product boundary is enforced rather than inferred from the installed plugin set, and a future namespace becomes web-configurable only by joining that directory. An unregistered namespace and an unexposed one answer identically (`settings-not-exposed`), so probing cannot enumerate the registry.
 
@@ -40,4 +42,4 @@ Three smaller defects sat beside them. `llm/adapters-updated` documented contain
 
 ## Consequences
 
-A LAN client on a `trustedHosts` deployment can no longer render the settings page at all; loopback is the configuration surface. A plugin that registers a settings namespace is not web-configurable until it also registers a configurable provider — deliberate, and the reason `settings-not-exposed` names the boundary in its message. `SettingsDescriptor` gained a required `revision`, so any programmatic constructor of a descriptor-shaped value must supply it, and `settings/document-updated` is a new event any provider-side listener may now observe. Clients that ignore `expectedRevision` keep last-write-wins semantics unchanged. Deferred: the fail-closed wire describe (with the `headers` and envelope-sanitization work it carries), and a non-executable browser schema protocol.
+An authenticated remote client cannot render Host-backed settings unless its page authority is in `privilegedHosts`; that entry admits the route without a duplicate `trustedHosts` entry, and loopback selects the controls by default. A plugin that registers a settings namespace is not web-configurable until it also registers a configurable provider — deliberate, and the reason `settings-not-exposed` names the boundary in its message. `SettingsDescriptor` carries a required `revision`, so any programmatic constructor of a descriptor-shaped value supplies it, and `settings/document-updated` is an event any provider-side listener may observe. Clients that ignore `expectedRevision` keep last-write-wins semantics unchanged. Deferred: the fail-closed wire describe (with the `headers` and envelope-sanitization work it carries), and a non-executable browser schema protocol.

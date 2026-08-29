@@ -50,6 +50,7 @@ async function bench(served?: string[]) {
   })
   ctx.provide('connection', {
     isLoopback: true,
+    canUseHostConfiguration: true,
   } as never)
   await ctx.plugin({ inject: [...settingsInject], apply: settingsApply }).await()
   return {

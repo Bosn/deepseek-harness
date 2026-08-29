@@ -51,7 +51,7 @@ kind: "package-reference"
 
 ### Describe 镜像
 
-插件注入 `connection` 与 `remote`，并持有浏览器中唯一的 `settings.describe` 读取方：一面共享镜像，在每次转发的 `settings/document-updated` 事件与 `connection/reset` 时刷新（首次连接也包含在内，关闭「提交落在急切读取与 SSE 订阅之间」的窗口）。跨命名空间表面通过 `ctx.settingsScope.describe()` 读它，这是一个读取/折叠面（`getSnapshot`/`subscribe`/`ensure`，另有把写应答折入的 `acceptView`）。
+插件注入 `connection` 与 `remote`，并持有浏览器中唯一的 `settings.describe` 读取方：一面共享镜像，在每次转发的 `settings/document-updated` 事件与 `connection/reset` 时刷新（首次连接也包含在内，关闭「提交落在急切读取与 SSE 订阅之间」的窗口）。当 `ctx.connection.canUseHostConfiguration` 为真时，镜像使用 Host 模式；否则留在进程内内存，不跨设置协议。该能力只选择是否启用 Host-backed 配置界面，与 Connection 认证相互独立，也不授权 API 请求。跨命名空间表面通过 `ctx.settingsScope.describe()` 读镜像，这是一个读取/折叠面（`getSnapshot`/`subscribe`/`ensure`，另有把写应答折入的 `acceptView`）。
 
 ### Scope 派生
 
@@ -94,7 +94,7 @@ kind: "package-reference"
 
 这些限制说明设置传输层够不到的地方；它们是当前包约束。
 
-- **非 loopback 页面没有持久化设置**：本 Client 在那里禁用 Host 持久化，因此 scope 以 `unavailable` 起步且从不跨线路；尽管 Connection 认证覆盖 API，它支撑的每一行仍在那里无效。
+- **没有 Host 配置能力的页面不提供持久化设置**：当 `canUseHostConfiguration` 为假时，本 Client 让所有 scope 留在进程内，依赖 Host 的设置行保持不可用。Connection 认证是另一项独立关注点，并不隐含这项界面能力。
 
 <a id="dev-note"></a>
 ### 开发备注

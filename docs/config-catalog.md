@@ -430,6 +430,14 @@ export interface ConnectionConfig {
    * bind. An entry that is not a bare, canonical authority fails plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Remote page authorities where the shipped client may expose Host-backed
+   * configuration UI, in the same `host[:port]` form as
+   * {@link ConnectionConfig.trustedHosts}. Each entry also joins the outer
+   * Host/Origin trust fence, but never bypasses browser-session authentication.
+   * This is a client capability declaration, not a method-specific API grant.
+   */
+  privilegedHosts?: string[]
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -437,7 +445,7 @@ export interface ConnectionConfig {
 }
 ```
 
-Source: [`packages/client/connection/src/index.ts:70`](../packages/client/connection/src/index.ts)
+Source: [`packages/client/connection/src/index.ts:71`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 

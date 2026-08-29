@@ -5,12 +5,13 @@ import { apply, inject } from '../src/client/index.ts'
 import { SettingsSchemaService } from '../src/client/schema.ts'
 import { SettingsScopeBinder } from '../src/client/settings-scope.ts'
 
+/** Boot the browser half with Host-backed configuration enabled off-loopback. */
 function bench() {
   const describeCall = vi.fn().mockResolvedValue({
     ok: true, value: { writable: true, hasDocument: true, namespaces: [] },
   })
   const ctx = new Context()
-  ctx.provide('connection', { api: {}, isLoopback: true } as never)
+  ctx.provide('connection', { isLoopback: false, canUseHostConfiguration: true } as never)
   const remote = new TestRemote(ctx, { settings: { describe: describeCall } })
   return { ctx, describeCall, remote, fiber: ctx.plugin({ inject: [...inject], apply }) }
 }

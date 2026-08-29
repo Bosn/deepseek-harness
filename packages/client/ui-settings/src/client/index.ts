@@ -57,7 +57,7 @@ export function apply(ctx: Context): void {
   // Captured once here, where `remote.settings` is declared in this plugin's
   // own `inject`; the binder hands the same face to every scope it binds.
   const wire = { settings: ctx.remote.settings }
-  const mirror = new SettingsDescribeMirror(wire, connection.isLoopback ? 'host' : 'memory')
+  const mirror = new SettingsDescribeMirror(wire, connection.canUseHostConfiguration ? 'host' : 'memory')
   ctx.effect(() => {
     const disposers = [
       ctx.remote.$on('settings/document-updated', () => { void mirror.load() }),

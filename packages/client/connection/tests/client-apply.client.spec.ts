@@ -10,15 +10,18 @@ import {
   type ConnectionGenerationSource,
   type ConnectionHandle,
 } from '../src/client/index.ts'
+import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
 
 type Win = {
-  location?: { hostname: string; search: string; origin?: string }
+  location?: { hostname: string; port?: string; search: string; origin?: string }
   __DSH_TRANSPORT__?: ClientTransportHooks
+  [PRIVILEGED_HOSTS_GLOBAL]?: readonly string[]
 }
 
 afterEach(() => {
   delete (globalThis as Win).location
   delete (globalThis as Win).__DSH_TRANSPORT__
+  delete (globalThis as Win).__DSH_PRIVILEGED_HOSTS__
 })
 
 class GenerationProbe {
@@ -61,13 +64,16 @@ async function mount(): Promise<ConnectionHandle> {
 describe('connection client apply', () => {
   it('treats a runtime without browser location as local', async () => {
     delete (globalThis as Win).location
-    expect((await mount()).isLoopback).toBe(true)
+    const handle = await mount()
+    expect(handle.isLoopback).toBe(true)
+    expect(handle.canUseHostConfiguration).toBe(true)
   })
 
   it('mounts ctx.connection and identifies a loopback page', async () => {
     ;(globalThis as Win).location = { hostname: 'localhost', search: '' }
     const handle = await mount()
     expect(handle.isLoopback).toBe(true)
+    expect(handle.canUseHostConfiguration).toBe(true)
   })
 
   it('selects the fixture RPC transport under ?fixture', async () => {
@@ -78,8 +84,38 @@ describe('connection client apply', () => {
   })
 
   it('reports non-loopback page authority through the connection handle', async () => {
-    ;(globalThis as Win).location = { hostname: '192.0.2.20', search: '' }
-    expect((await mount()).isLoopback).toBe(false)
+    ;(globalThis as Win).location = { hostname: '192.0.2.20', port: '', search: '' }
+    const handle = await mount()
+    expect(handle.isLoopback).toBe(false)
+    expect(handle.canUseHostConfiguration).toBe(false)
+  })
+
+  it('fails closed when the injected configuration-authority global is not an array', async () => {
+    ;(globalThis as Win).location = { hostname: 'harness.example', port: '3080', search: '' }
+    ;(globalThis as Record<string, unknown>)[PRIVILEGED_HOSTS_GLOBAL] = 'harness.example:3080'
+    expect((await mount()).canUseHostConfiguration).toBe(false)
+  })
+
+  it('exposes Host configuration only to an injected authority, with exact optional-port semantics', async () => {
+    const win = globalThis as Win
+    win[PRIVILEGED_HOSTS_GLOBAL] = [
+      'klaus-server.tailnet.example', 'exact.example:3080', 'default.example:80',
+    ]
+    win.location = { hostname: 'klaus-server.tailnet.example', port: '3080', search: '' }
+    const portless = await mount()
+    expect(portless.isLoopback).toBe(false)
+    expect(portless.canUseHostConfiguration).toBe(true)
+
+    win.location = { hostname: 'exact.example', port: '3081', search: '' }
+    expect((await mount()).canUseHostConfiguration).toBe(false)
+    win.location = { hostname: 'exact.example', port: '3080', search: '' }
+    expect((await mount()).canUseHostConfiguration).toBe(true)
+    // The Host matcher preserves an explicitly declared default port while
+    // WHATWG omits it from both a request Host and window.location.port.
+    win.location = { hostname: 'default.example', port: '', search: '' }
+    expect((await mount()).canUseHostConfiguration).toBe(true)
+    win.location = { hostname: 'default.example', port: '9999', search: '' }
+    expect((await mount()).canUseHostConfiguration).toBe(false)
   })
 
   it('requires one generation source and ignores a stale source disposer', async () => {
@@ -247,7 +283,7 @@ describe('connection client apply', () => {
   })
 
   it('carries RPC calls without requiring secure-context randomUUID', async () => {
-    ;(globalThis as Win).location = { hostname: 'localhost', search: '' }
+    ;(globalThis as Win).location = { hostname: 'localhost', port: '', search: '' }
     vi.stubGlobal('crypto', {
       getRandomValues(bytes: Uint8Array) {
         return bytes.fill(0)
@@ -315,6 +351,7 @@ describe('connection client apply', () => {
       abort.signal,
     )
     expect(handle.isLoopback).toBe(true)
+    expect(handle.canUseHostConfiguration).toBe(true)
     expect(() => open('/rpc', 'session/follow', {}, abort.signal))
       .toThrow('worker-local streams require the /api channel')
     expect(() => open('/api/path', 'session/follow', {}, abort.signal))
@@ -323,7 +360,7 @@ describe('connection client apply', () => {
 
   it('validates generic RPC transport failures, correlation, and targets', async () => {
     ;(globalThis as Win).location = {
-      hostname: 'harness.example', search: '', origin: 'https://harness.example',
+      hostname: 'harness.example', port: '', search: '', origin: 'https://harness.example',
     }
     const handle = await mount()
     const original = globalThis.fetch
@@ -337,7 +374,7 @@ describe('connection client apply', () => {
         expect.objectContaining({ signal: abort.signal }),
       )
 
-      ;(globalThis as Win).location = { hostname: 'localhost', search: '', origin: 'null' }
+      ;(globalThis as Win).location = { hostname: 'localhost', port: '', search: '', origin: 'null' }
       globalThis.fetch = vi.fn().mockResolvedValue(Response.json({
         type: 'server-response',
         rpcId: 'different-rpc',

@@ -343,6 +343,8 @@ export interface LaunchOptions {
    * 127.0.0.1; a non-resolving authority fails before Host trust is exercised.
    */
   remoteAuthority?: string
+  /** Authorities whose authenticated remote page may render Host-backed configuration. */
+  privilegedHosts?: string[]
   /** Reuse an existing harness home so a second Host can verify user settings across origins. */
   harnessHome?: string
 }
@@ -366,6 +368,9 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   const mode = webSnapshotMode()
   const compareReplaySession = options.compareReplaySession ?? await ownsReplayFixture(options.replayFixture)
   const browserHost = options.remoteAuthority ?? '127.0.0.1'
+  if (options.privilegedHosts !== undefined && options.remoteAuthority === undefined) {
+    throw new Error('privilegedHosts requires remoteAuthority')
+  }
   if (mode === 'record') {
     // Both owning vitest configs (web unconditionally, snapshot in record
     // mode) load the repo-root .env before this file runs.
@@ -521,7 +526,13 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     { id: 'web-runtime', config: { openBrowser: false, printUrl: false, surfaceContext } },
     ...options.remoteAuthority === undefined
       ? []
-      : [{ id: 'connection', config: { trustedHosts: [options.remoteAuthority] } }],
+      : [{
+        id: 'connection',
+        config: {
+          trustedHosts: [options.remoteAuthority],
+          privilegedHosts: options.privilegedHosts ?? [],
+        },
+      }],
     { id: 'settings', config: { dshHome: harnessHome } },
     { id: 'credentials', config: { dshHome: harnessHome } },
     // The shipped directory-picker row is the -auto chooser, which resolves

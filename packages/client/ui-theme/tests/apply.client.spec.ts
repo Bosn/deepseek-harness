@@ -50,7 +50,7 @@ async function bench(isLoopback = true) {
     section[op.path[0]!] = op.value
     return Promise.resolve({ ok: true as const, value: namespace() })
   })
-  ctx.provide('connection', { api: {}, isLoopback } as never)
+  ctx.provide('connection', { isLoopback, canUseHostConfiguration: isLoopback } as never)
   const events = new TestRemote(ctx, { settings: { describe, mutate } })
   await ctx.plugin({ inject: [...settingsInject], apply: settingsApply }).await()
   return {

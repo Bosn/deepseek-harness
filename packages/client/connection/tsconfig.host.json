@@ -13,6 +13,7 @@
     "src/index.ts",
     "src/invariant.ts",
     "src/loopback-hostname.ts",
+    "src/privileged-hosts.ts",
     "src/rpc-host.ts",
     "src/rpc-schema.ts",
     "src/rpc.ts"
