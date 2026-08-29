@@ -1,16 +1,21 @@
 /** Published dsh web + pnpm dev:web → browser HMR, with no page reload. */
 
-import { existsSync, globSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { lstat, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { chromium } from 'playwright'
 import { expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Fiber } from '@deepseek-ai/cordis'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import type { SubprocessHandle, SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
-import { readClientBuildRecord } from '../../../scripts/client-build-environment.ts'
+import {
+  CLIENT_BUILD_RECORD_PATH,
+  clientArtifactPaths,
+  readClientBuildRecord,
+} from '../../../scripts/client-build-environment.ts'
 import { REPO_ROOT } from './support.ts'
 
 function spawnSpec(argv: readonly string[], cwd: string, env?: Record<string, string>): SubprocessSpawnSpec {
@@ -68,16 +73,118 @@ async function stopTree(child: SubprocessHandle): Promise<void> {
   await child.done
 }
 
+/** Test whether a caught filesystem failure carries one expected error code. */
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code
+}
+
+/** Resolve one artifact path while rejecting a lexical escape from the repository. */
+function resolveArtifactPath(root: string, path: string): string {
+  const absoluteRoot = resolve(root)
+  const absolutePath = resolve(absoluteRoot, path)
+  const repositoryPath = relative(absoluteRoot, absolutePath)
+  if (repositoryPath === '' || repositoryPath === '..'
+    || repositoryPath.startsWith(`..${sep}`) || isAbsolute(repositoryPath)) {
+    throw new Error(`client artifact path escapes the repository: ${JSON.stringify(path)}`)
+  }
+  return absolutePath
+}
+
+/** Create missing artifact parents one level at a time and reject link-shaped ancestors. */
+async function prepareArtifactParent(root: string, path: string): Promise<string> {
+  const absoluteRoot = resolve(root)
+  const rootEntry = await lstat(absoluteRoot)
+  if (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()) {
+    throw new Error(`client artifact root is not a real directory: ${absoluteRoot}`)
+  }
+  const absolutePath = resolveArtifactPath(absoluteRoot, path)
+  const parentPath = relative(absoluteRoot, dirname(absolutePath))
+  let current = absoluteRoot
+  for (const component of parentPath === '' ? [] : parentPath.split(sep)) {
+    current = join(current, component)
+    let entry
+    try {
+      entry = await lstat(current)
+    } catch (error) {
+      if (!hasErrorCode(error, 'ENOENT')) throw error
+      try {
+        await mkdir(current)
+      } catch (mkdirError) {
+        if (!hasErrorCode(mkdirError, 'EEXIST')) throw mkdirError
+      }
+      entry = await lstat(current)
+    }
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error(`client artifact parent is not a real directory: ${current}`)
+    }
+  }
+  return absolutePath
+}
+
+/** Capture every byte covered by the complete client build record. */
+async function snapshotClientArtifacts(root: string): Promise<ReadonlyMap<string, Buffer>> {
+  return new Map(await Promise.all(clientArtifactPaths(root).map(async (path) => {
+    const absolutePath = await prepareArtifactParent(root, path)
+    const entry = await lstat(absolutePath)
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(`client artifact is not a real file: ${absolutePath}`)
+    }
+    return [path, await readFile(absolutePath)] as const
+  })))
+}
+
+/** Restore the recorded artifact set and remove files created by the watch build. */
+async function restoreClientArtifacts(root: string, snapshot: ReadonlyMap<string, Buffer>): Promise<void> {
+  const failures: unknown[] = []
+  let additions: string[] = []
+  try {
+    additions = clientArtifactPaths(root).filter(path => !snapshot.has(path))
+  } catch (error) {
+    failures.push(error)
+  }
+  await Promise.all(additions.map(async (path) => {
+    try {
+      await unlink(await prepareArtifactParent(root, path))
+    } catch (error) {
+      failures.push(error)
+    }
+  }))
+  await Promise.all([...snapshot].map(async ([path, content]) => {
+    try {
+      const absolutePath = await prepareArtifactParent(root, path)
+      try {
+        const entry = await lstat(absolutePath)
+        if (entry.isSymbolicLink()) await unlink(absolutePath)
+        else if (!entry.isFile()) throw new Error(`client artifact destination is not a real file: ${absolutePath}`)
+      } catch (error) {
+        if (!hasErrorCode(error, 'ENOENT')) throw error
+      }
+      await writeFile(absolutePath, content)
+    } catch (error) {
+      failures.push(error)
+    }
+  }))
+  if (failures.length > 0) throw new AggregateError(failures, 'client artifact cleanup failed')
+}
+
+/** Prove cleanup preserved the record and restored the artifact bytes it binds. */
+async function verifyClientArtifacts(root: string, originalRecord: Buffer): Promise<void> {
+  const currentRecord = await readFile(join(root, CLIENT_BUILD_RECORD_PATH))
+  if (!currentRecord.equals(originalRecord)) throw new Error('HMR browser test changed the client build record')
+  readClientBuildRecord(root)
+}
+
 it('hot-reloads a real client-plugin source edit without refreshing the page', async () => {
   const world = await mkdtemp(join(tmpdir(), 'dsh-web-hmr-world-'))
   const sourcePath = join(REPO_ROOT, 'packages/client/ui-conversation/src/client/locales.ts')
   const binPath = join(REPO_ROOT, 'apps/cli/lib/bin.js')
   if (!existsSync(binPath)) throw new Error('HMR browser test needs the built dsh bin; run pnpm run build first')
   const clientBuildEnvironment = readClientBuildRecord(REPO_ROOT).environment
-  const clientBundlePaths = globSync('packages/*/*/lib/client.js{,.map}', { cwd: REPO_ROOT })
-    .map(path => join(REPO_ROOT, path))
-  const originalClientBundles = await Promise.all(clientBundlePaths.map(async path => [path, await readFile(path)] as const))
+  const originalBuildRecord = await readFile(join(REPO_ROOT, CLIENT_BUILD_RECORD_PATH))
+  const originalClientArtifacts = await snapshotClientArtifacts(REPO_ROOT)
   const originalSource = await readFile(sourcePath)
+  const cleanupProbeRepositoryPath = `apps/web/dist/assets/dsh-hmr-cleanup-probe-${randomUUID()}.js`
+  const cleanupProbePath = join(REPO_ROOT, cleanupProbeRepositoryPath)
   const oldText = 'Into the Unknown'
   const sourceNeedle = "'hero.headline': 'Into the Unknown'"
   const newText = `HMR UPDATED ${'x'.repeat(80)}`
@@ -129,14 +236,48 @@ it('hot-reloads a real client-plugin source edit without refreshing the page', a
   } catch (error) {
     failures.push(error)
   } finally {
-    await writeFile(sourcePath, originalSource).catch((error: unknown) => failures.push(error))
-    if (watcher !== undefined) await stopTree(watcher).catch((error: unknown) => failures.push(error))
-    await Promise.all(originalClientBundles.map(async ([path, content]) => {
-      await writeFile(path, content).catch((error: unknown) => failures.push(error))
-    }))
+    let writerQuiescent = watcher === undefined
+    if (watcher !== undefined) {
+      try {
+        await stopTree(watcher)
+        writerQuiescent = true
+      } catch (error) {
+        failures.push(error)
+      }
+    }
     if (host !== undefined) await stopTree(host).catch((error: unknown) => failures.push(error))
+    if (subprocessFiber !== undefined) {
+      try {
+        await subprocessFiber.dispose()
+        writerQuiescent = true
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (!writerQuiescent && watcher !== undefined) {
+      try {
+        writerQuiescent = await watcher.waitForExit(AbortSignal.timeout(15_000))
+      } catch (error) {
+        failures.push(error)
+      }
+    }
     await browser?.close().catch((error: unknown) => failures.push(error))
-    await subprocessFiber?.dispose().catch((error: unknown) => failures.push(error))
+    await writeFile(sourcePath, originalSource).catch((error: unknown) => failures.push(error))
+    if (writerQuiescent) {
+      try {
+        const safeProbePath = await prepareArtifactParent(REPO_ROOT, cleanupProbeRepositoryPath)
+        await writeFile(safeProbePath, 'HMR cleanup probe\n', { flag: 'wx' })
+      } catch (error) {
+        failures.push(error)
+      }
+      await restoreClientArtifacts(REPO_ROOT, originalClientArtifacts).catch((error: unknown) => failures.push(error))
+      if (existsSync(cleanupProbePath)) failures.push(new Error('HMR cleanup left its added client artifact behind'))
+      await verifyClientArtifacts(REPO_ROOT, originalBuildRecord).catch((error: unknown) => failures.push(error))
+    } else {
+      failures.push(new Error(
+        'HMR watcher did not quiesce; client artifacts were not restored. Run a complete pnpm run build before consuming them.',
+      ))
+    }
     await rm(world, { recursive: true, force: true }).catch((error: unknown) => failures.push(error))
   }
   if (failures.length > 0) throw new AggregateError(failures, 'HMR browser test or cleanup failed')

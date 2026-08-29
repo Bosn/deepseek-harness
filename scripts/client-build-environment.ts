@@ -325,12 +325,21 @@ export function readClientBuildRecord(
   return record
 }
 
-/** Return the deterministic digest of every artifact affected by the public client environment. */
-function clientArtifactDigest(root: string): ClientArtifactDigest {
-  const paths = globSync([...CLIENT_ARTIFACT_PATTERNS], { cwd: root })
+/**
+ * List every file covered by the complete client build record.
+ * @param root - repository root containing generated client artifacts.
+ * @returns sorted repository-relative paths with `/` separators.
+ */
+export function clientArtifactPaths(root: string): string[] {
+  return globSync([...CLIENT_ARTIFACT_PATTERNS], { cwd: root })
     .map(path => path.replaceAll('\\', '/'))
     .filter(path => statSync(resolve(root, path)).isFile())
     .sort()
+}
+
+/** Return the digest that binds one complete client build to its artifact bytes. */
+function clientArtifactDigest(root: string): ClientArtifactDigest {
+  const paths = clientArtifactPaths(root)
   if (paths.length === 0) throw new Error('complete client build produced no Vite or dynamic client artifacts')
 
   const digest = createHash('sha256')
