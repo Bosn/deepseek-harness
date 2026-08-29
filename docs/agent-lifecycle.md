@@ -75,7 +75,7 @@ The `assistant/message` event records every successful provider call, including 
 
 `dsh-compaction-basic` uses `agent/pre-step` for pressure before request derivation and `agent/request-error` for semantic context overflow, HTTP 413, or configured large-request timeout. Once any trigger qualifies, optional tool-result pruning runs before summary selection. Recovery runs while the failing turn and step remain open, and repeats the request in place only when pruning or summarization advances the surface replacement generation; otherwise the original request error remains authoritative. Generic provider retry delegates to this specialized repair before deciding whether to repeat an unchanged request.
 
-The returned `agent/pre-step` decision is authoritative; listeners wrapping `next()` preserve downstream messages unless replacement is intentional. Steering and injected context pass through the same waterfall after a later claim operation takes their next-step batch.
+The returned `agent/pre-step` decision is authoritative; listeners wrapping `next()` preserve downstream messages and `startsRequestSeries` unless replacement is intentional. Steering and injected context pass through the same waterfall after a later claim operation takes their next-step batch.
 
 SDK users that need replayable transcript data should consume `session/event`; `agent/*` is the live coordination API for queue/status, prompt interception, request construction, steering, continuation, and errors.
 

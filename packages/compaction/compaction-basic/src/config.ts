@@ -15,6 +15,7 @@ import type {
   ResolvedRetention,
   ResolvedTargetPolicy,
 } from './types.ts'
+import { estimateMinimumCompactionRequestBytes } from './summarizer.ts'
 
 /** Default request-pressure fraction for every routed model. */
 const DEFAULT_THRESHOLD_RATIO = 0.8
@@ -29,6 +30,9 @@ const DEFAULT_RETAIN_RATIO = 0.16
  * bounded transactions keep every summarized message represented.
  */
 export const DEFAULT_SUMMARIZATION_INPUT_BYTES = 512 * 1024
+
+/** Smallest cap that holds one minimal replay message plus the fixed instruction. */
+export const MIN_SUMMARIZER_REQUEST_BYTES = estimateMinimumCompactionRequestBytes()
 
 /** Default request-size threshold for recovering an idle stream timeout through compaction. */
 export const DEFAULT_TIMEOUT_RECOVERY_BYTES = 512 * 1024
@@ -105,12 +109,26 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   const thresholdRatio = config.thresholdRatio ?? DEFAULT_THRESHOLD_RATIO
   const retention = resolveRetention(config, { retainRatio: DEFAULT_RETAIN_RATIO })
   validateRatioRetention(thresholdRatio, retention, 'BasicCompactionConfig')
+  const maxRequestBytes = config.maxRequestBytes
+  const summarizationInputBytes = config.summarizationInputBytes
+    ?? DEFAULT_SUMMARIZATION_INPUT_BYTES
+  validateSummarizerRequestCap(
+    'BasicCompactionConfig',
+    summarizationInputBytes,
+    maxRequestBytes,
+  )
   const modelPolicies = resolveModelPolicies(config.modelPolicies)
   for (const [index, policy] of modelPolicies.entries()) {
+    const name = `BasicCompactionConfig: modelPolicies[${index}]`
     validateRatioRetention(
       policy.thresholdRatio ?? thresholdRatio,
       resolveRetention(policy, retention),
-      `BasicCompactionConfig: modelPolicies[${index}]`,
+      name,
+    )
+    validateSummarizerRequestCap(
+      name,
+      policy.summarizationInputBytes ?? summarizationInputBytes,
+      policy.maxRequestBytes ?? maxRequestBytes,
     )
   }
 
@@ -122,8 +140,8 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     maxTokens: config.maxTokens ?? 8192,
     compactionRetries: config.compactionRetries ?? 1,
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
-    ...config.maxRequestBytes === undefined ? {} : { maxRequestBytes: config.maxRequestBytes },
-    summarizationInputBytes: config.summarizationInputBytes ?? DEFAULT_SUMMARIZATION_INPUT_BYTES,
+    ...maxRequestBytes === undefined ? {} : { maxRequestBytes },
+    summarizationInputBytes,
     timeoutRecoveryBytes: config.timeoutRecoveryBytes ?? DEFAULT_TIMEOUT_RECOVERY_BYTES,
     learnedByteSafetyRatio,
     modelPolicies,
@@ -346,6 +364,28 @@ function assertNonEmptyString(name: string, value: unknown): asserts value is st
 function assertPositiveInteger(name: string, value: unknown): asserts value is number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${name} (${String(value)}) must be a positive integer`)
+  }
+}
+
+/** Reject a resolved policy whose effective summarizer request cap cannot hold one replay message. */
+function validateSummarizerRequestCap(
+  name: string,
+  summarizationInputBytes: number,
+  maxRequestBytes: number | undefined,
+): void {
+  const effectiveCap = Math.min(
+    summarizationInputBytes,
+    maxRequestBytes ?? summarizationInputBytes,
+  )
+  if (effectiveCap < MIN_SUMMARIZER_REQUEST_BYTES) {
+    const source = maxRequestBytes === undefined
+      ? `summarizationInputBytes (${summarizationInputBytes})`
+      : `min(summarizationInputBytes ${summarizationInputBytes}, maxRequestBytes ${maxRequestBytes})`
+    throw new Error(
+      `${name}: resolved summarizer request cap from ${source} is ${effectiveCap} bytes; `
+      + `it must be at least ${MIN_SUMMARIZER_REQUEST_BYTES} estimated bytes for `
+      + 'one minimal replay message plus the fixed compaction instruction',
+    )
   }
 }
 

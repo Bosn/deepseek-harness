@@ -5,6 +5,7 @@
  * @module @deepseek-ai/dsh-turn-notify-wechat
  */
 
+import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -395,7 +396,7 @@ function sendCompletion(
 /**
  * Observe top-level turn terminals and send one private WeChat notice after the
  * configured quiet period. A later turn in the same session replaces an older
- * pending notice, and teardown cancels timers before aborting sender processes.
+ * retained notice, and teardown cancels timers before aborting sender processes.
  * @param ctx - host context carrying sessions and their title projection.
  * @param config - validated sender, route-file, timing, and text-bound configuration.
  */
@@ -420,6 +421,20 @@ export function apply(ctx: Context, config: Config): void {
     pendingBySession.delete(session)
   }
 
+  const clearQueued = (session: Session): void => {
+    const queued = queuedBySession.get(session)
+    if (queued === undefined) return
+    const index = deliveryQueue.indexOf(queued)
+    assert.notEqual(index, -1, 'turn-notify-wechat: queued session must own a delivery-queue entry')
+    deliveryQueue.splice(index, 1)
+    queuedBySession.delete(session)
+  }
+
+  const clearRetained = (session: Session): void => {
+    clearPending(session)
+    clearQueued(session)
+  }
+
   const dropOldestRetained = (): void => {
     let oldest: PendingCompletion | QueuedDelivery | undefined
     for (const pending of pendingBySession.values()) {
@@ -431,9 +446,7 @@ export function apply(ctx: Context, config: Config): void {
     /* v8 ignore next -- the caller proves at least one retained delivery exists */
     if (oldest === undefined) return
     if ('message' in oldest) {
-      const index = deliveryQueue.indexOf(oldest)
-      deliveryQueue.splice(index, 1)
-      queuedBySession.delete(oldest.pending.session)
+      clearQueued(oldest.pending.session)
       ctx.logger.warn(`turn-notify-wechat: retained delivery limit reached; dropped oldest queued notification for session ${oldest.pending.session.id} turn ${oldest.pending.terminal.data.turn}`)
       return
     }
@@ -478,28 +491,26 @@ export function apply(ctx: Context, config: Config): void {
       ctx.logger.warn(`turn-notify-wechat: notification skipped for session ${pending.session.id} turn ${pending.terminal.data.turn} (session title empty)`)
       return
     }
-    const queued = queuedBySession.get(pending.session)
+    assert.equal(
+      queuedBySession.has(pending.session),
+      false,
+      'turn-notify-wechat: a pending session cannot also own a queued delivery',
+    )
     const message = completionMessage(
       title,
       pending.summary,
       pending.terminal.data.reason,
       resolved.messageMaxBytes,
     )
-    if (queued === undefined) {
-      const delivery = { pending, message, retainedAt: pending.retainedAt }
-      deliveryQueue.push(delivery)
-      queuedBySession.set(pending.session, delivery)
-    } else {
-      queued.pending = pending
-      queued.message = message
-      queued.retainedAt = pending.retainedAt
-    }
+    const delivery = { pending, message, retainedAt: pending.retainedAt }
+    deliveryQueue.push(delivery)
+    queuedBySession.set(pending.session, delivery)
     pumpDeliveries()
   }
 
   const detach = ctx.on('session/event', (session, event) => {
     if (closing || event.type !== 'turn/end' || session.header.origin === 'subagent') return
-    clearPending(session)
+    clearRetained(session)
     const source = visibleAssistantText(session, event.data.turn)
     if (source === undefined) return
     const summary = summarizeMessage(source, resolved.summaryMaxChars)

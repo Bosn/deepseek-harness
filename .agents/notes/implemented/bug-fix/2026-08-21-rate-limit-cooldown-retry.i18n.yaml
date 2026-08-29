@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-21-rate-limit-cooldown-retry.md
-2026-08-21-rate-limit-cooldown-retry.md: 15d599c0e690d75a0f6485dae104c711adab2b63
-2026-08-21-rate-limit-cooldown-retry.zh.md: 993835b386a2c7267f39fc7e23e112d5e626e467
+2026-08-21-rate-limit-cooldown-retry.md: fb9e5eaba1db0434b590e20daea32fe62cfe6b46
+2026-08-21-rate-limit-cooldown-retry.zh.md: ecec7b775ba10b248afce9a3ade4b4de78faded0

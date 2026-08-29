@@ -77,7 +77,7 @@ sequenceDiagram
 
 `dsh-compaction-basic` 在派生请求之前通过 `agent/pre-step` 处理压力，并通过 `agent/request-error` 处理语义上下文溢出、HTTP 413 或已配置的大请求超时。任一触发条件满足后，系统都会先执行可选的工具结果剪枝，再选择摘要。恢复会在失败请求所属的 turn 和 step 仍然开放时运行；只有当剪枝或摘要生成推进了 surface replacement generation 时，系统才会在原位重复请求，否则仍以原始请求错误为准。通用提供方重试会先委托给该专用修复，再决定是否重复未变化的请求。
 
-以返回的 `agent/pre-step` 决策为准；通过包装 `next()` 的监听器会保留下游消息，除非有意替换这些消息。steering（中途引导）和注入的上下文在后续的认领操作取得其下一步骤批次后，会经过同一 waterfall（瀑布式事件）。
+以返回的 `agent/pre-step` 决策为准；通过包装 `next()` 的监听器会保留下游消息与 `startsRequestSeries`，除非有意替换。steering（中途引导）和注入的上下文在后续的认领操作取得其下一步骤批次后，会经过同一 waterfall（瀑布式事件）。
 
 需要可回放 transcript（文本记录）数据的 SDK 用户应当消费 `session/event`；`agent/*` 是用于队列与状态、提示词拦截、请求构造、steering、继续执行和错误处理的实时协调接口。
 

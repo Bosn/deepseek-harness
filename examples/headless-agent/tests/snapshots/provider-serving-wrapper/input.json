@@ -1,8 +1,0 @@
-{
-  "steps": [
-    {
-      "op": "prompt",
-      "text": "retry through the gateway serving wrapper"
-    }
-  ]
-}

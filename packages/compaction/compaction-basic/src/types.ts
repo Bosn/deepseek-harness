@@ -28,14 +28,17 @@ export interface CompactionPolicyConfig {
    * Optional bound on the estimated wire-byte size of the routed model request.
    * Gateways answer oversized bodies with HTTP 413, which token pressure on a
    * mega-context model can never predict; when set, pressure compaction also
-   * fires at this byte bound. Unset by default (token pressure only).
+   * fires at this byte bound. It also limits summarizer requests, so the
+   * resolved value must hold one minimal replay message plus the fixed
+   * compaction instruction. Unset by default (token pressure only).
    */
   maxRequestBytes?: number
   /**
    * Optional cap on each complete summarizer request's estimated wire bytes.
    * Oversized ranges use balanced hierarchical compaction transactions so
-   * every summarized message stays within a bounded request. Defaults to
-   * `512 * 1024`.
+   * every summarized message stays within a bounded request. After exact-model
+   * inheritance, its minimum with `maxRequestBytes` must hold one minimal
+   * replay message plus the fixed compaction instruction. Defaults to `512 * 1024`.
    */
   summarizationInputBytes?: number
   /**

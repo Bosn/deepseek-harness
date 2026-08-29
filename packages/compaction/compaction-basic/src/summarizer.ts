@@ -81,6 +81,22 @@ export function estimateCompactionInstructionBytes(): number {
   return estimateMessageBytes(COMPACTION_INSTRUCTION_MESSAGE)
 }
 
+const MINIMUM_REPLAY_MESSAGE = createUserMessage({
+  content: [],
+  source: { kind: 'user' },
+})
+
+/**
+ * Estimated wire bytes of the smallest complete compaction request. A
+ * compaction transaction always replays at least one message before appending
+ * the fixed instruction; an absent system prompt and tool catalog contribute
+ * no header bytes.
+ * @returns minimum request estimate under the same estimator used at dispatch.
+ */
+export function estimateMinimumCompactionRequestBytes(): number {
+  return estimateMessageBytes(MINIMUM_REPLAY_MESSAGE) + estimateCompactionInstructionBytes()
+}
+
 /** Framing that makes the replacement user message established context. */
 const CHECKPOINT_PREAMBLE =
   'This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.'

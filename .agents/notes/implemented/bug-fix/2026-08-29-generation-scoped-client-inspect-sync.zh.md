@@ -10,10 +10,10 @@ Web Client 会在第一次 Connection 握手尚未完成时登记 Cordis inspect
 
 ## 决策
 
-- `cordis-client-runner` 在包注入元数据中声明 Client Connection 包，并在插件注入中声明 `connection` 服务。runner 以按 generation 生效的 `hostDescription` source 作为 Connection ready 权威；`connection/reset` 保留为兼容通知，同一 generation 的两类通知以 description 对象身份去重。
-- 第一次握手前的 provider 登记只改变页面本地 registry，并把完整 manifest 标为 dirty。Connection generation ready 后发送一份完整快照；即使 provider 集合未变也会重发，因为 Host mirror 属于上一进程 generation。
+- `cordis-client-runner` 在包注入元数据中声明 Client Connection 包，并在插件注入中声明 `connection` 服务。runner 订阅 `ctx.connection.generation` 并以此作为 ready 权威；其单调递增的 generation id 会对观测去重，而随后发出的 `connection/reset` 通知仍供缓存消费方使用，不会再触发一次 manifest 同步。
+- 第一次握手前的 provider 登记只改变页面本地 registry，并把完整 manifest 标为 dirty。每个 ready Connection generation 都会排队一份完整基线快照；即使 provider 集合未变也会重发，因为 Host mirror 属于上一进程 generation。
 - Connection 丢失会使排队 continuation 失效并取消进行中的 inspect query。query resolution 会捕获所属 generation；即使 provider 忽略 `AbortSignal`，也绝不会通过后来的 Remote carrier 应答。
-- Manifest 写入只在同一个 Connection generation 内串行。generation 丢失和 reset 会建立独立同步队列，因此旧 carrier 上永不 settle 的 promise 不能阻止替代 Connection 接收快照。当前 generation 的失败写入保持 dirty，等待后续 provider 变化或 generation reset，而不会进入无界重试循环。
+- Manifest 写入只在同一个 Connection generation 内串行。generation 丢失和替换会建立独立同步队列，因此旧 carrier 上永不 settle 的 promise 不能阻止替代 Connection 接收快照。当前 generation 的失败写入保持 dirty，等待后续 provider 变化或 ready generation，而不会进入无界重试循环。
 - 页面 dispose 会先撤销 description listener、使排队工作失效并取消进行中的 query，然后 provider effect 再依次退场。
 
 ## 已考虑的其他方案
@@ -24,7 +24,7 @@ Web Client 会在第一次 Connection 握手尚未完成时登记 Cordis inspect
 
 **跨重连保留一条同步 promise chain。** 拒绝：某一 generation 消失后，其传输 promise 仍可能保持 pending，从而阻止之后所有 generation 发布。
 
-**只监听 `connection/reset`。** 拒绝：该事件不通知 generation 丢失，而在事件之后才挂载的 runner 需要立刻读取当前 `hostDescription` 快照。
+**只使用 `connection/reset`。** 拒绝：该事件不通知 generation 丢失，而在事件之后才挂载的 runner 需要立刻读取当前 generation 快照。
 
 ## 验证
 

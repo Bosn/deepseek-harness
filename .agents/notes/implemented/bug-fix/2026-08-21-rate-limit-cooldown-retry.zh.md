@@ -31,5 +31,5 @@ Status: implemented
 
 - 在已开启路由上遇到带 quota 措辞的 429 限流时，会话会记录三条不进入表层的 `llm/retry` 事件（`delayMs` 默认 60 000／180 000／300 000），只在第四次被拒后以原始 429 结束回合；无论 normal 预算为五次，RATE_LIMIT 的每轮重试都不超过默认三次冷却尝试。
 - 非 429 状态以及未开启路由上的 quota 措辞 429 都保持终态 `QUOTA`，其中 OpenAI 默认如此。部署可以缩短、重排或禁用 RATE_LIMIT 调度（`rateLimitDelaysMs: []`），不影响其他 code。
-- 已解析策略形状与规范 `policyKey` 都新增了调度字段，因此同一 PR 更新了已提交的回放 fixture 与策略快照：`examples/acp-agent` 的重试 overlay 与 `examples/headless-agent` 的重试 fixture 都固定了短调度，其记录的 `policyKey` 字符串嵌入了固定数组。
+- 已解析策略字段与规范 `policyKey` 包含该调度，因此统一 `snapshots/session` 重试场景与 `apps/cli/tests/profiles/headless` 的 provider-retry fixture 都固定了短调度；其记录的 `policyKey` 字符串嵌入了固定数组。
 - `llm-pi-ai` 保持禁用 SDK 重试，并使用相同的已解析冷却调度。由于 SDK 不会向其 hook 暴露非 2xx 响应头，这些路由只使用配置的冷却时间，不带提供方 `Retry-After` 下限或请求 ID 事实。
