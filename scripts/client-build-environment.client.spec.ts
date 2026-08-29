@@ -6,6 +6,7 @@ import yaml from 'js-yaml'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   assertClientBuildEnvironment,
+  clientArtifactPaths,
   clientBuildEnvironmentDefines,
   clientBuildProcessEnvironment,
   officialClientBuildEnvironment,
@@ -52,6 +53,7 @@ function buildFixture(environment: Record<string, string>): string {
   roots.push(fixtureRoot)
   write(join(fixtureRoot, 'apps/web/dist/index.html'), '<main></main>')
   write(join(fixtureRoot, 'packages/client/example/lib/client.js'), 'module.exports = {}\n')
+  write(join(fixtureRoot, 'packages/client/example/lib/client.js.map'), '{}\n')
   writeClientBuildRecord(fixtureRoot, environment)
   return fixtureRoot
 }
@@ -272,6 +274,21 @@ describe('client build environment', () => {
     expect(readClientBuildRecord(official, officialEnvironment).environment).toEqual(officialEnvironment)
     expect(() => { readClientBuildRecord(defaultBuild, officialEnvironment) }).toThrow(/DSH_CLIENT_/)
     expect(() => { readClientBuildRecord(join(defaultBuild, 'missing')) }).toThrow(/record.*missing/)
+
+    expect(clientArtifactPaths(official)).toEqual([
+      'apps/web/dist/index.html',
+      'packages/client/example/lib/client.js',
+      'packages/client/example/lib/client.js.map',
+    ])
+    write(join(official, 'packages/client/example/lib/index.js'), 'not a client artifact\n')
+    expect(clientArtifactPaths(official)).toHaveLength(3)
+
+    const addedArtifact = join(official, 'apps/web/dist/assets/new-hash.js')
+    write(addedArtifact, 'new output\n')
+    expect(clientArtifactPaths(official)).toContain('apps/web/dist/assets/new-hash.js')
+    expect(() => { readClientBuildRecord(official) }).toThrow(/artifacts differ/)
+    rmSync(addedArtifact)
+    expect(() => { readClientBuildRecord(official) }).not.toThrow()
 
     write(join(official, 'apps/web/dist/index.html'), '<main>changed</main>')
     expect(() => { readClientBuildRecord(official) }).toThrow(/artifacts differ/)
