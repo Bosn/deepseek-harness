@@ -30,9 +30,10 @@ const DEFAULT_SUMMARY_MAX_CHARS = 100
 const DEFAULT_MESSAGE_MAX_BYTES = 8 * 1024
 const DEFAULT_SETTLE_DELAY_MS = 5_000
 const DEFAULT_MAX_CONCURRENT_DELIVERIES = 2
-const DEFAULT_MAX_QUEUED_DELIVERIES = 64
+const DEFAULT_MAX_RETAINED_DELIVERIES = 64
 const MAX_CONFIGURED_MESSAGE_BYTES = 16 * 1024
-const MAX_CONFIGURED_QUEUED_DELIVERIES = 256
+const MAX_CONFIGURED_RETAINED_DELIVERIES = 256
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_RECEIPT_BYTES = 64 * 1024
 const PROCESS_ARGUMENT_PATTERN = /^[^\0]+$/u
 const CHARACTER_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
@@ -61,8 +62,8 @@ export interface Config {
   settleDelayMs?: number
   /** Maximum number of notification subprocesses allowed to run at once. */
   maxConcurrentDeliveries?: number
-  /** Maximum number of deliveries retained while all subprocess slots are occupied. */
-  maxQueuedDeliveries?: number
+  /** Maximum number of pending and queued deliveries retained across sessions. */
+  maxRetainedDeliveries?: number
 }
 
 /** Schemastery validation and supported deployment defaults. */
@@ -72,13 +73,13 @@ export const Config: z<Config> = z.object({
   accountKey: z.string().default(DEFAULT_ACCOUNT_KEY),
   targetKey: z.string().default(DEFAULT_TARGET_KEY),
   channel: z.string().pattern(PROCESS_ARGUMENT_PATTERN).default(DEFAULT_CHANNEL),
-  timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
+  timeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(DEFAULT_TIMEOUT_MS),
   titleMaxChars: z.number().step(1).min(1).default(DEFAULT_TITLE_MAX_CHARS),
   summaryMaxChars: z.number().step(1).min(1).default(DEFAULT_SUMMARY_MAX_CHARS),
   messageMaxBytes: z.number().step(1).min(256).max(MAX_CONFIGURED_MESSAGE_BYTES).default(DEFAULT_MESSAGE_MAX_BYTES),
-  settleDelayMs: z.number().step(1).min(0).default(DEFAULT_SETTLE_DELAY_MS),
+  settleDelayMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS).default(DEFAULT_SETTLE_DELAY_MS),
   maxConcurrentDeliveries: z.number().step(1).min(1).default(DEFAULT_MAX_CONCURRENT_DELIVERIES),
-  maxQueuedDeliveries: z.number().step(1).min(1).max(MAX_CONFIGURED_QUEUED_DELIVERIES).default(DEFAULT_MAX_QUEUED_DELIVERIES),
+  maxRetainedDeliveries: z.number().step(1).min(1).max(MAX_CONFIGURED_RETAINED_DELIVERIES).default(DEFAULT_MAX_RETAINED_DELIVERIES),
 })
 
 type TurnEndEvent = Extract<SessionEvent, { type: 'turn/end' }>
@@ -101,11 +102,13 @@ interface PendingCompletion {
   terminal: TurnEndEvent
   summary: string
   timer: ReturnType<typeof setTimeout>
+  retainedAt: number
 }
 
 interface QueuedDelivery {
   pending: PendingCompletion
   message: string
+  retainedAt: number
 }
 
 function parseConstants(text: string): Map<string, string> {
@@ -408,12 +411,34 @@ export function apply(ctx: Context, config: Config): void {
   const queuedBySession = new Map<Session, QueuedDelivery>()
   const pendingBySession = new Map<Session, PendingCompletion>()
   let activeDeliveries = 0
+  let nextRetentionOrder = 0
   let closing = false
 
   const clearPending = (session: Session): void => {
     const previous = pendingBySession.get(session)
     if (previous !== undefined) clearTimeout(previous.timer)
     pendingBySession.delete(session)
+  }
+
+  const dropOldestRetained = (): void => {
+    let oldest: PendingCompletion | QueuedDelivery | undefined
+    for (const pending of pendingBySession.values()) {
+      if (oldest === undefined || pending.retainedAt < oldest.retainedAt) oldest = pending
+    }
+    for (const delivery of deliveryQueue) {
+      if (oldest === undefined || delivery.retainedAt < oldest.retainedAt) oldest = delivery
+    }
+    /* v8 ignore next -- the caller proves at least one retained delivery exists */
+    if (oldest === undefined) return
+    if ('message' in oldest) {
+      const index = deliveryQueue.indexOf(oldest)
+      deliveryQueue.splice(index, 1)
+      queuedBySession.delete(oldest.pending.session)
+      ctx.logger.warn(`turn-notify-wechat: retained delivery limit reached; dropped oldest queued notification for session ${oldest.pending.session.id} turn ${oldest.pending.terminal.data.turn}`)
+      return
+    }
+    clearPending(oldest.session)
+    ctx.logger.warn(`turn-notify-wechat: retained delivery limit reached; dropped oldest pending notification for session ${oldest.session.id} turn ${oldest.terminal.data.turn}`)
   }
 
   const pumpDeliveries = (): void => {
@@ -461,17 +486,13 @@ export function apply(ctx: Context, config: Config): void {
       resolved.messageMaxBytes,
     )
     if (queued === undefined) {
-      if (deliveryQueue.length >= resolved.maxQueuedDeliveries) {
-        const dropped = deliveryQueue.shift() as QueuedDelivery
-        queuedBySession.delete(dropped.pending.session)
-        ctx.logger.warn(`turn-notify-wechat: delivery queue full; dropped oldest notification for session ${dropped.pending.session.id} turn ${dropped.pending.terminal.data.turn}`)
-      }
-      const delivery = { pending, message }
+      const delivery = { pending, message, retainedAt: pending.retainedAt }
       deliveryQueue.push(delivery)
       queuedBySession.set(pending.session, delivery)
     } else {
       queued.pending = pending
       queued.message = message
+      queued.retainedAt = pending.retainedAt
     }
     pumpDeliveries()
   }
@@ -483,11 +504,16 @@ export function apply(ctx: Context, config: Config): void {
     if (source === undefined) return
     const summary = summarizeMessage(source, resolved.summaryMaxChars)
     if (summary.length === 0) return
+    if (pendingBySession.size + deliveryQueue.length >= resolved.maxRetainedDeliveries) {
+      dropOldestRetained()
+    }
+    nextRetentionOrder += 1
     const pending: PendingCompletion = {
       session,
       terminal: event,
       summary,
       timer: setTimeout(() => { dispatch(pending) }, resolved.settleDelayMs),
+      retainedAt: nextRetentionOrder,
     }
     pendingBySession.set(session, pending)
   })

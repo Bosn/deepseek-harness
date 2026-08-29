@@ -16,9 +16,9 @@ DSH 用户在没有观察 Web session 时，需要收到私人完成信号。进
 
 每个符合条件的终态会选择 turn number 与完成 turn 完全一致的最后一条 `assistant/message`，并只拼接其中的可见 text block。插件沿用 Codex 完成摘要的清理方式和可配置 Unicode grapheme cluster 上限，然后对完整组装的 channel message 施加 UTF-8 字节上限，且不会拆开 grapheme cluster。reasoning 与 tool-call block 绝不会进入 channel payload。没有可见 assistant 文本的终态保持静默。
 
-每个顶层 session 只保留一条 pending completion。经过可配置的五秒 settle delay 后，插件解析当前 `ctx.sessionTitle` 标题、施加上限，并发送 `DSH任务 [<status>]：<title>\n<summary>`。较新的终态 turn 会替换较旧的 pending completion。缺少标题时只记录不含 payload 的 warning，不发送无法识别的通知。
+每个顶层 session 只保留一条 pending completion。经过可配置的五秒 settle delay 后，插件解析当前 `ctx.sessionTitle` 标题、施加上限，并发送 `DSH任务 [<status>]：<title>\n<summary>`。较新的终态 turn 会替换较旧的 pending completion。settle delay 与子进程 timeout 都不能超过 Node 支持的定时器上限。缺少标题时只记录不含 payload 的 warning，不发送无法识别的通知。
 
-插件加载时从部署方管理的 constants 文件读取 account 和 target。它不经过 shell 启动配置的 OpenClaw wrapper，只传递 allowlist 环境，校验包含配置 channel 与 message id 的 sent 回执，并把交付失败转换为不含 payload 的 warning。幂等键绑定 session id 与精确终态 turn、sequence、timestamp 和 reason。可配置上限会分别约束同时运行的交付子进程与跨 session 保留的队列。同一 session 的较新排队 turn 会替换旧通知；队列溢出时会丢弃最旧的排队通知、保留最新完成结果，并生成不含 payload 的 warning。dispose 会先移除 observer、取消 pending timer、丢弃排队交付，再中止并等待仍在运行的 channel 子进程。
+插件加载时从部署方管理的 constants 文件读取 account 和 target。它不经过 shell 启动配置的 OpenClaw wrapper，只传递 allowlist 环境，校验包含配置 channel 与 message id 的 sent 回执，并把交付失败转换为不含 payload 的 warning。幂等键绑定 session id 与精确终态 turn、sequence、timestamp 和 reason。可配置上限会分别约束同时运行的交付子进程，以及跨 session 保留的全部 pending 与排队交付。同一 session 的较新排队 turn 会替换旧通知；保留项溢出时会丢弃全局最旧的 pending 或排队通知、保留最新完成结果，并生成不含 payload 的 warning。dispose 会先移除 observer、取消 pending timer、丢弃排队交付，再中止并等待仍在运行的 channel 子进程。
 
 这个 package 不进入 shipped bundle。部署方通过 host profile 显式启用它，从而保留 upstream default，也避免让 agent preset 拥有进程级交付。
 
@@ -38,6 +38,6 @@ DSH 用户在没有观察 Web session 时，需要收到私人完成信号。进
 
 - 一个配置好的 host mount 会观察进程内的顶层终态 turn，不报告内部 background job 或 subagent work。
 - 通知携带有界 session 任务标题与精确 turn 的最后可见 assistant 摘要；完整消息受到字节上限约束，缺少任一值的 turn 保持静默。
-- 同时运行的外部子进程不会超过配置上限，保留队列也不会超过自身的配置上限。coalescing 后每个实际交付的终态仍会调用一个 sender，队列溢出时优先保留近期完成结果，sender 失败不会改变 durable turn result。
+- 同时运行的外部子进程不会超过配置上限，pending 与排队交付的保留总数也不会超过自身的配置上限。coalescing 后每个实际交付的终态仍会调用一个 sender，保留项溢出时优先保留近期完成结果，sender 失败不会改变 durable turn result。
 - 由于 package 没有自有 durable outbox，进程在获得回执前退出可能丢失通知。稳定幂等键只会在同一次 attempt 多次到达 OpenClaw 时防止重复交付。
 - Real Loader composition coverage 会固定 session/title mount、精确 turn 选择、有界展示、route 参数、回执校验、稳定 key 格式和 fail-open turn-result 行为。

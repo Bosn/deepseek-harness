@@ -3068,12 +3068,12 @@ export interface Config {
   settleDelayMs?: number
   /** Maximum number of notification subprocesses allowed to run at once. */
   maxConcurrentDeliveries?: number
-  /** Maximum number of deliveries retained while all subprocess slots are occupied. */
-  maxQueuedDeliveries?: number
+  /** Maximum number of pending and queued deliveries retained across sessions. */
+  maxRetainedDeliveries?: number
 }
 ```
 
-来源：[`packages/session/turn-notify-wechat/src/index.ts:41`](../packages/session/turn-notify-wechat/src/index.ts)
+来源：[`packages/session/turn-notify-wechat/src/index.ts:42`](../packages/session/turn-notify-wechat/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 

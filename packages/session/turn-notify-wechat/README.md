@@ -19,7 +19,7 @@ The label follows the durable terminal reason: `completed` → `完成`, `aborte
 
 The plugin derives a stable SHA-256 idempotency key from the session id and the exact `turn/end` turn, sequence, timestamp, and reason, then invokes the configured OpenClaw wrapper without a shell. It accepts only a non-dry-run JSON receipt with the configured channel, a message id, and either the OpenClaw CLI `action=send` contract or an explicit sent/delivered or `ok` result.
 
-The subprocess receives an allowlisted environment rather than the ambient DSH environment. A validated concurrency limit bounds live delivery subprocesses, and a separate queue limit bounds retained cross-session deliveries. A newer queued turn from the same session replaces that session's older queued notice; when the queue is full, the oldest queued notice is dropped so the newest completion is retained, and the plugin emits a payload-free warning. Delivery errors become payload-free warnings and never change the durable turn result. Plugin disposal detaches the observer, cancels pending timers, drops queued deliveries, aborts in-flight sends, and waits for them to settle.
+The subprocess receives an allowlisted environment rather than the ambient DSH environment. A validated concurrency limit bounds live delivery subprocesses, and a separate retention limit bounds pending settle timers plus queued deliveries across sessions. A newer queued turn from the same session replaces that session's older queued notice; when retention is full, the oldest pending or queued notice is dropped so the newest completion is retained, and the plugin emits a payload-free warning. Delivery errors become payload-free warnings and never change the durable turn result. Plugin disposal detaches the observer, cancels pending timers, drops queued deliveries, aborts in-flight sends, and waits for them to settle.
 
 ## Config
 
@@ -30,13 +30,13 @@ The subprocess receives an allowlisted environment rather than the ambient DSH e
 | `accountKey` | `WEIXIN_ACCOUNT_ID` | Route-file key containing the WeChat account id |
 | `targetKey` | `WEIXIN_BOSN_TARGET` | Route-file key containing the private owner target |
 | `channel` | `openclaw-weixin` | Non-empty NUL-free OpenClaw channel passed to `message send` |
-| `timeoutMs` | `45000` | Positive integer subprocess timeout |
+| `timeoutMs` | `45000` | Positive integer subprocess timeout, at most `2147483647` ms |
 | `titleMaxChars` | `80` | Positive Unicode character bound for the session title |
 | `summaryMaxChars` | `100` | Positive Unicode character bound for the assistant summary |
 | `messageMaxBytes` | `8192` | Complete notice UTF-8 byte bound from `256` through `16384` |
-| `settleDelayMs` | `5000` | Non-negative delay before title resolution and delivery |
+| `settleDelayMs` | `5000` | Delay before title resolution and delivery, from `0` through `2147483647` ms |
 | `maxConcurrentDeliveries` | `2` | Positive integer cap on simultaneous delivery subprocesses |
-| `maxQueuedDeliveries` | `64` | Retained delivery cap from `1` through `256`; overflow drops the oldest queued notice |
+| `maxRetainedDeliveries` | `64` | Pending plus queued delivery cap from `1` through `256`; overflow drops the oldest retained notice |
 
 A non-absolute `command`, missing route keys, or an unreadable route file fail plugin load. The live account and target belong in the deployment-owned route file, not repository config.
 

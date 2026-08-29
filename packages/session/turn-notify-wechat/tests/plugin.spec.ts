@@ -155,7 +155,7 @@ function applyAt(ctx: Context, routeFile: string, overrides: Partial<Config> = {
     messageMaxBytes: 8192,
     settleDelayMs: 5000,
     maxConcurrentDeliveries: 2,
-    maxQueuedDeliveries: 64,
+    maxRetainedDeliveries: 64,
     ...overrides,
   })
 }
@@ -314,15 +314,26 @@ describe('turn-notify-wechat plugin', () => {
     }
 
     const base = { command: '/owner/bin/ocw', routeFile: validRouteFile }
-    expect(ConfigSchema(base)).toMatchObject({ messageMaxBytes: 8192, maxQueuedDeliveries: 64 })
-    for (const maxQueuedDeliveries of [0, 1.5, 257]) {
-      expect(() => ConfigSchema({ ...base, maxQueuedDeliveries })).toThrow()
+    expect(ConfigSchema(base)).toMatchObject({ messageMaxBytes: 8192, maxRetainedDeliveries: 64 })
+    for (const maxRetainedDeliveries of [0, 1.5, 257]) {
+      expect(() => ConfigSchema({ ...base, maxRetainedDeliveries })).toThrow()
     }
     for (const messageMaxBytes of [255, 256.5, 16_385]) {
       expect(() => ConfigSchema({ ...base, messageMaxBytes })).toThrow()
     }
     for (const channel of ['', 'openclaw\0weixin']) {
       expect(() => ConfigSchema({ ...base, channel })).toThrow()
+    }
+    expect(ConfigSchema({
+      ...base,
+      timeoutMs: 2_147_483_647,
+      settleDelayMs: 2_147_483_647,
+    })).toMatchObject({ timeoutMs: 2_147_483_647, settleDelayMs: 2_147_483_647 })
+    for (const timeoutMs of [0, 1.5, 2_147_483_648]) {
+      expect(() => ConfigSchema({ ...base, timeoutMs })).toThrow()
+    }
+    for (const settleDelayMs of [-1, 1.5, 2_147_483_648]) {
+      expect(() => ConfigSchema({ ...base, settleDelayMs })).toThrow()
     }
   })
 
@@ -565,34 +576,71 @@ describe('turn-notify-wechat plugin', () => {
     expect(mounted.warn).not.toHaveBeenCalled()
   })
 
-  it('bounds the cross-session queue and drops its oldest notice on overflow', async () => {
-    const mounted = await mount(DEFAULT_ROUTE, {
+  it('bounds pending and queued deliveries across sessions and drops the oldest retained notice', async () => {
+    const pendingMounted = await mount(DEFAULT_ROUTE, {
       maxConcurrentDeliveries: 1,
-      maxQueuedDeliveries: 2,
+      maxRetainedDeliveries: 2,
     })
-    for (let index = 1; index <= 4; index += 1) {
+    const pendingSessions: Session[] = []
+    for (let index = 1; index <= 3; index += 1) {
       const session = createSession()
-      mounted.titles.set(session, `队列任务 ${index}`)
-      emitTurn(mounted, session, 1, [{ type: 'text', text: `私密摘要 ${index}` }])
+      pendingSessions.push(session)
+      pendingMounted.titles.set(session, `待发送任务 ${index}`)
+      emitTurn(pendingMounted, session, 1, [{ type: 'text', text: `待发送私密摘要 ${index}` }])
     }
+    expect(pendingMounted.warn).toHaveBeenCalledOnce()
+    expect(pendingMounted.warn).toHaveBeenCalledWith(expect.stringContaining(
+      `dropped oldest pending notification for session ${pendingSessions[0]?.id} turn 1`,
+    ))
+    expect(pendingMounted.warn.mock.calls.flat().join('\n')).not.toContain('待发送私密摘要 1')
 
     vi.advanceTimersByTime(5000)
     expect(invocations).toHaveLength(1)
-    expect(invocationValue(invocations[0] as Invocation, '--message')).toContain('\n私密摘要 1')
-    expect(mounted.warn).toHaveBeenCalledOnce()
-    expect(mounted.warn).toHaveBeenCalledWith(expect.stringContaining(
-      'delivery queue full; dropped oldest notification for session session-2 turn 1',
-    ))
-    expect(mounted.warn.mock.calls.flat().join('\n')).not.toContain('私密摘要 2')
+    expect(invocationValue(invocations[0] as Invocation, '--message')).toContain('\n待发送私密摘要 2')
 
     succeed(invocations[0] as Invocation)
     await vi.runAllTimersAsync()
     expect(invocations).toHaveLength(2)
-    expect(invocationValue(invocations[1] as Invocation, '--message')).toContain('\n私密摘要 3')
+    expect(invocationValue(invocations[1] as Invocation, '--message')).toContain('\n待发送私密摘要 3')
+    succeed(invocations[1] as Invocation)
+    await vi.runAllTimersAsync()
+
+    invocations = []
+    const queuedMounted = await mount(DEFAULT_ROUTE, {
+      maxConcurrentDeliveries: 1,
+      maxRetainedDeliveries: 2,
+    })
+    const active = createSession()
+    queuedMounted.titles.set(active, '占用发送槽')
+    emitTurn(queuedMounted, active, 1, [{ type: 'text', text: '占用中' }])
+    vi.advanceTimersByTime(5000)
+
+    const queuedOldest = createSession()
+    queuedMounted.titles.set(queuedOldest, '最旧队列任务')
+    emitTurn(queuedMounted, queuedOldest, 1, [{ type: 'text', text: '最旧队列私密摘要' }])
+    const queuedNext = createSession()
+    queuedMounted.titles.set(queuedNext, '后续队列任务')
+    emitTurn(queuedMounted, queuedNext, 1, [{ type: 'text', text: '后续队列摘要' }])
+    vi.advanceTimersByTime(5000)
+
+    const newest = createSession()
+    queuedMounted.titles.set(newest, '最新任务')
+    emitTurn(queuedMounted, newest, 1, [{ type: 'text', text: '最新摘要' }])
+    expect(queuedMounted.warn).toHaveBeenCalledOnce()
+    expect(queuedMounted.warn).toHaveBeenCalledWith(expect.stringContaining(
+      `dropped oldest queued notification for session ${queuedOldest.id} turn 1`,
+    ))
+    expect(queuedMounted.warn.mock.calls.flat().join('\n')).not.toContain('最旧队列私密摘要')
+
+    vi.advanceTimersByTime(5000)
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(2)
+    expect(invocationValue(invocations[1] as Invocation, '--message')).toContain('\n后续队列摘要')
     succeed(invocations[1] as Invocation)
     await vi.runAllTimersAsync()
     expect(invocations).toHaveLength(3)
-    expect(invocationValue(invocations[2] as Invocation, '--message')).toContain('\n私密摘要 4')
+    expect(invocationValue(invocations[2] as Invocation, '--message')).toContain('\n最新摘要')
     succeed(invocations[2] as Invocation)
     await vi.runAllTimersAsync()
   })
