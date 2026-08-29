@@ -18,7 +18,7 @@ const characterSegmenter = new Intl.Segmenter(undefined, { granularity: 'graphem
 
 vi.mock('node:child_process', () => ({ execFile: execFileMock }))
 
-import { apply, type Config } from '../src/index.ts'
+import { apply, Config as ConfigSchema, type Config } from '../src/index.ts'
 import * as Invariant from '../src/invariant.ts'
 
 type SessionEventListener = (session: Session, event: SessionEvent) => void
@@ -152,8 +152,10 @@ function applyAt(ctx: Context, routeFile: string, overrides: Partial<Config> = {
     timeoutMs: 1000,
     titleMaxChars: 80,
     summaryMaxChars: 100,
+    messageMaxBytes: 8192,
     settleDelayMs: 5000,
     maxConcurrentDeliveries: 2,
+    maxQueuedDeliveries: 64,
     ...overrides,
   })
 }
@@ -310,6 +312,15 @@ describe('turn-notify-wechat plugin', () => {
       const harness = contextHarness()
       expect(() => { applyAt(harness.ctx, routeFile) }).toThrow(expected)
     }
+
+    const base = { command: '/owner/bin/ocw', routeFile: validRouteFile }
+    expect(ConfigSchema(base)).toMatchObject({ messageMaxBytes: 8192, maxQueuedDeliveries: 64 })
+    for (const maxQueuedDeliveries of [0, 1.5, 257]) {
+      expect(() => ConfigSchema({ ...base, maxQueuedDeliveries })).toThrow()
+    }
+    for (const messageMaxBytes of [255, 256.5, 16_385]) {
+      expect(() => ConfigSchema({ ...base, messageMaxBytes })).toThrow()
+    }
   })
 
   it('cancels a pending settle timer during disposal', async () => {
@@ -407,6 +418,44 @@ describe('turn-notify-wechat plugin', () => {
     vi.advanceTimersByTime(5000)
     expect(invocationValue(invocations[0] as Invocation, '--message'))
       .toBe('DSH任务 [完成]：任务\n完成')
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+  })
+
+  it('bounds the assembled notice by UTF-8 bytes without truncating an exact-limit message', async () => {
+    const limit = 256
+    const oversized = await mount(DEFAULT_ROUTE, {
+      summaryMaxChars: 1,
+      messageMaxBytes: limit,
+    })
+    const oversizedSession = createSession()
+    oversized.titles.set(oversizedSession, '单字素')
+    emitTurn(oversized, oversizedSession, 1, [{
+      type: 'text', text: `a${'\u0301'.repeat(2_000)}`,
+    }])
+    vi.advanceTimersByTime(5000)
+    const bounded = invocationValue(invocations[0] as Invocation, '--message')
+    expect(Buffer.byteLength(bounded, 'utf8')).toBeLessThanOrEqual(limit)
+    expect(bounded).toMatch(/^DSH任务 \[完成\]：单字素\n/u)
+    expect(bounded).toBe('DSH任务 [完成]：单字素\n…')
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+
+    invocations = []
+    const exact = await mount(DEFAULT_ROUTE, {
+      summaryMaxChars: 300,
+      messageMaxBytes: limit,
+    })
+    const exactSession = createSession()
+    exact.titles.set(exactSession, '字')
+    const prefix = 'DSH任务 [完成]：字\n'
+    const remaining = limit - Buffer.byteLength(prefix, 'utf8')
+    const exactSummary = `${'界'.repeat(Math.floor(remaining / 3))}${'x'.repeat(remaining % 3)}`
+    emitTurn(exact, exactSession, 1, [{ type: 'text', text: exactSummary }])
+    vi.advanceTimersByTime(5000)
+    const exactMessage = invocationValue(invocations[0] as Invocation, '--message')
+    expect(Buffer.byteLength(exactMessage, 'utf8')).toBe(limit)
+    expect(exactMessage).toBe(`${prefix}${exactSummary}`)
     succeed(invocations[0] as Invocation)
     await vi.runAllTimersAsync()
   })
@@ -511,6 +560,38 @@ describe('turn-notify-wechat plugin', () => {
     succeed(invocations[3] as Invocation)
     await vi.runAllTimersAsync()
     expect(mounted.warn).not.toHaveBeenCalled()
+  })
+
+  it('bounds the cross-session queue and drops its oldest notice on overflow', async () => {
+    const mounted = await mount(DEFAULT_ROUTE, {
+      maxConcurrentDeliveries: 1,
+      maxQueuedDeliveries: 2,
+    })
+    for (let index = 1; index <= 4; index += 1) {
+      const session = createSession()
+      mounted.titles.set(session, `队列任务 ${index}`)
+      emitTurn(mounted, session, 1, [{ type: 'text', text: `私密摘要 ${index}` }])
+    }
+
+    vi.advanceTimersByTime(5000)
+    expect(invocations).toHaveLength(1)
+    expect(invocationValue(invocations[0] as Invocation, '--message')).toContain('\n私密摘要 1')
+    expect(mounted.warn).toHaveBeenCalledOnce()
+    expect(mounted.warn).toHaveBeenCalledWith(expect.stringContaining(
+      'delivery queue full; dropped oldest notification for session session-2 turn 1',
+    ))
+    expect(mounted.warn.mock.calls.flat().join('\n')).not.toContain('私密摘要 2')
+
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(2)
+    expect(invocationValue(invocations[1] as Invocation, '--message')).toContain('\n私密摘要 3')
+    succeed(invocations[1] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(3)
+    expect(invocationValue(invocations[2] as Invocation, '--message')).toContain('\n私密摘要 4')
+    succeed(invocations[2] as Invocation)
+    await vi.runAllTimersAsync()
   })
 
   it('replaces a queued notice for the same session and drops queued work on teardown', async () => {

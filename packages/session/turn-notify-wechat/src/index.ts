@@ -27,8 +27,12 @@ const DEFAULT_TARGET_KEY = 'WEIXIN_BOSN_TARGET'
 const DEFAULT_TIMEOUT_MS = 45_000
 const DEFAULT_TITLE_MAX_CHARS = 80
 const DEFAULT_SUMMARY_MAX_CHARS = 100
+const DEFAULT_MESSAGE_MAX_BYTES = 8 * 1024
 const DEFAULT_SETTLE_DELAY_MS = 5_000
 const DEFAULT_MAX_CONCURRENT_DELIVERIES = 2
+const DEFAULT_MAX_QUEUED_DELIVERIES = 64
+const MAX_CONFIGURED_MESSAGE_BYTES = 16 * 1024
+const MAX_CONFIGURED_QUEUED_DELIVERIES = 256
 const MAX_RECEIPT_BYTES = 64 * 1024
 const CHARACTER_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
@@ -50,10 +54,14 @@ export interface Config {
   titleMaxChars?: number
   /** Maximum Unicode characters retained from the final assistant message. */
   summaryMaxChars?: number
+  /** Maximum UTF-8 bytes retained from the assembled channel message. */
+  messageMaxBytes?: number
   /** Quiet time before title resolution and delivery; a newer turn replaces the pending notice. */
   settleDelayMs?: number
   /** Maximum number of notification subprocesses allowed to run at once. */
   maxConcurrentDeliveries?: number
+  /** Maximum number of deliveries retained while all subprocess slots are occupied. */
+  maxQueuedDeliveries?: number
 }
 
 /** Schemastery validation and supported deployment defaults. */
@@ -66,8 +74,10 @@ export const Config: z<Config> = z.object({
   timeoutMs: z.number().step(1).min(1).default(DEFAULT_TIMEOUT_MS),
   titleMaxChars: z.number().step(1).min(1).default(DEFAULT_TITLE_MAX_CHARS),
   summaryMaxChars: z.number().step(1).min(1).default(DEFAULT_SUMMARY_MAX_CHARS),
+  messageMaxBytes: z.number().step(1).min(256).max(MAX_CONFIGURED_MESSAGE_BYTES).default(DEFAULT_MESSAGE_MAX_BYTES),
   settleDelayMs: z.number().step(1).min(0).default(DEFAULT_SETTLE_DELAY_MS),
   maxConcurrentDeliveries: z.number().step(1).min(1).default(DEFAULT_MAX_CONCURRENT_DELIVERIES),
+  maxQueuedDeliveries: z.number().step(1).min(1).max(MAX_CONFIGURED_QUEUED_DELIVERIES).default(DEFAULT_MAX_QUEUED_DELIVERIES),
 })
 
 type TurnEndEvent = Extract<SessionEvent, { type: 'turn/end' }>
@@ -94,7 +104,7 @@ interface PendingCompletion {
 
 interface QueuedDelivery {
   pending: PendingCompletion
-  title: string
+  message: string
 }
 
 function parseConstants(text: string): Map<string, string> {
@@ -153,6 +163,21 @@ function ellipsize(value: string, limit: number): string {
   if (characters.length <= limit) return value
   if (limit === 1) return '…'
   const prefix = characters.slice(0, limit - 1).join('').replace(/[；，。\s]+$/u, '')
+  return `${prefix}…`
+}
+
+function ellipsizeUtf8(value: string, limit: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= limit) return value
+  const budget = limit - Buffer.byteLength('…', 'utf8')
+  let used = 0
+  let prefix = ''
+  for (const { segment } of CHARACTER_SEGMENTER.segment(value)) {
+    const bytes = Buffer.byteLength(segment, 'utf8')
+    if (used + bytes > budget) break
+    prefix += segment
+    used += bytes
+  }
+  prefix = prefix.replace(/[；，。 \t]+$/u, '')
   return `${prefix}…`
 }
 
@@ -229,8 +254,13 @@ function terminalLabel(reason: TurnEndReason): string {
   }
 }
 
-function completionMessage(title: string, summary: string, reason: TurnEndReason): string {
-  return `DSH任务 [${terminalLabel(reason)}]：${title}\n${summary}`
+function completionMessage(
+  title: string,
+  summary: string,
+  reason: TurnEndReason,
+  maxBytes: number,
+): string {
+  return ellipsizeUtf8(`DSH任务 [${terminalLabel(reason)}]：${title}\n${summary}`, maxBytes)
 }
 
 function idempotencyKey(session: Session, terminal: TurnEndEvent): string {
@@ -318,8 +348,7 @@ function scrubbedEnvironment(): NodeJS.ProcessEnv {
 function sendCompletion(
   config: Required<Config>,
   route: WeChatRoute,
-  pending: PendingCompletion,
-  title: string,
+  delivery: QueuedDelivery,
   signal: AbortSignal,
 ): Promise<void> {
   const args = [
@@ -327,8 +356,8 @@ function sendCompletion(
     '--channel', config.channel,
     '--account', route.account,
     '--target', route.target,
-    '--message', completionMessage(title, pending.summary, pending.terminal.data.reason),
-    '--idempotency-key', idempotencyKey(pending.session, pending.terminal),
+    '--message', delivery.message,
+    '--idempotency-key', idempotencyKey(delivery.pending.session, delivery.pending.terminal),
     '--json',
   ]
   return new Promise((resolve, reject) => {
@@ -395,8 +424,7 @@ export function apply(ctx: Context, config: Config): void {
       const operation = sendCompletion(
         resolved,
         route,
-        delivery.pending,
-        delivery.title,
+        delivery,
         abortController.signal,
       ).catch((error: unknown) => {
         if (closing) return
@@ -425,13 +453,24 @@ export function apply(ctx: Context, config: Config): void {
       return
     }
     const queued = queuedBySession.get(pending.session)
+    const message = completionMessage(
+      title,
+      pending.summary,
+      pending.terminal.data.reason,
+      resolved.messageMaxBytes,
+    )
     if (queued === undefined) {
-      const delivery = { pending, title }
+      if (deliveryQueue.length >= resolved.maxQueuedDeliveries) {
+        const dropped = deliveryQueue.shift() as QueuedDelivery
+        queuedBySession.delete(dropped.pending.session)
+        ctx.logger.warn(`turn-notify-wechat: delivery queue full; dropped oldest notification for session ${dropped.pending.session.id} turn ${dropped.pending.terminal.data.turn}`)
+      }
+      const delivery = { pending, message }
       deliveryQueue.push(delivery)
       queuedBySession.set(pending.session, delivery)
     } else {
       queued.pending = pending
-      queued.title = title
+      queued.message = message
     }
     pumpDeliveries()
   }

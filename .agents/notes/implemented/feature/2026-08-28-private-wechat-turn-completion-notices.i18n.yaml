@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-28-private-wechat-turn-completion-notices.md
-2026-08-28-private-wechat-turn-completion-notices.md: e5c0a6d6cd7483e5f2b0ccb247e316a9fdfc27b3
-2026-08-28-private-wechat-turn-completion-notices.zh.md: 2058f0eda1d58dc1ccdfab7a597615e537679433
+2026-08-28-private-wechat-turn-completion-notices.md: 82381b2724ab09f19661b529df311545a709cf4c
+2026-08-28-private-wechat-turn-completion-notices.zh.md: b8655440613d875d6d5118ad4dfabbf8e41367fb

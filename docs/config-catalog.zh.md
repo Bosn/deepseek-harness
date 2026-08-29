@@ -3062,14 +3062,18 @@ export interface Config {
   titleMaxChars?: number
   /** Maximum Unicode characters retained from the final assistant message. */
   summaryMaxChars?: number
+  /** Maximum UTF-8 bytes retained from the assembled channel message. */
+  messageMaxBytes?: number
   /** Quiet time before title resolution and delivery; a newer turn replaces the pending notice. */
   settleDelayMs?: number
   /** Maximum number of notification subprocesses allowed to run at once. */
   maxConcurrentDeliveries?: number
+  /** Maximum number of deliveries retained while all subprocess slots are occupied. */
+  maxQueuedDeliveries?: number
 }
 ```
 
-来源：[`packages/session/turn-notify-wechat/src/index.ts:36`](../packages/session/turn-notify-wechat/src/index.ts)
+来源：[`packages/session/turn-notify-wechat/src/index.ts:40`](../packages/session/turn-notify-wechat/src/index.ts)
 
 <a id="deepseek-aidsh-typert-loader"></a>
 
