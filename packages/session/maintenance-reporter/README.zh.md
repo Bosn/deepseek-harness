@@ -28,7 +28,7 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-maintenance-reporter'
   config:
     socketPath: /run/user/1000/bocc-ingest.sock
-    policyPath: /home/ec2-user/clawd/config/boagents-autorepair.v1.json
+    policyPath: /home/ec2-user/.local/share/boagents-autorepair/policy.json
     reporterHash: sha256:<admitted-release-hash>
     heartbeatMs: 300000
     requestTimeoutMs: 15000
