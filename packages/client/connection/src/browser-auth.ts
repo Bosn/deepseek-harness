@@ -288,12 +288,36 @@ export class BrowserAuth {
    */
   isAuthenticated(request: ConnectionTrustRequest): boolean {
     const authority = requestAuthority(request.headers)
+    return authority !== undefined && this.isAuthenticatedFor(request, [authority])
+  }
+
+  /**
+   * Verify a cookie minted for one of the application authorities on a
+   * same-host sibling-port request, such as the isolated workspace-file
+   * origin. Browser cookies are host-scoped rather than port-scoped, while
+   * the signed payload remains bound to the exact application authority.
+   * @param request - sibling-origin request carrying the browser Cookie header.
+   * @param applicationAuthorities - canonical application authorities allowed
+   * to authenticate this sibling origin.
+   * @returns true only when a same-host application audience signs an unexpired cookie.
+   */
+  isAuthenticatedFor(
+    request: ConnectionTrustRequest,
+    applicationAuthorities: readonly string[],
+  ): boolean {
+    const requestTarget = requestAuthority(request.headers)
     const rawCookie = header(request.headers, 'cookie')
-    if (authority === undefined || rawCookie === undefined) return false
-    const value = cookieValue(rawCookie, cookieName(authority))
-    if (value === undefined) return false
-    const payload = decodeCookie(value, this.secret)
-    if (payload === undefined || payload.authority !== authority) return false
+    if (requestTarget === undefined || rawCookie === undefined) return false
+    const requestHostname = new URL(`http://${requestTarget}`).hostname
+    const payload = applicationAuthorities.flatMap((authority) => {
+      const authorityHostname = new URL(`http://${authority}`).hostname
+      if (authorityHostname !== requestHostname) return []
+      const value = cookieValue(rawCookie, cookieName(authority))
+      if (value === undefined) return []
+      const decoded = decodeCookie(value, this.secret)
+      return decoded?.authority === authority ? [decoded] : []
+    })[0]
+    if (payload === undefined) return false
     const now = Date.now()
     return payload.issuedAt <= now
       && payload.expiresAt > now

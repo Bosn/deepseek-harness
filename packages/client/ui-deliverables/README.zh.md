@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-本包渲染已完成轮次末尾的产出文件行——列出修改工具创建或修改的文件——并把收尾正文中匹配的行内代码引用转为链接，让被点名的文件在宿主中打开。词表来自修改工具自身的 `locations`，而非收尾正文——无论模型是否记得点名，产出文件都会被列出。正式提供的组合中只有 Web patch 加载本包；删除其 cordis.yml 条目会同时移除指引、文件行与正文链接。
+本包渲染已完成轮次末尾的产出文件行——列出修改工具创建或修改的文件——并把收尾正文中匹配的行内代码引用转为链接，让被点名的文件在部署已发布隔离工作区文件源时于浏览器中打开，否则经 Host 打开器打开。词表来自修改工具自身的 `locations`，而非收尾正文——无论模型是否记得点名，产出文件都会被列出。正式提供的组合中只有 Web patch 加载本包；删除其 cordis.yml 条目会同时移除指引、文件行与正文链接。
 
 ## 目录
 
@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-与 `ui-conversation` 一起挂载本插件；已完成轮次随即以产出文件行收尾，位于收尾消息正文与其动作页脚之间。每个标签项经 Host 打开器打开文件，相对路径按会话 cwd 解析；该行首次显示时会查询 `session.canOpenWorkspacePath()`，只有页面为 loopback 且查询成功返回 `true` 时，**在文件夹中显示**动作才会打开会话工作区。
+与 `ui-conversation` 一起挂载本插件；已完成轮次随即以产出文件行收尾，位于收尾消息正文与其动作页脚之间。每个标签项都按 Session cwd 解析相对路径；`client-connection` 发布隔离工作区文件源时，它会在浏览器新标签页打开受约束的文件，否则回退到 Host 打开器。该行首次显示时会查询 `session.canOpenWorkspacePath()`，只有页面为 loopback 且查询成功返回 `true` 时，**在文件夹中显示**动作才会打开 Session 工作区。
 
 ### 该行
 
@@ -56,6 +56,7 @@ Node 半部注册静态 `ui:deliverable-file-references` 系统提示词段，�
 
 - [ui-conversation](../ui-conversation/README.zh.md)——声明 `conversation.chat.turnTail` 洞并渲染收尾正文。
 - [工作区文件链接](../../../.agents/notes/implemented/feature/2026-07-31-web-workspace-file-links.zh.md)——产出文件行与宿主打开路径背后的决策。
+- [工作区文件源](../../../.agents/notes/implemented/feature/2026-08-30-workspace-file-origin.zh.md)——可选远端浏览器文件路径、认证、约束与独立源边界。
 - [行内文件提及](../../../.agents/notes/implemented/feature/2026-08-07-web-inline-file-mentions.zh.md)——收尾正文可点击提及背后的决策。
 - [客户端包映射](../README.zh.md)——相邻的浏览器 UI 包。
 

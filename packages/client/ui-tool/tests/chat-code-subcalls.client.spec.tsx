@@ -122,6 +122,7 @@ async function bench(snapshot: ChatSnapshot) {
   new TestRemote(ctx, { session: { openWorkspacePath } })
   ctx.provide('connection', {
     isLoopback: false,
+    fileUrl: () => undefined,
     generation: { getSnapshot: () => undefined, subscribe: () => () => {} },
   } as never)
   const locale = new LocaleRuntime(ctx)

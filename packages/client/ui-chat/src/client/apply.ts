@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { BoundActions, ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
@@ -119,6 +120,12 @@ export function apply(ctx: Context): void {
           fileMentions: (owner: TurnTailOwnerProps) => ctx.get('chatFileMentions')?.forClosing(owner),
           openFile: async (path) => {
             const cwd = ctx.sessions.list.getSnapshot().byId[sessionId]?.cwd
+            const url = (ctx.get('connection') as ConnectionHandle | undefined)
+              ?.fileUrl(sessionId, cwd, path)
+            if (url !== undefined) {
+              window.open(url, '_blank', 'noopener,noreferrer')
+              return
+            }
             const result = await ctx.remote.session.openWorkspacePath({
               path: resolveWorkspacePath(cwd, path),
             })

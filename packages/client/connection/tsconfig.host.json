@@ -9,6 +9,7 @@
     "src/api-path.ts",
     "src/api-request-trust.ts",
     "src/browser-auth.ts",
+    "src/files-server.ts",
     "src/http-bridge.ts",
     "src/index.ts",
     "src/invariant.ts",
@@ -16,7 +17,9 @@
     "src/privileged-hosts.ts",
     "src/rpc-host.ts",
     "src/rpc-schema.ts",
-    "src/rpc.ts"
+    "src/rpc.ts",
+    "src/workspace-file-handler.ts",
+    "src/workspace-files.ts"
   ],
   "references": [
     {

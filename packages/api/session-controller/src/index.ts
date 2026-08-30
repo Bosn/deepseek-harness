@@ -2,12 +2,14 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { errorChain } from '@deepseek-ai/dsh-llm'
 import { canOpenNativePath, openNativePath } from '@deepseek-ai/dsh-native-command'
-import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { Remote, TypertRemoteFailure, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
+  ApiSessionNotFound,
   ApiSessionAgentController,
   inspectApiSession,
   type ApiSessionAgentResult,
@@ -144,6 +146,16 @@ export class SessionController extends TypertRemoteService {
       ctx,
       config.coldBlankProbeMaxBytes ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
     )
+    ctx.on('client-connection/workspace-root', async (rawSessionId, next) => {
+      const sessionId = SessionId(rawSessionId)
+      try {
+        const inspected = await this.inspect(sessionId)
+        return inspected.meta.cwd ?? next()
+      } catch (error: unknown) {
+        if (error instanceof ApiSessionNotFound) return next()
+        throw error
+      }
+    })
     this.openPath = internals.openPath ?? openNativePath
     this.canOpenPath = internals.canOpenPath
       ?? (() => config.nativeOpen ?? (internals.openPath !== undefined || canOpenNativePath()))

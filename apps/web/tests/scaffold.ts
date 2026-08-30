@@ -345,6 +345,8 @@ export interface LaunchOptions {
   remoteAuthority?: string
   /** Authorities whose authenticated remote page may render Host-backed configuration. */
   privilegedHosts?: string[]
+  /** Enable the dedicated workspace-file listener on an OS-assigned port. */
+  workspaceFiles?: boolean
   /** Reuse an existing harness home so a second Host can verify user settings across origins. */
   harnessHome?: string
 }
@@ -524,13 +526,20 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     // Preserve the composed surface-context choice because a patch replaces
     // the row's complete config.
     { id: 'web-runtime', config: { openBrowser: false, printUrl: false, surfaceContext } },
-    ...options.remoteAuthority === undefined
+    // One replacement patch owns the complete Connection config, so remote
+    // trust and the optional files origin must be composed here together.
+    ...options.remoteAuthority === undefined && options.workspaceFiles !== true
       ? []
       : [{
         id: 'connection',
         config: {
-          trustedHosts: [options.remoteAuthority],
-          privilegedHosts: options.privilegedHosts ?? [],
+          ...(options.remoteAuthority === undefined
+            ? {}
+            : {
+              trustedHosts: [options.remoteAuthority],
+              privilegedHosts: options.privilegedHosts ?? [],
+            }),
+          ...(options.workspaceFiles === true ? { files: { port: 0 } } : {}),
         },
       }],
     { id: 'settings', config: { dshHome: harnessHome } },
