@@ -25,7 +25,7 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-Feature plugins use this package to store and edit their preferences without re-implementing transport or schema handling. Mount it once per composition; it injects `connection` and `remote` and owns the single `settings.describe` reader in the browser.
+Feature plugins use this package to store and edit their preferences without re-implementing transport or schema handling. Mount it once per composition; it injects `remote` and the `remote.settings` namespace and owns the single `settings.describe` reader in the browser.
 
 ### Binding a namespace
 
@@ -51,7 +51,7 @@ The package realizes one ownership rule: the browser keeps one shared mirror of 
 
 ### The describe mirror
 
-The plugin injects `connection` and `remote` and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). The mirror uses Host mode when `ctx.connection.canUseHostConfiguration` is true and otherwise remains process-local in memory without crossing the settings wire. This capability selects whether Host-backed configuration UI is enabled; it is independent of Connection authentication and does not authorize API requests. Cross-namespace surfaces read the mirror through `ctx.settingsScope.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
+The plugin injects `remote` and the `remote.settings` namespace, resolves Host persistence once from `ctx.remote.$host.canUseHostConfiguration`, and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Without that capability, the mirror remains process-local in memory and does not cross the settings wire. The capability selects whether Host-backed configuration UI is enabled; it is independent of Connection authentication and does not authorize API requests. Cross-namespace surfaces read the mirror through `ctx.settingsScope.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
 
 ### Scope derivation
 

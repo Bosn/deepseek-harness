@@ -135,14 +135,14 @@ describe('PiAiAdapter provider routing', () => {
       thinkingBudgets: { high: 2048 },
     })
     await assemble(ctx, {
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       messages: [],
       temperature: 0.2,
       maxTokens: 77,
       sessionId: 'session-for-pi' as never,
     })
     expect(server.requests[0]).toMatchObject({
-      model: 'deepseek-v4-flash',
+      model: 'deepseek-v4-pro',
       temperature: 0.2,
       max_tokens: 77,
       thinking: { type: 'enabled' },
@@ -533,31 +533,56 @@ describe('PiAiAdapter provider routing', () => {
   })
 
   it('stops the SDK request when the adapter idle watchdog expires', async () => {
-    const server = await mockServer([{ events: textEvents, delayMs: 200 }])
-    const ctx = await harness(server.url, { streamIdleTimeoutMs: 20 })
+    const server = await mockServer([
+      { events: textEvents },
+      { events: textEvents, delayMs: 200 },
+    ])
+    const profile: LlmPiAi.PiAiProviderProfile = {
+      apiKeyEnv: 'PI_TEST_KEY',
+      baseURL: server.url,
+      streamIdleTimeoutMs: 1_000,
+    }
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['deepseek'], adapterOf({ deepseek: profile }))
 
+    const warmup = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(warmup.finish).toEqual({ kind: 'stop' })
+    await vi.waitFor(() => { expect(server.closedResponses).toBe(1) }, { timeout: 1_000 })
+
+    profile.streamIdleTimeoutMs = 20
     const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
-    await Promise.race([
-      server.responseClosed,
-      new Promise<never>((_resolve, reject) => {
-        setTimeout(() => { reject(new Error('SDK request did not close after idle timeout')) }, 1_000)
-      }),
-    ])
+    await vi.waitFor(() => { expect(server.closedResponses).toBe(2) }, { timeout: 1_000 })
 
-    expect(server.paths).toEqual(['/chat/completions'])
-    expect(server.closedResponses).toBe(1)
+    expect(server.paths).toEqual(['/chat/completions', '/chat/completions'])
+    expect(server.requests).toHaveLength(2)
+    expect(server.closedResponses).toBe(2)
   })
 
   it('isolates a timed-out stream from concurrent and later requests', async () => {
     const server = await mockServer([
+      { events: textEvents },
       { events: textEvents, delayMs: 200 },
       { events: textEvents },
       { events: textEvents },
     ])
-    const ctx = await harness(server.url, { streamIdleTimeoutMs: 20 })
+    const profile: LlmPiAi.PiAiProviderProfile = {
+      apiKeyEnv: 'PI_TEST_KEY',
+      baseURL: server.url,
+      streamIdleTimeoutMs: 1_000,
+    }
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['deepseek'], adapterOf({ deepseek: profile }))
+
+    const warmup = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(warmup.finish).toEqual({ kind: 'stop' })
+    await vi.waitFor(() => { expect(server.closedResponses).toBe(1) }, { timeout: 1_000 })
+
+    profile.streamIdleTimeoutMs = 20
     const stalled = assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
-    await vi.waitFor(() => { expect(server.requests).toHaveLength(1) })
+    await vi.waitFor(() => { expect(server.requests).toHaveLength(2) })
 
     const concurrent = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(concurrent.finish).toEqual({ kind: 'stop' })
@@ -565,7 +590,14 @@ describe('PiAiAdapter provider routing', () => {
 
     const later = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
     expect(later.finish).toEqual({ kind: 'stop' })
-    expect(server.paths).toEqual(['/chat/completions', '/chat/completions', '/chat/completions'])
+    await vi.waitFor(() => { expect(server.closedResponses).toBe(4) }, { timeout: 1_000 })
+    expect(server.paths).toEqual([
+      '/chat/completions',
+      '/chat/completions',
+      '/chat/completions',
+      '/chat/completions',
+    ])
+    expect(server.requests).toHaveLength(4)
   })
 })
 

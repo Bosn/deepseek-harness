@@ -13,11 +13,11 @@ import { describe, expect, it, vi } from 'vitest'
 import InvariantService from '@deepseek-ai/dsh-invariants'
 import type {
   ApprovalRequestId, CordisDynamicPackageId, CordisDynamicPluginId, CordisDynamicPluginRunId,
+  DynamicCordisInvokeResult, SessionId,
 } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
-  ConnectionGeneration, ConnectionHandle, SessionId,
+  ConnectionGeneration, ConnectionHandle,
 } from '@deepseek-ai/dsh-client-connection/client'
-import type { DynamicCordisInvokeResult } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: resolves the `ctx.remote.$on` surface.
 import type {} from '@deepseek-ai/dsh-api-gateway/client'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -138,7 +138,12 @@ async function boot(): Promise<Bench> {
         return () => { generationListeners.delete(listener) }
       },
     },
+    state: {
+      getSnapshot: () => undefined,
+      subscribe: () => () => {},
+    },
     rpc: { call: () => Promise.reject(new Error('unexpected generic RPC call')) },
+    reconnect: () => {},
     registerGenerationSource: () => () => {},
     start: () => ({ stop: () => {} }),
   }

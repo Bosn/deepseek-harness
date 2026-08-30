@@ -11,8 +11,8 @@ function bench() {
     ok: true, value: { writable: true, hasDocument: true, namespaces: [] },
   })
   const ctx = new Context()
-  ctx.provide('connection', { isLoopback: false, canUseHostConfiguration: true } as never)
   const remote = new TestRemote(ctx, { settings: { describe: describeCall } })
+  remote.$host = { home: undefined, isLoopback: false, canUseHostConfiguration: true }
   return { ctx, describeCall, remote, fiber: ctx.plugin({ inject: [...inject], apply }) }
 }
 

@@ -11,8 +11,9 @@ import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compa
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, assertNever } from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 // Type-only: makes the optional sibling service available to `ctx.get()`.

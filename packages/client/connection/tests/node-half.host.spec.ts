@@ -137,7 +137,10 @@ async function unusedPort(): Promise<number> {
   })
   const port = (server.address() as AddressInfo).port
   await new Promise<void>((resolve, reject) => {
-    server.close(error => error === undefined ? resolve() : reject(error))
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
   })
   return port
 }
@@ -543,7 +546,7 @@ describe('connection node half', () => {
     }), methodMismatch.response)
     expect(JSON.parse(String(methodMismatch.state.body))).toMatchObject({
       rpcId: 'rpc-bad',
-      result: { ok: false, error: { code: 'bad-request' } },
+      result: { ok: false, error: { code: 'gateway/bad-request' } },
     })
 
     for (const [request, status] of [
@@ -568,7 +571,7 @@ describe('connection node half', () => {
       await route.handler(fakePost(harnessHeaders, '/rpc/goals/create', body), response.response)
       expect(JSON.parse(String(response.state.body))).toMatchObject({
         rpcId,
-        result: { ok: false, error: { code: 'bad-request' } },
+        result: { ok: false, error: { code: 'gateway/bad-request' } },
       })
     }
 

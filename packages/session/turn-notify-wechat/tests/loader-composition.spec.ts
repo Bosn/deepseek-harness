@@ -7,6 +7,7 @@ import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SessionTitleService from '@deepseek-ai/dsh-session-title'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as TurnNotifyWechat from '../src/index.ts'
@@ -40,6 +41,7 @@ ${commandBody}
   ].join('\n'))
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-session'",
+    "- name: '@deepseek-ai/dsh-session-projection'",
     "- name: '@deepseek-ai/dsh-session-title'",
     '  config:',
     '    fallbackMaxWords: 8',
@@ -60,6 +62,7 @@ ${commandBody}
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-session', SessionStore],
+    ['@deepseek-ai/dsh-session-projection', SessionProjectionRegistry],
     ['@deepseek-ai/dsh-session-title', SessionTitleService],
     ['@deepseek-ai/dsh-turn-notify-wechat', TurnNotifyWechat],
   ])

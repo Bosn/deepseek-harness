@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-turn-notify-wechat",
   "description": "Private WeChat notices for terminal top-level DSH turns",
-  "version": "0.1.2-alpha.1",
+  "version": "0.1.2-alpha.2",
   "publishConfig": {
     "access": "public"
   },
@@ -47,6 +47,7 @@
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-session": "workspace:^",
+    "@deepseek-ai/dsh-session-projection": "workspace:^",
     "@deepseek-ai/dsh-session-title": "workspace:^"
   }
 }
