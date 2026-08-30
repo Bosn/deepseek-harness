@@ -100,6 +100,50 @@ describe('SessionController facade', () => {
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
   })
 
+  it('resolves workspace-file roots without activating cold Sessions', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const coldId = SessionId('workspace-cold')
+    const missingId = SessionId('workspace-missing')
+    const brokenId = SessionId('workspace-broken')
+    const coldHeader: SessionHeader = {
+      version: 0,
+      id: coldId,
+      createdAt: 1,
+      cwd: '/cold-workspace',
+    }
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+      list: () => Promise.resolve([coldHeader]),
+      inspect: (sessionId: SessionId) => sessionId === coldId
+        ? Promise.resolve({ meta: coldHeader, events: [] })
+        : sessionId === brokenId
+          ? Promise.reject(new Error('persistence unavailable'))
+          : Promise.resolve(undefined),
+    }) as never)
+    createSessionTestController(ctx, defaults)
+    const fallback = vi.fn(() => Promise.resolve('/fallback'))
+
+    await expect(ctx.waterfall(
+      'client-connection/workspace-root', coldId, fallback,
+    )).resolves.toBe('/cold-workspace')
+    expect(ctx.agents.get(coldId)).toBeUndefined()
+    expect(fallback).not.toHaveBeenCalled()
+
+    await expect(ctx.waterfall(
+      'client-connection/workspace-root', missingId, fallback,
+    )).resolves.toBe('/fallback')
+    const attached = ctx.sessions.create(SessionId('workspace-attached'), {
+      meta: { createdAt: 1 },
+    })
+    await expect(ctx.waterfall(
+      'client-connection/workspace-root', attached.id, fallback,
+    )).resolves.toBe('/fallback')
+    await expect(ctx.waterfall(
+      'client-connection/workspace-root', brokenId, fallback,
+    )).rejects.toThrow('persistence unavailable')
+  })
+
   it.each(['success', 'domain-error', 'throw'] as const)(
     'promotes a prepared follow observation in the background: %s',
     async (outcome) => {

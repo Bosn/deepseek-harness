@@ -316,7 +316,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/api/session-controller/src/index.ts:71`](../packages/api/session-controller/src/index.ts)
+来源：[`packages/api/session-controller/src/index.ts:73`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 
@@ -440,6 +440,17 @@ export interface ConnectionConfig {
    * This is a client capability declaration, not a method-specific API grant.
    */
   privilegedHosts?: string[]
+  /**
+   * Optional dedicated workspace-file origin. With neither key present no
+   * listener exists; `files: {}` is intentionally a no-op because the config
+   * schema materializes absent nested objects.
+   */
+  files?: {
+    /** Listener port. Zero requests an OS-assigned direct-access port. */
+    port?: number
+    /** Bare external HTTP(S) origin when a reverse proxy republishes the listener. */
+    publicUrl?: string
+  }
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -447,7 +458,7 @@ export interface ConnectionConfig {
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:71`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:111`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 

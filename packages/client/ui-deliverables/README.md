@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-This package renders the deliverables row a finished turn ends with — the files the mutation tools created or modified — and links matching inline-code references in the closing prose, so a mentioned file opens in the Host. The vocabulary comes from the mutation tools' own `locations`, never from the closing prose — a produced file is listed whether or not the model remembered to name it. The shipped Web patch is the only composition that loads this package; removing its cordis.yml entry removes the guidance, row, and prose links together.
+This package renders the deliverables row a finished turn ends with — the files the mutation tools created or modified — and links matching inline-code references in the closing prose, so a mentioned file opens in the browser's isolated workspace-file origin when the deployment publishes one, or through the Host opener otherwise. The vocabulary comes from the mutation tools' own `locations`, never from the closing prose — a produced file is listed whether or not the model remembered to name it. The shipped Web patch is the only composition that loads this package; removing its cordis.yml entry removes the guidance, row, and prose links together.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ This package renders the deliverables row a finished turn ends with — the file
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this plugin alongside `ui-conversation`; a finished turn then ends with the produced-files row between the closing message's body and its action footer. Each chip opens the file through the Host opener, with relative paths resolved against the session cwd; when the row first appears, it queries `session.canOpenWorkspacePath()`, and a **Show in folder** action opens the session workspace only when the page is loopback and that query succeeds with `true`.
+Mount this plugin alongside `ui-conversation`; a finished turn then ends with the produced-files row between the closing message's body and its action footer. Each chip resolves relative paths against the Session cwd, opens the confined file in a new browser tab when `client-connection` publishes its isolated workspace-file origin, and otherwise falls back to the Host opener. When the row first appears, it queries `session.canOpenWorkspacePath()`, and a **Show in folder** action opens the Session workspace only when the page is loopback and that query succeeds with `true`.
 
 ### The row
 
@@ -56,6 +56,7 @@ Read these pages when the deliverables surface is not enough. They move from the
 
 - [ui-conversation](../ui-conversation/README.md) — declares the `conversation.chat.turnTail` hole and renders the closing prose.
 - [Workspace file links](../../../.agents/notes/implemented/feature/2026-07-31-web-workspace-file-links.md) — the decision behind the produced-files row and the Host open path.
+- [Workspace-file origin](../../../.agents/notes/implemented/feature/2026-08-30-workspace-file-origin.md) — the optional remote-browser file path, authentication, confinement, and separate-origin boundary.
 - [Inline file mentions](../../../.agents/notes/implemented/feature/2026-08-07-web-inline-file-mentions.md) — the decision behind clickable mentions in the closing prose.
 - [Client package map](../README.md) — adjacent browser UI packages.
 

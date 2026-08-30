@@ -3,6 +3,7 @@
  * the shared API client, and lets API Gateway own the connection loop.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from './api.ts'
 import {
   ConnectionController,
   type ConnectionConfig,
@@ -15,6 +16,12 @@ import { createWebConnectionRpc, type RpcFetch, type RpcStreamOpen } from './rpc
 import { isLoopbackHostname } from '../loopback-hostname.ts'
 import { isDeclaredAuthority, PRIVILEGED_HOSTS_GLOBAL } from '../privileged-hosts.ts'
 import type { ClientConnectionRpc } from '../rpc.ts'
+import {
+  FILES_INFO_GLOBAL,
+  workspaceFileSegments,
+  workspaceFileUrl,
+  type WorkspaceFilesInfo,
+} from '../workspace-files.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
@@ -103,6 +110,11 @@ interface PrivilegedHostsGlobal {
   [PRIVILEGED_HOSTS_GLOBAL]?: readonly string[]
 }
 
+/** Page global populated when this deployment serves workspace files. */
+interface WorkspaceFilesGlobal {
+  [FILES_INFO_GLOBAL]?: WorkspaceFilesInfo
+}
+
 /**
  * The ctx.connection service API: the API client plus a one-shot controller
  * starter. API Gateway supplies generation readiness and reset callbacks;
@@ -125,6 +137,11 @@ export interface ConnectionHandle {
   readonly generation: ConnectionGenerationState
   /** Generic logical RPC channels over the same Connection transport. */
   readonly rpc: ClientConnectionRpc
+  /**
+   * Build the dedicated-origin URL for one file below a Session cwd.
+   * @returns undefined when files serving is off or the path is outside the cwd.
+   */
+  fileUrl(sessionId: SessionId, cwd: string | undefined, path: string): string | undefined
   /**
    * Register the sole source defining Host generations. The source reports
    * ready only after its incremental listeners are attached.
@@ -199,6 +216,15 @@ export function apply(ctx: Context): void {
       },
     },
     rpc,
+    fileUrl(sessionId, cwd, path) {
+      const info = (globalThis as WorkspaceFilesGlobal)[FILES_INFO_GLOBAL]
+      if (info === undefined || pageLocation === undefined) return undefined
+      const segments = workspaceFileSegments(cwd, path)
+      if (segments === undefined) return undefined
+      const base = info.publicUrl
+        ?? `${pageLocation.protocol}//${pageLocation.hostname}:${String(info.port)}`
+      return `${base}${workspaceFileUrl(sessionId, segments)}`
+    },
     registerGenerationSource(source) {
       if (generationSource !== undefined) {
         throw new Error('connection: a generation source is already registered')

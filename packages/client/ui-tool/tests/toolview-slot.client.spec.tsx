@@ -61,6 +61,7 @@ async function bench(nodes: ToolResultNode[]) {
   const runtime = await SlotTestRuntime.create()
   runtime.ctx.provide('connection', {
     isLoopback: false,
+    fileUrl: () => undefined,
     generation: { getSnapshot: () => undefined, subscribe: () => () => {} },
   })
   const openWorkspacePath = vi.fn(async () => ({ ok: true, value: { opened: true } }))

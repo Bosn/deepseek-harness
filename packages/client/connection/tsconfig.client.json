@@ -15,7 +15,8 @@
     "src/client/rpc.ts",
     "src/loopback-hostname.ts",
     "src/privileged-hosts.ts",
-    "src/rpc.ts"
+    "src/rpc.ts",
+    "src/workspace-files.ts"
   ],
   "references": [
     {

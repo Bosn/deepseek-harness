@@ -11,17 +11,20 @@ import {
   type ConnectionHandle,
 } from '../src/client/index.ts'
 import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
+import { FILES_INFO_GLOBAL, type WorkspaceFilesInfo } from '../src/workspace-files.ts'
 
 type Win = {
-  location?: { hostname: string; port?: string; search: string; origin?: string }
+  location?: { hostname: string; port?: string; protocol?: string; search: string; origin?: string }
   __DSH_TRANSPORT__?: ClientTransportHooks
   [PRIVILEGED_HOSTS_GLOBAL]?: readonly string[]
+  [FILES_INFO_GLOBAL]?: WorkspaceFilesInfo
 }
 
 afterEach(() => {
   delete (globalThis as Win).location
   delete (globalThis as Win).__DSH_TRANSPORT__
   delete (globalThis as Win).__DSH_PRIVILEGED_HOSTS__
+  delete (globalThis as Win).__DSH_FILES__
 })
 
 class GenerationProbe {
@@ -88,6 +91,30 @@ describe('connection client apply', () => {
     const handle = await mount()
     expect(handle.isLoopback).toBe(false)
     expect(handle.canUseHostConfiguration).toBe(false)
+  })
+
+  it('builds only confined URLs on the injected workspace-file origin', async () => {
+    const win = globalThis as Win
+    win.location = {
+      hostname: 'klaus-server.tailcdff9a.ts.net',
+      port: '3080',
+      protocol: 'https:',
+      search: '',
+    }
+    const handleWithoutFiles = await mount()
+    expect(handleWithoutFiles.fileUrl('s-1' as never, '/work', 'out/a.html')).toBeUndefined()
+
+    win[FILES_INFO_GLOBAL] = { port: 3082 }
+    const direct = await mount()
+    expect(direct.fileUrl('s-1' as never, '/work', 'out/a b.html')).toBe(
+      'https://klaus-server.tailcdff9a.ts.net:3082/f/s-1/out/a%20b.html',
+    )
+    expect(direct.fileUrl('s-1' as never, '/work', '/etc/hosts')).toBeUndefined()
+
+    win[FILES_INFO_GLOBAL] = { port: 3082, publicUrl: 'https://files.tailnet.example:7443' }
+    expect((await mount()).fileUrl('s/1' as never, '/work', '/work/a#b.html')).toBe(
+      'https://files.tailnet.example:7443/f/s%2F1/a%23b.html',
+    )
   })
 
   it('fails closed when the injected configuration-authority global is not an array', async () => {

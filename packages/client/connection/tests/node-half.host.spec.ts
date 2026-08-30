@@ -8,16 +8,26 @@ import type { AddressInfo } from 'node:net'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { IndexInjection, WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { API_PATH, RpcId, apply, inject, type ClientRequest, type HostConnectionHandle } from '../src/index.ts'
+import {
+  API_PATH,
+  RpcId,
+  apply,
+  browserApplicationAuthorities,
+  inject,
+  type ClientRequest,
+  type ConnectionConfig,
+  type HostConnectionHandle,
+} from '../src/index.ts'
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
 import { provideBrowserCredentials } from './browser-credentials.ts'
 import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
+import { FILES_INFO_GLOBAL, type WorkspaceFilesInfo } from '../src/workspace-files.ts'
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
   routes: WebRoute[],
   upgrades: WebUpgradeRoute[],
-): Pick<WebServer, 'register' | 'registerUpgrade' | 'tapIndex' | 'port'> {
+): Pick<WebServer, 'register' | 'registerUpgrade' | 'tapIndex' | 'host' | 'port'> {
   return {
     register(route) {
       if (routes.some(candidate => candidate.kind === route.kind && candidate.path === route.path)) {
@@ -31,6 +41,7 @@ function fakeHttpServer(
       return () => { upgrades.splice(upgrades.indexOf(route), 1) }
     },
     tapIndex: () => () => {},
+    host: '127.0.0.1',
     port: 0,
   }
 }
@@ -82,7 +93,7 @@ function fakeResponse(): {
   return { response, state }
 }
 
-async function mounted(config?: { trustedHosts?: string[]; privilegedHosts?: string[] }): Promise<{
+async function mounted(config?: ConnectionConfig): Promise<{
   ctx: Context
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
@@ -118,7 +129,32 @@ function browserCookie(connection: HostConnectionHandle, authority: string): str
   return setCookie.split(';', 1)[0]!
 }
 
+async function unusedPort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const port = (server.address() as AddressInfo).port
+  await new Promise<void>((resolve, reject) => {
+    server.close(error => error === undefined ? resolve() : reject(error))
+  })
+  return port
+}
+
 describe('connection node half', () => {
+  it('derives exact cookie authorities for loopback and port-less deployments', () => {
+    expect(browserApplicationAuthorities(
+      ['harness.example', 'exact.example:7443'],
+      3080,
+    )).toEqual([
+      '127.0.0.1:3080',
+      'localhost:3080',
+      'harness.example:3080',
+      'exact.example:7443',
+    ])
+  })
+
   it('reserves enough default carrier capacity for the 200 MiB image batch', () => {
     expect(DEFAULT_MAX_REQUEST_BODY_BYTES).toBe(300 * 1024 * 1024)
     expect(DEFAULT_MAX_REQUEST_BODY_BYTES).toBeGreaterThan(Math.ceil(200 * 1024 * 1024 * 4 / 3) + 1024 * 1024)
@@ -158,6 +194,60 @@ describe('connection node half', () => {
     await dispose()
     expect(routes).toHaveLength(0)
     expect(upgrades).toHaveLength(0)
+  })
+
+  it('keeps an absent or empty files block disabled', async () => {
+    for (const config of [undefined, { files: {} }] satisfies Array<ConnectionConfig | undefined>) {
+      const { ctx, dispose } = await mounted(config)
+      const table: IndexInjection[] = []
+      ctx.emit('webserver/index-inject', table)
+      expect(table.some(row => row.kind === 'global' && row.name === FILES_INFO_GLOBAL)).toBe(false)
+      await dispose()
+    }
+  })
+
+  it('binds, injects, and disposes the dedicated workspace-file origin', async () => {
+    const { ctx, connection, dispose } = await mounted({ files: { port: 0 } })
+    const table: IndexInjection[] = []
+    ctx.emit('webserver/index-inject', table)
+    const row = table.find(candidate => candidate.kind === 'global' && candidate.name === FILES_INFO_GLOBAL)
+    const info = row?.kind === 'global' ? row.value as WorkspaceFilesInfo : undefined
+    expect(info?.port).toBeGreaterThan(0)
+    expect(info?.publicUrl).toBeUndefined()
+    const origin = `http://127.0.0.1:${String(info?.port)}`
+    expect((await fetch(`${origin}/f/unknown/a.txt`, {
+      headers: { cookie: browserCookie(connection, '127.0.0.1:0') },
+    })).status).toBe(404)
+    await dispose()
+    await expect(fetch(`${origin}/f/unknown/a.txt`)).rejects.toThrow()
+  })
+
+  it('requires a fixed listener port and a bare public files origin', async () => {
+    await expect(mounted({ files: { publicUrl: 'https://files.example:3082' } }))
+      .rejects.toThrow('files.publicUrl requires a fixed files.port')
+    await expect(mounted({ files: { port: 3082, publicUrl: 'https://files.example/path' } }))
+      .rejects.toThrow(/must be a bare http\(s\) origin/)
+    await expect(mounted({
+      trustedHosts: ['app.example:3080'],
+      files: { port: 3082, publicUrl: 'https://files.example:3082' },
+    })).rejects.toThrow(/hostname must match an application authority/)
+  })
+
+  it('publishes a normalized same-host public files origin', async () => {
+    const port = await unusedPort()
+    const publicUrl = `https://harness.example:${String(port)}`
+    const { ctx, dispose } = await mounted({
+      trustedHosts: ['harness.example:3080'],
+      files: { port, publicUrl: `${publicUrl}/` },
+    })
+    const table: IndexInjection[] = []
+    ctx.emit('webserver/index-inject', table)
+    expect(table).toContainEqual({
+      kind: 'global',
+      name: FILES_INFO_GLOBAL,
+      value: { port, publicUrl },
+    })
+    await dispose()
   })
 
   it('refuses an untrusted Host on any /api path before the bridge runs', async () => {

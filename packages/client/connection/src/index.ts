@@ -9,8 +9,25 @@ import { API_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority } from './api-request-trust.ts'
 import { BrowserAuth } from './browser-auth.ts'
+import { assertFilesPublicUrl, listenForWorkspaceFiles } from './files-server.ts'
 import { PRIVILEGED_HOSTS_GLOBAL } from './privileged-hosts.ts'
 import { HostConnectionService } from './rpc-host.ts'
+import { FILES_INFO_GLOBAL, type WorkspaceFilesInfo } from './workspace-files.ts'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Resolve one Session cwd without activating its Agent. The Session domain
+     * owns the first answer; an absent owner delegates to undefined.
+     * @param sessionId - opaque Session identity from the `/f` path.
+     * @mode waterfall
+     */
+    'client-connection/workspace-root'(
+      sessionId: string,
+      next: () => Promise<string | undefined>,
+    ): Promise<string | undefined>
+  }
+}
 
 export type {
   ConnectionFetchMethod,
@@ -64,6 +81,29 @@ function assertImageBodyCapacity(ctx: Context, maxRequestBodyBytes: number): voi
   }
 }
 
+/**
+ * Derive exact application authorities whose host-scoped cookies can reach a sibling port.
+ * @param declaredAuthorities - trusted and privileged application authorities.
+ * @param applicationPort - actual application listener port for port-less authorities.
+ * @returns canonical application authorities accepted as cookie audiences.
+ */
+export function browserApplicationAuthorities(
+  declaredAuthorities: readonly string[],
+  applicationPort: number,
+): readonly string[] {
+  const authorities = new Set([
+    new URL(`http://127.0.0.1:${String(applicationPort)}`).host,
+    new URL(`http://localhost:${String(applicationPort)}`).host,
+  ])
+  for (const authority of declaredAuthorities) {
+    const parsed = new URL(`http://${authority}`)
+    authorities.add(parsed.port === ''
+      ? new URL(`http://${parsed.hostname}:${String(applicationPort)}`).host
+      : parsed.host)
+  }
+  return [...authorities]
+}
+
 /** Services required before providing Connection. */
 export const inject = ['webServer', 'credentials']
 
@@ -86,6 +126,17 @@ export interface ConnectionConfig {
    * This is a client capability declaration, not a method-specific API grant.
    */
   privilegedHosts?: string[]
+  /**
+   * Optional dedicated workspace-file origin. With neither key present no
+   * listener exists; `files: {}` is intentionally a no-op because the config
+   * schema materializes absent nested objects.
+   */
+  files?: {
+    /** Listener port. Zero requests an OS-assigned direct-access port. */
+    port?: number
+    /** Bare external HTTP(S) origin when a reverse proxy republishes the listener. */
+    publicUrl?: string
+  }
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -95,6 +146,11 @@ export interface ConnectionConfig {
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
   privilegedHosts: z.array(String).default([]),
+  // No inner defaults: key presence is the enable signal.
+  files: z.object({
+    port: z.natural().max(65535),
+    publicUrl: z.string(),
+  }),
   cookieMaxAgeDays: z.natural().min(1).default(30),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
 })
@@ -118,11 +174,33 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
   for (const entry of fenceHosts) assertTrustedAuthority(entry)
+  const filesPort = config?.files?.port
+  const filesPublicOrigin = config?.files?.publicUrl === undefined
+    ? undefined
+    : assertFilesPublicUrl(config.files.publicUrl)
+  const filesEnabled = filesPort !== undefined || filesPublicOrigin !== undefined
+  if (filesPublicOrigin !== undefined && !filesPort) {
+    throw new Error('client-connection: files.publicUrl requires a fixed files.port')
+  }
+  const applicationAuthorities = browserApplicationAuthorities(fenceHosts, ctx.webServer.port)
+  if (filesPublicOrigin !== undefined) {
+    const filesHostname = new URL(filesPublicOrigin).hostname
+    const sharesApplicationHostname = applicationAuthorities.some(
+      authority => new URL(`http://${authority}`).hostname === filesHostname,
+    )
+    if (!sharesApplicationHostname) {
+      throw new Error(
+        'client-connection: files.publicUrl hostname must match an application authority '
+        + 'so the browser session reaches the files origin',
+      )
+    }
+  }
   assertImageBodyCapacity(ctx, maxRequestBodyBytes)
+  const browserAuth = await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
   const connection = new HostConnectionService(
     ctx,
     fenceHosts,
-    await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays),
+    browserAuth,
   )
   const fetchHandler = connection.createSharedFetchHandler(API_PATH)
   const route: WebRoute = {
@@ -148,4 +226,29 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   ctx.on('webserver/index-inject', (table) => {
     table.push({ kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: privilegedHosts })
   })
+  if (!filesEnabled) return
+
+  const files = await listenForWorkspaceFiles(
+    ctx.webServer.host,
+    filesPort ?? 0,
+    fenceHosts,
+    filesPublicOrigin,
+    request => browserAuth.isAuthenticatedFor(request, applicationAuthorities),
+    {
+      cwdFor: sessionId => ctx.waterfall(
+        'client-connection/workspace-root',
+        sessionId,
+        () => Promise.resolve(undefined),
+      ),
+    },
+    (error) => { ctx.logger.error(error) },
+  )
+  const info: WorkspaceFilesInfo = {
+    port: files.port,
+    ...(filesPublicOrigin === undefined ? {} : { publicUrl: filesPublicOrigin }),
+  }
+  ctx.on('webserver/index-inject', (table) => {
+    table.push({ kind: 'global', name: FILES_INFO_GLOBAL, value: info })
+  })
+  ctx.effect(() => files.close, 'client-connection: /f listener')
 }

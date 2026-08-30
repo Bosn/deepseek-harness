@@ -27,6 +27,7 @@
     { "path": "../../core/agent-default-model" },
     { "path": "../../core/scope" },
     { "path": "../../core/session" },
+    { "path": "../../client/connection/tsconfig.host.json" },
     { "path": "../../context/file-reference" },
     { "path": "../../attachment/attachment" },
     { "path": "../../interaction/permission-presets" },

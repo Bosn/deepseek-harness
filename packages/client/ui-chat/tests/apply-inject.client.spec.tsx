@@ -44,8 +44,11 @@ function sessionFakeFor() {
   } satisfies SessionBehaviorOverrides
 }
 
-async function bench() {
+async function bench(
+  fileUrl?: (sessionId: SessionId, cwd: string | undefined, path: string) => string | undefined,
+) {
   const runtime = await SlotTestRuntime.create()
+  if (fileUrl !== undefined) runtime.ctx.provide('connection', { fileUrl } as never)
   runtime.ctx.provide('settingsScope', { bind: () => stubSettingsScope().scope } as never)
   const layout = { openDetails: vi.fn(), closeDetails: vi.fn() }
   runtime.ctx.provide('layout', layout as never)
@@ -130,6 +133,23 @@ describe('Chat inject API', () => {
       error: { code: 'internal', message: 'xdg-open is not available', details: {} },
     })
     await expect(injected.openFile('src/b.ts')).rejects.toThrow('path open failed: xdg-open is not available')
+    await b.runtime.dispose()
+  })
+
+  it('opens a served workspace file on its dedicated origin before native fallback', async () => {
+    const fileUrl = vi.fn(() => 'https://files.example:3082/f/root-1/src/a.ts')
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const b = await bench(fileUrl)
+    const { injected } = b.chatViewApi(ROOT)
+
+    await expect(injected.openFile('src/a.ts')).resolves.toBeUndefined()
+    expect(fileUrl).toHaveBeenCalledWith(ROOT, '/proj', 'src/a.ts')
+    expect(open).toHaveBeenCalledWith(
+      'https://files.example:3082/f/root-1/src/a.ts',
+      '_blank',
+      'noopener,noreferrer',
+    )
+    expect(b.openWorkspacePath).not.toHaveBeenCalled()
     await b.runtime.dispose()
   })
 

@@ -114,6 +114,18 @@ describe('BrowserAuth', () => {
     expect(first.isAuthenticated({ headers: new Headers() })).toBe(false)
     expect(first.isAuthenticated(request('/', 'localhost:3080', { cookie: login.cookie }))).toBe(false)
     expect(first.isAuthenticated(request('/', '127.0.0.1:3081', { cookie: login.cookie }))).toBe(false)
+    expect(first.isAuthenticatedFor(
+      request('/', '127.0.0.1:3082', { cookie: login.cookie }),
+      ['127.0.0.1:3090', '127.0.0.1:3080'],
+    )).toBe(true)
+    expect(first.isAuthenticatedFor(
+      request('/', 'localhost:3082', { cookie: login.cookie }),
+      ['127.0.0.1:3080'],
+    )).toBe(false)
+    expect(first.isAuthenticatedFor({ headers: {} }, ['127.0.0.1:3080'])).toBe(false)
+    expect(first.isAuthenticatedFor(request('/', '127.0.0.1:3082'), [
+      '127.0.0.1:3080',
+    ])).toBe(false)
 
     const reloaded = await createAuth(store, 30, processOwner)
     expect(reloaded.authenticatedUrl('http://127.0.0.1:3080')).toBe(login.launchUrl)
