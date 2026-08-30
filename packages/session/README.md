@@ -1,5 +1,5 @@
 ---
-description: "Package map for the durable session data plane: the persistence seam and its backends, checkpoint policy, projections, log-backed titles, and outbound session telemetry."
+description: "Package map for the durable session data plane: persistence, checkpoint policy, projections, titles, maintenance reporting, and outbound telemetry."
 kind: "package-group"
 ---
 
@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-The session group makes an agent's conversation durable and reusable outside the live loop: the persistence seam stores the event log and restores it on resume, the checkpoint policy keeps requests, tool side effects, and completed steps durable before the next action, projections serve whole log-derived values to client carriers, titles name each session from its content, and telemetry reports session activity outbound. Pick a persistence backend first — JSONL is the shipped default, SQLite an opt-in single-database backend — then add the checkpoint policy and any projection, title, or telemetry packages the deployment needs. This page maps the group; every package README owns its contract, and `session-query/` is a sibling group whose read/tool surface consumes persistence independently.
+The session group makes an agent's conversation durable and reusable outside the live loop: the persistence seam stores the event log and restores it on resume, the checkpoint policy keeps requests, tool side effects, and completed steps durable before the next action, projections serve whole log-derived values to client carriers, titles name each session from its content, maintenance reporting follows exact top-level turn lifecycles, and telemetry reports session activity outbound. Pick a persistence backend first — JSONL is the shipped default, SQLite an opt-in single-database backend — then add the checkpoint policy and any projection, title, coordination, or telemetry packages the deployment needs. This page maps the group; every package README owns its contract, and `session-query/` is a sibling group whose read/tool surface consumes persistence independently.
 
 ## Table of Contents
 
@@ -22,7 +22,7 @@ The session group makes an agent's conversation durable and reusable outside the
 <a id="packages"></a>
 ## Packages
 
-The group splits into four families: durable storage (persistence seam, backends, checkpoint policy), projections, titles, and telemetry. Each package README owns its contract and configuration.
+The group splits into five families: durable storage (persistence seam, backends, checkpoint policy), projections, titles, coordination, and telemetry. Each package README owns its contract and configuration.
 
 ### Persistence
 
@@ -50,6 +50,12 @@ The group splits into four families: durable storage (persistence seam, backends
 | [`session-title-llm/`](session-title-llm/README.md) | Shared model-backed title-generation policy for the provider packages | library — no ctx key |
 | [`session-title-first-prompt-llm/`](session-title-first-prompt-llm/README.md) | Titles a session from its first eligible human message | registers on `ctx.sessionTitle` |
 | [`session-title-all-prompts-llm/`](session-title-all-prompts-llm/README.md) | Titles a session from all eligible human messages | registers on `ctx.sessionTitle` |
+
+### Coordination
+
+| Package | Role | ctx key |
+|---|---|---|
+| [`maintenance-reporter/`](maintenance-reporter/README.md) | Renews and releases exact top-level BoAgents maintenance holders and reports DSH coverage | registers lifecycle listeners and managed shell environment |
 
 ### Telemetry
 

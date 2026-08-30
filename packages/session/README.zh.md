@@ -1,5 +1,5 @@
 ---
-description: "持久会话数据平面的包映射：持久化 seam 及其后端、检查点策略、投影、基于日志的标题与外发会话遥测。"
+description: "持久会话数据平面的包映射：持久化、检查点策略、投影、标题、维护上报与外发遥测。"
 kind: "package-group"
 ---
 
@@ -9,7 +9,7 @@ kind: "package-group"
 
 ## 概述
 
-session 组让 agent（智能体）的对话在实时 loop 之外持久可复用：持久化 seam 存储事件日志并在恢复时还原，检查点策略让请求、工具副作用与已完成步骤在下一步动作前持久化，投影向客户端载体提供日志派生的完整值，标题根据会话内容为其命名，遥测则向外上报会话活动。先选持久化后端——JSONL 是随产品交付的默认项，SQLite 是可选启用、单库的后端——再按部署需要挂载检查点策略以及投影、标题或遥测包。本页是组的映射；每个包 README 负责各自的约定，`session-query/` 是同级独立组，其读取／工具接口独立消费持久化。
+session 组让 agent（智能体）的对话在实时 loop 之外持久可复用：持久化 seam 存储事件日志并在恢复时还原，检查点策略让请求、工具副作用与已完成步骤在下一步动作前持久化，投影向客户端载体提供日志派生的完整值，标题根据会话内容为其命名，维护上报跟随 exact top-level turn 生命周期，遥测则向外上报会话活动。先选持久化后端——JSONL 是随产品交付的默认项，SQLite 是可选启用、单库的后端——再按部署需要挂载检查点策略以及投影、标题、协调或遥测包。本页是组的映射；每个包 README 负责各自的约定，`session-query/` 是同级独立组，其读取／工具接口独立消费持久化。
 
 ## 目录
 
@@ -22,7 +22,7 @@ session 组让 agent（智能体）的对话在实时 loop 之外持久可复用
 <a id="packages"></a>
 ## 包
 
-本组分为四个家族：持久存储（持久化 seam、后端、检查点策略）、投影、标题与遥测。每个包 README 负责各自的约定与配置。
+本组分为五个家族：持久存储（持久化 seam、后端、检查点策略）、投影、标题、协调与遥测。每个包 README 负责各自的约定与配置。
 
 ### 持久化
 
@@ -50,6 +50,12 @@ session 组让 agent（智能体）的对话在实时 loop 之外持久可复用
 | [`session-title-llm/`](session-title-llm/README.zh.md) | 供提供方包共享的模型标题生成策略 | 库，不使用 ctx key |
 | [`session-title-first-prompt-llm/`](session-title-first-prompt-llm/README.zh.md) | 根据第一条合格的人类消息为会话生成标题 | 注册到 `ctx.sessionTitle` |
 | [`session-title-all-prompts-llm/`](session-title-all-prompts-llm/README.zh.md) | 根据所有合格的人类消息为会话生成标题 | 注册到 `ctx.sessionTitle` |
+
+### 协调
+
+| 包 | 职责 | ctx key |
+|---|---|---|
+| [`maintenance-reporter/`](maintenance-reporter/README.zh.md) | 续租和释放 exact top-level BoAgents maintenance holder，并上报 DSH coverage | 注册生命周期 listener 与受管 shell environment |
 
 ### 遥测
 

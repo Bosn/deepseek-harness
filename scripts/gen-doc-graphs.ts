@@ -414,7 +414,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'agent',
     title: 'Agent service',
     mode: 'core',
-    consumers: ['agent-loop', 'acp', 'subagent-in-process-driver'],
+    consumers: ['agent-loop', 'acp', 'maintenance-reporter', 'subagent-in-process-driver'],
     note: 'Owns live Agent handles, the create/resume factory seam, and process-local initiator propagation.',
   },
   {
@@ -471,7 +471,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     pkg: 'shell-env',
     title: 'Managed bash environment registry',
     mode: 'core',
-    consumers: ['tool-bash', 'tool-pwsh'],
+    consumers: ['maintenance-reporter', 'tool-bash', 'tool-pwsh'],
     note: 'Plugins declare effect-scoped DSH_* facts; each shell tool collects one trusted snapshot per execution and its executor rebuilds the namespace.',
   },
   {

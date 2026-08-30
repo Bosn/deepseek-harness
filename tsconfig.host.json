@@ -151,6 +151,7 @@
     { "path": "./packages/api/settings-controller" },
     { "path": "./packages/api/workspace-controller/tsconfig.host.json" },
     { "path": "./packages/typert/loader" },
+    { "path": "./packages/session/maintenance-reporter" },
     { "path": "./packages/session/session-persistence" },
     { "path": "./packages/session/session-checkpoint-policy" },
     { "path": "./packages/session/session-log-deepseek" },

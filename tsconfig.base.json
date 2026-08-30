@@ -354,6 +354,8 @@
       "@deepseek-ai/dsh-lsp/invariant": ["./packages/lsp/lsp/src/invariant.ts"],
       "@deepseek-ai/dsh-lsp-stdio": ["./packages/lsp/lsp-stdio/src"],
       "@deepseek-ai/dsh-lsp-stdio/invariant": ["./packages/lsp/lsp-stdio/src/invariant.ts"],
+      "@deepseek-ai/dsh-maintenance-reporter": ["./packages/session/maintenance-reporter/src"],
+      "@deepseek-ai/dsh-maintenance-reporter/invariant": ["./packages/session/maintenance-reporter/src/invariant.ts"],
       "@deepseek-ai/dsh-mcp-client": ["./packages/mcp/mcp-client/src"],
       "@deepseek-ai/dsh-mcp-client/invariant": ["./packages/mcp/mcp-client/src/invariant.ts"],
       "@deepseek-ai/dsh-message-feedback": ["./packages/feedback/message-feedback/src"],

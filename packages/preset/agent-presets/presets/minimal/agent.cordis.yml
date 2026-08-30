@@ -13,6 +13,16 @@
     complete: true
     includeRuntimeContext: false
 
+# User-global and workspace instructions remain durable user messages even
+# though this preset owns the complete system prompt. The maintenance reporter
+# still publishes coverage unavailable for this preset because its persistent
+# shell cannot carry an exact per-turn managed environment; instructions tell
+# the agent to move BoAgents mutations to a reporting-capable preset.
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
 # The PTY registry is an agent-owned service, so it lives in an entry-local
 # realm. The backend still consumes the host sandbox policy and subprocess
 # implementation, while the tool registers into this agent's scoped catalog.

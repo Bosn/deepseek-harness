@@ -1499,6 +1499,36 @@ export interface LspLocalServerConfig {
 
 来源：[`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src/index.ts)
 
+<a id="deepseek-aidsh-maintenance-reporter"></a>
+
+## `@deepseek-ai/dsh-maintenance-reporter`
+
+需要：`agents` · `shellEnv`
+
+```ts config-catalog
+/** Deployment paths, release identity, timing, and supported preset coverage. */
+export interface Config {
+  /** Owner-only BOCC ingest Unix socket. */
+  socketPath: string
+  /** Source-managed automatic-repair policy whose bytes bind every command. */
+  policyPath: string
+  /** Hash of the admitted reporter release bytes. */
+  reporterHash: string
+  /** Stable reporter identity. */
+  reporterId?: string
+  /** Fixed holder and coverage renewal cadence. */
+  heartbeatMs?: number
+  /** One command request timeout. */
+  requestTimeoutMs?: number
+  /** Presets that load the user-global AGENTS instruction source. */
+  instructionCoveredPresets: string[]
+  /** Presets whose shell carries exact per-turn maintenance identity. */
+  reportingCapablePresets: string[]
+}
+```
+
+来源：[`packages/session/maintenance-reporter/src/index.ts:39`](../packages/session/maintenance-reporter/src/index.ts)
+
 <a id="deepseek-aidsh-mcp-client"></a>
 
 ## `@deepseek-ai/dsh-mcp-client`

@@ -1,0 +1,23 @@
+# Test-only real Loader composition. Session, AgentRegistry, ShellEnv, and the
+# reporter are production packages; the driver mocks only the owner BOCC Unix
+# command socket named by the environment.
+- id: session
+  name: '@deepseek-ai/dsh-session'
+
+- id: agents
+  name: '@deepseek-ai/dsh-agent'
+
+- id: shell-env
+  name: '@deepseek-ai/dsh-shell-env'
+
+- id: maintenance-reporter
+  name: '@deepseek-ai/dsh-maintenance-reporter'
+  config:
+    socketPath: !!js process.env.DSH_MAINTENANCE_E2E_SOCKET
+    policyPath: !!js process.env.DSH_MAINTENANCE_E2E_POLICY
+    reporterHash: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    reporterId: dsh-maintenance-reporter-e2e
+    heartbeatMs: 40
+    requestTimeoutMs: 1000
+    instructionCoveredPresets: [standard]
+    reportingCapablePresets: [standard]

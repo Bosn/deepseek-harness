@@ -467,6 +467,12 @@ describe('the shipped Web composition', () => {
     }
   })
 
+  it('keeps user-global instructions in the mutation-capable minimal composition', async () => {
+    const composition = await readFile(join(SHIPPED_PRESET_ROOT, 'minimal', 'agent.cordis.yml'), 'utf8')
+    expect(composition).toContain("name: '@deepseek-ai/dsh-agent-instructions'")
+    expect(composition).toContain('maxBytes: 65536')
+  })
+
   it('never rewrites the preset file it composed from', async () => {
     // The Loader persists a tree whose plugin self-disposed, and tearing an
     // agent down disposes its whole subtree. Inherited, that rewrote the
