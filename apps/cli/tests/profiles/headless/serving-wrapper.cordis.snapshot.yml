@@ -2,42 +2,47 @@
 # snapshot: the real pi-ai adapter routes through a local OpenAI-compatible
 # stand-in whose first SSE stream dies mid-flight with the gateway wrapper
 # statement, and whose second attempt completes normally.
-- id: base
-  name: '@deepseek-ai/cordis-plugin-include'
+- id: headless-startup
+  disabled: true
+
+- id: headless-runner
+  disabled: true
+
+- id: llm-deepseek
+  disabled: true
+
+- id: agent-loop
   config:
-    path: ./cordis.yml
-    patches:
-      - id: llm-deepseek
-        name: '@deepseek-ai/dsh-llm-deepseek'
-        disabled: true
-      - insert:
-          - id: llm-pi-ai
-            name: '@deepseek-ai/dsh-llm-pi-ai'
-            config:
-              providers:
-                snapshot-gateway:
-                  apiKeyEnv: SNAPSHOT_PI_KEY
-                  api: openai-completions
-                  baseURL: !!js process.env.DSH_SNAPSHOT_PI_URL
-                  streamIdleTimeoutMs: 15000
-                  retryPolicy:
-                    mode: normal
-                    maxRetries: 1
-                    retryableCodes:
-                      - SERVER
-                    backoff:
-                      initialDelayMs: 1
-                      maxDelayMs: 1
-                      jitterRatio: 0
-                  models:
-                    - id: snapshot-model
-                      contextWindow: 1000000
-      - id: agent-spine
-        config:
-          agents:
-            - id: main
-              provider: snapshot-gateway
-              model: snapshot-model
-              cwd: !!js process.cwd()
-          workspaceContext: false
-          persona: 'Keyless gateway serving-wrapper snapshot.'
+    agents:
+      - id: main
+        provider: snapshot-gateway
+        model: snapshot-model
+        cwd: !!js process.cwd()
+
+- id: session-persistence-jsonl
+  config:
+    root: './.sessions'
+    compression: none
+
+- insert:
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          snapshot-gateway:
+            apiKeyEnv: SNAPSHOT_PI_KEY
+            api: openai-completions
+            baseURL: !!js process.env.DSH_SNAPSHOT_PI_URL
+            streamIdleTimeoutMs: 15000
+            retryPolicy:
+              mode: normal
+              maxRetries: 1
+              retryableCodes:
+                - SERVER
+              backoff:
+                initialDelayMs: 1
+                maxDelayMs: 1
+                jitterRatio: 0
+            models:
+              - id: snapshot-model
+                contextWindow: 1000000
