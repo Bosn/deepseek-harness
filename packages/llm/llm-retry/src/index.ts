@@ -14,9 +14,10 @@
 import { randomUUID } from 'node:crypto'
 import type { Context, Events } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { z as zod } from 'zod'
 import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-projection'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { RetryId } from './brand.ts'
 import type { LlmRetryEventData } from './types.ts'
@@ -25,7 +26,7 @@ export type { LlmRetryEventData, LlmRetryStartedEventData } from './types.ts'
 export { RetryId } from './brand.ts'
 
 export const name = 'llm-retry'
-export const inject = ['agents']
+export const inject = ['agents', 'sessionProjections']
 
 /** This policy executor has no config; providers own `retryPolicy`. */
 export type Config = Readonly<Record<string, never>>
@@ -132,6 +133,10 @@ function retryPolicyKey(policy: ResolvedRetryPolicy): string {
     ])
 }
 
+function retryStateKey(provider: string, policyKey: string): string {
+  return JSON.stringify([provider, policyKey])
+}
+
 function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false)
   return new Promise((resolve) => {
@@ -153,8 +158,57 @@ function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean
  * @param config - empty executor config; provider registrations own policy.
  * @param internals - non-serializable deterministic hooks for tests.
  */
+interface RetryStateEntry {
+  retry: number
+  retryId: RetryId
+  rateLimitRetries: number
+  retriesByCode: Record<string, number>
+}
+
+type LlmRetryState = Record<string, RetryStateEntry>
+
+// The cast bridges the branded retry id, which Zod cannot express directly.
+const llmRetryStateSchema: zod.ZodType<LlmRetryState> = zod.record(zod.string(), zod.object({
+  retry: zod.number().int().nonnegative(),
+  retryId: zod.string(),
+  rateLimitRetries: zod.number().int().nonnegative(),
+  retriesByCode: zod.record(zod.string(), zod.number().int().nonnegative()),
+})) as unknown as zod.ZodType<LlmRetryState>
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionStateMap {
+    /** Retry state for the current step by provider and policy. */
+    llmRetry: LlmRetryState
+  }
+}
+
 export function apply(ctx: Context, config: Config = {}, internals: RetryInternals = {}): void {
   validateConfig(config)
+  ctx.sessionProjections.register({
+    key: 'llmRetry',
+    stateVersion: 2,
+    stateSchema: llmRetryStateSchema,
+    init: () => ({}),
+    apply: (state, event) => {
+      if (event.type === 'step/start' || event.type === 'turn/end') return {}
+      if (event.type !== 'llm/retry') return state
+      const key = retryStateKey(event.data.provider, event.data.policyKey)
+      const entry = state[key]
+      if (entry?.retry === event.data.retry && entry.retryId === event.data.retryId) return state
+      const code = event.data.failure.code
+      return {
+        ...state,
+        [key]: {
+          retry: event.data.retry,
+          retryId: event.data.retryId,
+          rateLimitRetries: (entry?.rateLimitRetries ?? 0) + (code === 'RATE_LIMIT' ? 1 : 0),
+          retriesByCode: {
+            ...entry?.retriesByCode,
+            [code]: (entry?.retriesByCode[code] ?? 0) + 1,
+          },
+        },
+      }
+    },
+  })
   const random = internals.random ?? Math.random
   const lifetime = new AbortController()
   const active = new Set<Promise<RequestErrorAction>>()
@@ -249,27 +303,18 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     }
 
     const policyKey = retryPolicyKey(policy)
-    let priorPolicyRetry: SessionEvent<'llm/retry'> | undefined
-    let priorRateLimitRetries = 0
-    let priorCodeRetries = 0
-    for (const event of agent.session.events) {
-      if (event.type !== 'llm/retry'
-        || event.data.turn !== turn
-        || event.data.step !== step
-        || event.data.provider !== provider
-        || event.data.policyKey !== policyKey) continue
-      priorPolicyRetry = event
-      if (event.data.failure.code === 'RATE_LIMIT') priorRateLimitRetries += 1
-      if (event.data.failure.code === failure.code) priorCodeRetries += 1
-    }
-    const previousRetry = priorPolicyRetry?.data.retry ?? 0
+    const retryState = ctx.sessionProjections.stateOf(agent.session, 'llmRetry') as LlmRetryState
+    const previous = retryState[retryStateKey(provider, policyKey)]
+    const previousRetry = previous?.retry ?? 0
+    const priorRateLimitRetries = previous?.rateLimitRetries ?? 0
+    const priorCodeRetries = previous?.retriesByCode[failure.code] ?? 0
     if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return
     if (policy.mode === 'normal') {
       const codeLimit = policy.maxRetriesByCode[failure.code]
       if (codeLimit !== undefined && priorCodeRetries >= codeLimit) return
     }
     const retry = previousRetry + 1
-    const retryId = priorPolicyRetry?.data.retryId ?? RetryId(randomUUID())
+    const retryId = previous?.retryId ?? RetryId(randomUUID())
     const scheduledCooldownMs = cooldownDelay(policy, priorRateLimitRetries, failure, random)
     if (policy.mode === 'normal'
       && failure.code === 'RATE_LIMIT'

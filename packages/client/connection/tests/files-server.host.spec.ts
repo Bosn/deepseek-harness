@@ -33,7 +33,7 @@ describe('workspace-file listener', () => {
     const seen: Error[] = []
     const files = await listenForWorkspaceFiles(
       '127.0.0.1', 0, [], undefined, () => true,
-      { cwdFor: () => Promise.reject(failure) },
+      { cwdFor: async () => { throw failure } },
       (error) => { seen.push(error) },
     )
     try {

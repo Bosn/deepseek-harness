@@ -9,9 +9,9 @@ kind: "package-reference"
 
 ## 概述
 
-本包承载浏览器到 Host 的 Remote 调用、精确 Fetch 响应与 connection generation。Client 插件挂载 `ctx.connection`，其中包含当前页面的 loopback 状态、通用 RPC carrier、当前 generation 及其 Host 信息，以及单一 generation source 的注册点。source 报告 ready 后 generation 才可见；source 结束、失败、被撤回或显式 stop 都会清空它，再由 `ConnectionController` 退避重连。
+本包承载浏览器到 Host 的 Remote 调用、精确 Fetch 响应与 connection generation。Client 插件挂载 `ctx.connection`，其中包含当前页面的 loopback 状态、通用 RPC carrier、当前 generation 及其 Host 信息、可观察的恢复状态、立即重连命令，以及单一 generation source 的注册点。source 报告 ready 后 generation 才可见；source 结束、失败、被撤回或显式 stop 都会清空它，再由 `ConnectionController` 执行重试策略。
 
-Host 会把 `privilegedHosts` 以 `__DSH_PRIVILEGED_HOSTS__` 注入页面。Client 通过 `ctx.connection.canUseHostConfiguration` 判断随附 UI 是否应在远程页面挂载 Host 侧的设置、凭据、模型提供方及相关配置界面。Loopback 页面以及拥有 Host 的传输始终显示这些界面；served 远程页面只有在其完整 authority 与注入声明匹配时才显示。这是部署级 UI 能力声明，不是 API 访问控制列表：声明的 authority 会加入普通 Host/Origin 信任栅栏，但每个请求仍与其他 Host 操作一样必须持有有效的签名浏览器会话；系统不存在按方法区分的 loopback 层。
+Host 会把 `privilegedHosts` 以 `__DSH_PRIVILEGED_HOSTS__` 注入页面。Connection 派生 `ctx.connection.canUseHostConfiguration`，API Gateway 再将其映射为 `ctx.remote.$host.canUseHostConfiguration`，供普通 Client 消费方判断是否应在远程页面挂载 Host 侧的设置、凭据、模型提供方及相关配置界面。Loopback 页面以及拥有 Host 的传输始终显示这些界面；served 远程页面只有在其完整 authority 与注入声明匹配时才显示。这是部署级 UI 能力声明，不是 API 访问控制列表：声明的 authority 会加入普通 Host/Origin 信任栅栏，但每个请求仍与其他 Host 操作一样必须持有有效的签名浏览器会话；系统不存在按方法区分的 loopback 层。
 
 可选的 `files` 配置块会绑定第二个 HTTP listener，它只提供 `GET`/`HEAD /f/<sessionId>/<path...>`。独立端口就是独立浏览器 origin，因此活动 HTML 或 SVG 产物保留自己的存储与同源 sibling 请求，却不会与 `/api` 同源。Session Controller 在不激活冷 Agent 的情况下解析 cwd；双重 `realpath` confinement 会拒绝路径穿越与符号链接逃逸。若 `files.port` 与 `files.publicUrl` 都没有键，则 listener 与页面全局都不存在，文件点击继续使用 Host 原生打开器。
 
@@ -51,7 +51,7 @@ cookie 签名密钥是 `ctx.credentials` 中由 `client-connection/browser-sessi
 
 API Gateway Client 把内部 `$events` logical stream 注册为唯一 generation source，与有无 `$on` 订阅无关。Host 在 API Remotes source factory 同步挂好所有增量 listener 后，先发送唯一 `{ type: 'ready', clientId, host: { home } }` 项，再发送事件。`ConnectionController` 仅在收到该 ready 项后发布 generation 并调用 `onConnected`，因此 baseline 不会跑在增量 listener 前面。
 
-`$events` 结束、返回 Remote stream error、收到非 ready 首项或畸形事件项，都会使当前 generation 失效。Controller 立即撤回 generation、发布 `reconnecting`，并在退避后重开 `$events`。Gateway mux 自己负责重建底层 WebSocket；Connection generation 负责重开 logical stream 并建立下一次 baseline 起点。
+`$events` 结束、返回 Remote stream error、收到非 ready 首项或畸形事件项，都会使当前 generation 失效。浏览器报告网络可用时，Controller 发布 `connecting`，并在 500ms、1s、2s、4s、8s 与 10s 上限内采用 50%–100% 抖动重试。它记录每次尝试、要求 Gateway 替换物理 WebSocket，再重开 `$events`；10s 档失败后发布终态 `disconnected`。`ctx.connection.reconnect()` 会中断活动工作、重置序列，并立即开始 retry 1。浏览器 `offline` 会中断活动工作、发布 `disconnected` 并暂停自动尝试；下一次 `online` 转换会重置序列并从 500ms 档开始。ready 项会发布 `connected`。Gateway mux 每次收到请求只做一次物理连接尝试，不再运行另一套重试调度。[连接恢复决策](../../../.agents/notes/implemented/feature/2026-08-28-web-connection-recovery-control.zh.md)规定重试节奏和手动恢复行为。
 
 <a id="model-experience"></a>
 ## 模型体验

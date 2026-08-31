@@ -104,8 +104,8 @@ type CommandResult = {
 
 type ClientReceipt = {
   protocolVersion: typeof CLIENT_RECEIPT_PROTOCOL
-  actor: Actor
-  commandResult: CommandResult
+  actor: Record<string, unknown>
+  commandResult: Record<string, unknown>
 }
 
 type Lease = {
@@ -134,9 +134,10 @@ function sha256(value: string | Uint8Array): string {
 
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== 'object') {
-    const encoded = JSON.stringify(value)
-    if (encoded === undefined) throw new Error('maintenance-reporter: command material is not JSON')
-    return encoded
+    if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+      throw new Error('maintenance-reporter: command material is not JSON')
+    }
+    return JSON.stringify(value)
   }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   const record = value as Record<string, unknown>
@@ -161,19 +162,26 @@ function exactKeys(value: object, keys: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((key, index) => key === expected[index])
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function validateResult(command: Command, value: unknown): CommandResult {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)
+  if (!isRecord(value)
     || !exactKeys(value, ['protocolVersion', 'requestId', 'operation', 'outcome', 'dbNow', 'reasonCode', 'holder', 'aggregate'])) {
     throw new Error('maintenance-reporter: command result fields are invalid')
   }
-  const result = value as CommandResult
+  const result = value
+  const outcome = result.outcome
+  const aggregate = result.aggregate
   if (result.protocolVersion !== RESULT_PROTOCOL || result.requestId !== command.requestId
     || result.operation !== command.operation
-    || !['applied', 'replay', 'no-op', 'stale', 'rejected'].includes(result.outcome)
-    || typeof result.aggregate !== 'object' || result.aggregate.protocolVersion !== AGGREGATE_PROTOCOL) {
+    || (outcome !== 'applied' && outcome !== 'replay' && outcome !== 'no-op'
+      && outcome !== 'stale' && outcome !== 'rejected')
+    || !isRecord(aggregate) || aggregate.protocolVersion !== AGGREGATE_PROTOCOL) {
     throw new Error('maintenance-reporter: command result identity is invalid')
   }
-  return result
+  return result as CommandResult
 }
 
 /** JSON-line transport over one owner-only Unix socket. */
@@ -209,11 +217,11 @@ export class UnixMaintenanceTransport implements MaintenanceTransport {
         else if (result === undefined) reject(new Error('maintenance-reporter: command result is missing'))
         else resolve(result)
       }
-      const aborted = (): void => finish(new Error('maintenance-reporter: command aborted'))
-      const timer = setTimeout(() => finish(new Error('maintenance-reporter: command timed out')), this.timeoutMs)
+      const aborted = (): void => { finish(new Error('maintenance-reporter: command aborted')) }
+      const timer = setTimeout(() => { finish(new Error('maintenance-reporter: command timed out')) }, this.timeoutMs)
       signal?.addEventListener('abort', aborted, { once: true })
       socket.once('connect', () => socket.write(`${JSON.stringify(command)}\n`))
-      socket.once('error', () => finish(new Error('maintenance-reporter: command transport unavailable')))
+      socket.once('error', () => { finish(new Error('maintenance-reporter: command transport unavailable')) })
       socket.on('data', (chunk) => {
         response = Buffer.concat([response, chunk])
         if (response.length > MAX_RESPONSE_BYTES) {
@@ -250,11 +258,14 @@ function parseClientReceipts(event: Extract<SessionEvent, { type: 'tool/result' 
       if (!line.startsWith(CLIENT_RECEIPT_PREFIX)) continue
       let value: unknown
       try { value = JSON.parse(line.slice(CLIENT_RECEIPT_PREFIX.length)) } catch { continue }
-      if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
-      const receipt = value as ClientReceipt
-      if (receipt.protocolVersion !== CLIENT_RECEIPT_PROTOCOL || typeof receipt.actor !== 'object'
-        || receipt.commandResult?.protocolVersion !== RESULT_PROTOCOL) continue
-      receipts.push(receipt)
+      if (!isRecord(value) || value.protocolVersion !== CLIENT_RECEIPT_PROTOCOL
+        || !isRecord(value.actor) || !isRecord(value.commandResult)
+        || value.commandResult.protocolVersion !== RESULT_PROTOCOL) continue
+      receipts.push({
+        protocolVersion: CLIENT_RECEIPT_PROTOCOL,
+        actor: value.actor,
+        commandResult: value.commandResult,
+      })
     }
   }
   return receipts
@@ -356,10 +367,14 @@ export interface MaintenanceReporter {
  */
 export function createMaintenanceReporter(options: ReporterOptions): MaintenanceReporter {
   const config: ResolvedConfig = {
-    ...options.config,
+    socketPath: options.config.socketPath,
+    policyPath: options.config.policyPath,
+    reporterHash: options.config.reporterHash,
     reporterId: options.config.reporterId ?? 'dsh-maintenance-reporter',
     heartbeatMs: options.config.heartbeatMs ?? DEFAULT_HEARTBEAT_MS,
     requestTimeoutMs: options.config.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS,
+    instructionCoveredPresets: options.config.instructionCoveredPresets,
+    reportingCapablePresets: options.config.reportingCapablePresets,
     policyHash: policyHash(options.config.policyPath),
     runtimeGeneration: runtimeGeneration(),
   }
@@ -490,18 +505,22 @@ export function createMaintenanceReporter(options: ReporterOptions): Maintenance
     const currentTurn = turns.get(session) ?? activeTurn(session)
     const actorValue = receipt.actor
     const result = receipt.commandResult
+    const holderValue = result.holder
     if (!topLevel(session) || currentTurn === undefined || actorValue.kind !== 'dsh'
       || actorValue.topLevel !== true || actorValue.taskId !== String(session.id)
       || actorValue.turnId !== String(currentTurn) || result.operation !== 'acquire'
-      || !['applied', 'replay', 'no-op'].includes(result.outcome) || result.holder?.status !== 'active') return
+      || (result.outcome !== 'applied' && result.outcome !== 'replay' && result.outcome !== 'no-op')
+      || !isRecord(holderValue) || holderValue.status !== 'active') return
+    const acceptedActor = actorValue as Actor
+    const holder = holderValue as Holder
     const existing = leases.get(session)
-    if (existing !== undefined && leaseIdentity(existing.holder) !== leaseIdentity(result.holder)) {
+    if (existing !== undefined && leaseIdentity(existing.holder) !== leaseIdentity(holder)) {
       existing.identityConflict = true
       return
     }
     leases.set(session, {
-      actor: actorValue,
-      holder: result.holder,
+      actor: acceptedActor,
+      holder,
       terminal: null,
       nextHeartbeatAt: now() + config.heartbeatMs,
       identityConflict: false,
@@ -556,7 +575,7 @@ export function createMaintenanceReporter(options: ReporterOptions): Maintenance
         [ENV_TURN_ID]: String(turn),
         [ENV_RUNTIME_GENERATION]: config.runtimeGeneration,
         [ENV_REPORTER_ID]: config.reporterId,
-      }) as DshEnvironment
+      })
     },
     snapshot() {
       return { leaseCount: leases.size, runningCount: running.size, coverageState: coverageState() }
@@ -575,9 +594,9 @@ export function apply(ctx: Context, config: Config): void {
     transport: new UnixMaintenanceTransport(config.socketPath, config.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS),
   })
   const disposers = [
-    ctx.on('agent/status', ({ agent, status }) => reporter.handleAgentStatus(agent, status)),
-    ctx.on('agent/disposed', ({ agent }) => reporter.handleAgentDisposed(agent)),
-    ctx.on('session/event', (session, event) => reporter.handleSessionEvent(session, event)),
+    ctx.on('agent/status', ({ agent, status }) => { reporter.handleAgentStatus(agent, status) }),
+    ctx.on('agent/disposed', ({ agent }) => { reporter.handleAgentDisposed(agent) }),
+    ctx.on('session/event', (session, event) => { reporter.handleSessionEvent(session, event) }),
     ctx.shellEnv.register({
       name: 'maintenance-reporter',
       variables: {

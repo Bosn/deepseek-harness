@@ -14,6 +14,7 @@ import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { startMockLlmServer, type MockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as retry from '../src/index.ts'
@@ -70,6 +71,7 @@ async function loadYaml(lines: readonly string[]): Promise<Context> {
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-llm', LlmRuntime],
     ['@deepseek-ai/dsh-session', SessionStore],
+    ['@deepseek-ai/dsh-session-projection', SessionProjectionRegistry],
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRuntime],
     ['@deepseek-ai/dsh-agent', AgentRegistry],
@@ -101,6 +103,7 @@ describe('real Loader composition', () => {
     const loaded = await loadYaml([
       "- name: '@deepseek-ai/dsh-llm'",
       "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-session-projection'",
       "- name: '@deepseek-ai/dsh-system-prompt'",
       "- name: '@deepseek-ai/dsh-tools'",
       "- name: '@deepseek-ai/dsh-agent'",
@@ -116,7 +119,10 @@ describe('real Loader composition', () => {
 
     const adapter = new TransientOnceAdapter()
     loaded.llm.registerAdapter(['mock'], adapter)
-    const agent = loaded.agentLoop.create(SessionId('loader-retry'), { provider: 'mock', model: 'mock' })
+    const { agent } = await loaded.agents.create({
+      sessionId: SessionId('loader-retry'),
+      agentOptions: { provider: 'mock', model: 'mock' },
+    })
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
     await agent.whenIdle()
 
@@ -139,6 +145,7 @@ describe('real Loader composition', () => {
     const loaded = await loadYaml([
       "- name: '@deepseek-ai/dsh-llm'",
       "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-session-projection'",
       "- name: '@deepseek-ai/dsh-system-prompt'",
       "- name: '@deepseek-ai/dsh-tools'",
       "- name: '@deepseek-ai/dsh-agent'",
@@ -159,10 +166,13 @@ describe('real Loader composition', () => {
     ])
     return {
       loaded,
-      agent: loaded.agentLoop.create(SessionId('loader-cooldown'), {
-        provider: 'deepseek-official',
-        model: 'deepseek-v4-flash',
-      }),
+      agent: (await loaded.agents.create({
+        sessionId: SessionId('loader-cooldown'),
+        agentOptions: {
+          provider: 'deepseek-official',
+          model: 'deepseek-v4-flash',
+        },
+      })).agent,
     }
   }
 
@@ -199,6 +209,7 @@ describe('real Loader composition', () => {
     const loaded = await loadYaml([
       "- name: '@deepseek-ai/dsh-llm'",
       "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-session-projection'",
       "- name: '@deepseek-ai/dsh-system-prompt'",
       "- name: '@deepseek-ai/dsh-tools'",
       "- name: '@deepseek-ai/dsh-agent'",
@@ -226,9 +237,9 @@ describe('real Loader composition', () => {
       "- name: '@deepseek-ai/dsh-llm-retry'",
       "- name: '@deepseek-ai/dsh-agent-loop'",
     ])
-    const agent = loaded.agentLoop.create(SessionId('loader-pi-ai-cooldown'), {
-      provider: 'qwen-test',
-      model: 'qwen-test-model',
+    const { agent } = await loaded.agents.create({
+      sessionId: SessionId('loader-pi-ai-cooldown'),
+      agentOptions: { provider: 'qwen-test', model: 'qwen-test-model' },
     })
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'recover' }], source: { kind: 'user' } }))
@@ -256,6 +267,7 @@ describe('real Loader composition', () => {
     const loaded = await loadYaml([
       "- name: '@deepseek-ai/dsh-llm'",
       "- name: '@deepseek-ai/dsh-session'",
+      "- name: '@deepseek-ai/dsh-session-projection'",
       "- name: '@deepseek-ai/dsh-system-prompt'",
       "- name: '@deepseek-ai/dsh-tools'",
       "- name: '@deepseek-ai/dsh-agent'",
@@ -282,9 +294,9 @@ describe('real Loader composition', () => {
       "- name: '@deepseek-ai/dsh-llm-retry'",
       "- name: '@deepseek-ai/dsh-agent-loop'",
     ])
-    const agent = loaded.agentLoop.create(SessionId('loader-openai-quota'), {
-      provider: 'openai',
-      model: 'openai-test-model',
+    const { agent } = await loaded.agents.create({
+      sessionId: SessionId('loader-openai-quota'),
+      agentOptions: { provider: 'openai', model: 'openai-test-model' },
     })
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'stop' }], source: { kind: 'user' } }))

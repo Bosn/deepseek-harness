@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-29-deployment-declared-privileged-browser-authority.md
-2026-08-29-deployment-declared-privileged-browser-authority.md: 9f03e8084db199b86d682f7df4d4a06bc5764b68
-2026-08-29-deployment-declared-privileged-browser-authority.zh.md: 83b954690b8042f0b342af5687a32d3025946540
+2026-08-29-deployment-declared-privileged-browser-authority.md: b134116ab4c5d71bbd7f9fd9ab905836455b7bbd
+2026-08-29-deployment-declared-privileged-browser-authority.zh.md: fc01df691def2d4775db4597683791901cb594a6

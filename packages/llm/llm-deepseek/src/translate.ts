@@ -8,8 +8,9 @@
  * @module dsh-llm-deepseek/translate
  */
 
-import { ToolCallId, CONTENT_FILTERED_CODE, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { CONTENT_FILTERED_CODE, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { DONE } from './sse.ts'
 import type { WireChunk, WireUsage } from './types.ts'
 
@@ -83,7 +84,7 @@ function closeBlock(block: OpenBlock): ContentBlock {
     case 'reasoning': return { type: 'reasoning', text: block.text }
     case 'tool-call': return {
       type: 'tool-call',
-      id: ToolCallId(block.callId ?? ''),
+      id: brandString<ToolCallId>(block.callId ?? ''),
       name: block.name ?? '',
       arguments: block.text,
     }
@@ -178,7 +179,7 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
         yield {
           type: 'tool-call-delta',
           index: block.index,
-          id: ToolCallId(block.callId ?? ''),
+          id: brandString<ToolCallId>(block.callId ?? ''),
           ...block.name !== undefined ? { name: block.name } : {},
           argumentsDelta: fragment,
         }

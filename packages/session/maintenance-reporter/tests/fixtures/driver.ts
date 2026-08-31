@@ -25,7 +25,7 @@ const server = createServer((socket) => {
   let input = ''
   socket.setEncoding('utf8')
   socket.on('data', (chunk) => {
-    input += chunk
+    input += chunk.toString()
     const newline = input.indexOf('\n')
     if (newline < 0) return
     const command = JSON.parse(input.slice(0, newline)) as Record<string, unknown>
@@ -134,5 +134,10 @@ try {
   await writeFile('maintenance-captures.json', JSON.stringify({ environment, commands }))
 } finally {
   if (!disposed) await ctx.fiber.dispose()
-  await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
+  })
 }

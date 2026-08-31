@@ -14,7 +14,7 @@ Status: implemented
 
 connection 插件提供独立的部署声明 `privilegedHosts`。其条目采用与 `trustedHosts` 相同的规范形 `host[:port]` 规则：显式端口仅精确匹配，不带端口的条目匹配所有端口。Loopback 无需此声明即可渲染 Host 配置。`privilegedHosts` 与 `trustedHosts` 共同组成 Host 与 Origin 可达性集合，因此同一个权威不必在两份列表中重复；每个请求仍要求同一个浏览器会话，且该声明不增加任何逐方法权限。
 
-Host 把声明以 `__DSH_PRIVILEGED_HOSTS__` 注入所提供的文档。浏览器根据 loopback 或当前页面权威的精确匹配，派生 `ctx.connection.canUseHostConfiguration`。Settings 根据这项能力选择 Host 支撑的客户端；桌面专属行为仍以 `isLoopback` 为真源。畸形或缺失的注入会让远程页面保留进程内镜像。
+Host 把声明以 `__DSH_PRIVILEGED_HOSTS__` 注入所提供的文档。浏览器根据 loopback 或当前页面权威的精确匹配派生 `ctx.connection.canUseHostConfiguration`，API Gateway 再将这项固定事实映射为 `ctx.remote.$host.canUseHostConfiguration`。Settings 根据该 Remote 事实选择 Host 支撑的客户端；桌面专属行为仍以 `isLoopback` 为真源。畸形或缺失的注入会让远程页面保留进程内镜像。
 
 这项声明既不是认证，也不是逐方法 API 访问控制列表。进程 token 交换与签名浏览器会话 cookie 统一认证每项 Host 操作；Host 与 Origin 检查把 `trustedHosts` 与 `privilegedHosts` 的并集作为请求路由策略。部署应尽可能把每个 `privilegedHosts` 条目限制到预期端口，使只有预期页面渲染这些控件。
 
