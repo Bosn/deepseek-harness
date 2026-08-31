@@ -180,7 +180,10 @@ async function initializeSecret(credentials: CredentialProvider): Promise<Buffer
 /**
  * Process launch-token exchange and persistent signed-cookie verification.
  * Connection loads the credential provider's signing secret during activation
- * and retains it for synchronous request authentication.
+ * and retains it for synchronous request authentication. {@link bypass}
+ * returns the disabled authenticator instead: every request and URL is
+ * accepted, leaving access control to network reachability and the Host/Origin
+ * trust fence.
  */
 export class BrowserAuth {
   private readonly launchToken: string
@@ -190,6 +193,7 @@ export class BrowserAuth {
     processOwner: object,
     private readonly secret: Buffer,
     maxAgeDays: number,
+    private readonly disabled = false,
   ) {
     this.launchToken = processLaunchToken(processOwner)
     this.maxAgeMilliseconds = maxAgeDays * DAY_MILLISECONDS
@@ -197,6 +201,17 @@ export class BrowserAuth {
       || !Number.isSafeInteger(Date.now() + this.maxAgeMilliseconds)) {
       throw new Error('client-connection: cookieMaxAgeDays exceeds the safe timestamp range')
     }
+  }
+
+  /**
+   * Browser-session authentication turned off: index and request checks accept
+   * unconditionally and authenticated URLs print without a token. The
+   * deployment keeps network reachability and the Host/Origin trust fence as
+   * its remaining access controls.
+   * @returns authenticator that never rejects.
+   */
+  static bypass(): BrowserAuth {
+    return new BrowserAuth({}, Buffer.alloc(0), 1, true)
   }
 
   /**
@@ -216,7 +231,8 @@ export class BrowserAuth {
   }
 
   /**
-   * Add this process's launch token to the ordinary application root URL.
+   * Add this process's launch token to the ordinary application root URL;
+   * the disabled authenticator returns the clean root URL instead.
    * @param baseUrl - canonical browser origin without credentials.
    * @returns root URL carrying the process token as its sole authentication input.
    */
@@ -225,6 +241,7 @@ export class BrowserAuth {
     url.pathname = '/'
     url.search = ''
     url.hash = ''
+    if (this.disabled) return url.href
     url.searchParams.set(TOKEN_QUERY, this.launchToken)
     return url.href
   }
@@ -238,6 +255,7 @@ export class BrowserAuth {
    * @returns true only when the caller may serve index.html.
    */
   authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse): boolean {
+    if (this.disabled) return true
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
@@ -287,6 +305,7 @@ export class BrowserAuth {
    * @returns true only for an unexpired cookie signed by this activation's loaded secret.
    */
   isAuthenticated(request: ConnectionTrustRequest): boolean {
+    if (this.disabled) return true
     const authority = requestAuthority(request.headers)
     return authority !== undefined && this.isAuthenticatedFor(request, [authority])
   }
@@ -305,6 +324,7 @@ export class BrowserAuth {
     request: ConnectionTrustRequest,
     applicationAuthorities: readonly string[],
   ): boolean {
+    if (this.disabled) return true
     const requestTarget = requestAuthority(request.headers)
     const rawCookie = header(request.headers, 'cookie')
     if (requestTarget === undefined || rawCookie === undefined) return false

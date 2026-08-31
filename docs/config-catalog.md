@@ -441,6 +441,13 @@ export interface ConnectionConfig {
    */
   privilegedHosts?: string[]
   /**
+   * Serve the browser surface without the launch-token exchange and signed
+   * cookies. Defaults to true; false accepts every root and /api request that
+   * clears the Host/Origin trust fence, leaving containment entirely to
+   * network reachability and {@link ConnectionConfig.trustedHosts}.
+   */
+  browserSessionAuth?: boolean
+  /**
    * Optional dedicated workspace-file origin. With neither key present no
    * listener exists; `files: {}` is intentionally a no-op because the config
    * schema materializes absent nested objects.

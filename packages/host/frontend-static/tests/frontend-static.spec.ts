@@ -30,7 +30,7 @@ afterEach(async () => {
 })
 
 /** Write a dist fixture and the authenticated Web rows, then boot them through the real Loader. */
-async function loadComposition(): Promise<Context> {
+async function loadComposition(bypassSessionAuth = false): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-frontend-static-'))
   const dist = join(root, 'dist')
   await mkdir(dist)
@@ -51,6 +51,7 @@ async function loadComposition(): Promise<Context> {
     "    host: '127.0.0.1'",
     '    port: 0',
     "- name: '@deepseek-ai/dsh-client-connection'",
+    ...bypassSessionAuth ? ['  config:', '    browserSessionAuth: false'] : [],
     '- id: frontend',
     "  name: '@deepseek-ai/dsh-host-frontend-static'",
     '  config:',
@@ -204,5 +205,24 @@ describe('real Loader composition', () => {
     await frontendEntry!.fiber?.dispose()
     expect((await request(port, '/no/such/route')).status).toBe(404)
     expect(() => server.registerFallback(() => {})).not.toThrow()
+  })
+
+  it('serves the shell and dispatches /api session-free when the connection row disables authentication', { timeout: 60_000 }, async () => {
+    const loaded = await loadComposition(true)
+    const port = loaded.webServer.port
+    const launchUrl = loaded.connection.authenticatedUrl(`http://127.0.0.1:${String(port)}`)
+    expect(new URL(launchUrl).searchParams.get('token')).toBeNull()
+
+    const shell = await request(port, '/')
+    expect(shell.status).toBe(200)
+    expect(shell.type).toBe('text/html; charset=utf-8')
+    expect(shell.body).toContain('shell')
+
+    // Dispatch, not 401: the fence passed loopback and the bypass authenticator accepted.
+    expect(await request(port, '/api/no/such/route')).toEqual({
+      status: 404,
+      type: 'text/plain;charset=UTF-8',
+      body: 'not found',
+    })
   })
 })

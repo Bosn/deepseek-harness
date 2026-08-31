@@ -127,6 +127,13 @@ export interface ConnectionConfig {
    */
   privilegedHosts?: string[]
   /**
+   * Serve the browser surface without the launch-token exchange and signed
+   * cookies. Defaults to true; false accepts every root and /api request that
+   * clears the Host/Origin trust fence, leaving containment entirely to
+   * network reachability and {@link ConnectionConfig.trustedHosts}.
+   */
+  browserSessionAuth?: boolean
+  /**
    * Optional dedicated workspace-file origin. With neither key present no
    * listener exists; `files: {}` is intentionally a no-op because the config
    * schema materializes absent nested objects.
@@ -146,6 +153,7 @@ export interface ConnectionConfig {
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
   privilegedHosts: z.array(String).default([]),
+  browserSessionAuth: z.boolean().default(true),
   // No inner defaults: key presence is the enable signal.
   files: z.object({
     port: z.natural().max(65535),
@@ -157,10 +165,11 @@ export const Config: z<ConnectionConfig> = z.object({
 
 /**
  * Mounts the API gateway under the browser transport prefix. Every request on
- * the prefix passes the Host/Origin browser-trust fence and persistent browser
- * authentication before dispatch. `privilegedHosts` contributes to the outer
- * trust fence and client capability injection only; it never replaces the
- * browser session or creates a method-specific authorization path.
+ * the prefix passes the Host/Origin browser-trust fence and, unless
+ * `browserSessionAuth` is false, persistent browser authentication before
+ * dispatch. `privilegedHosts` contributes to the outer trust fence and client
+ * capability injection only; it never replaces the browser session or creates
+ * a method-specific authorization path.
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
@@ -196,7 +205,9 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
     }
   }
   assertImageBodyCapacity(ctx, maxRequestBodyBytes)
-  const browserAuth = await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
+  const browserAuth = config?.browserSessionAuth === false
+    ? BrowserAuth.bypass()
+    : await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
   const connection = new HostConnectionService(
     ctx,
     fenceHosts,
