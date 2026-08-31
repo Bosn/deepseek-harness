@@ -38,9 +38,11 @@ Host 会把 `privilegedHosts` 以 `__DSH_PRIVILEGED_HOSTS__` 注入页面。Conn
 <a id="browser-authentication-and-request-trust"></a>
 ## 浏览器认证与请求信任
 
-每个 Host RPC 方法和 WebSocket stream 都要求同一个浏览器会话，不存在按方法区分的 loopback 层。每个进程生成一个随机启动令牌。`dsh-web-app` 打印并打开带 `?token=...` 的普通根 URL；`frontend-static` 把根路径和 index 请求交给 `ctx.connection.authorizeIndex`，后者只在 `GET /` 接受该令牌，写入绑定 authority 的签名 cookie，再重定向到干净的 `/`。缺失、过期、畸形或 authority 不匹配的 cookie 会在 RPC 分发前得到 401。静态资源保持公开。HTTP 载体不在根路径交换之外接受 query token，也不接受 Authorization header token。
+每个 Host RPC 方法和 WebSocket stream 都要求同一个浏览器会话（除非部署关闭该层，见下文），不存在按方法区分的 loopback 层。每个进程生成一个随机启动令牌。`dsh-web-app` 打印并打开带 `?token=...` 的普通根 URL；`frontend-static` 把根路径和 index 请求交给 `ctx.connection.authorizeIndex`，后者只在 `GET /` 接受该令牌，写入绑定 authority 的签名 cookie，再重定向到干净的 `/`。缺失、过期、畸形或 authority 不匹配的 cookie 会在 RPC 分发前得到 401。静态资源保持公开。HTTP 载体不在根路径交换之外接受 query token，也不接受 Authorization header token。
 
 cookie 签名密钥是 `ctx.credentials` 中由 `client-connection/browser-session` 拥有的 grant 记录。本地提供方把它持久化到 `$DSH_HOME/.credentials.yaml`；`BrowserAuth` 在 Connection 激活期间加载或创建该记录，并把密钥留在内存中，因此请求认证同步执行。删除或替换该记录会在下一次 Connection 激活时生效。cookie 携带绝对签发与过期区间，`cookieMaxAgeDays` 默认设为 30 天，并在确定性名称与签名 payload 中同时绑定规范化 hostname 和 port。它是 host-only、`Path=/`、`HttpOnly`、`SameSite=Strict`；随附服务器使用 loopback HTTP，因此刻意不设置 `Secure`。
+
+把 `browserSessionAuth` 设为 false 会在各入口关闭整层会话机制。`BrowserAuth` 随即以 bypass 模式运行：根路径和 index 请求无条件放行，每个通过信任栅栏的 Host 请求直接分发，工作区文件 listener 照常接受，`dsh-web-app` 打印干净的、不带 token 的 URL。上面的 Host/Origin 信任栅栏仍然生效——它是可达性策略而非身份机制；请相应配置 `trustedHosts`，并改用网络层（绑定、反向代理或 VPN）做封闭。默认仍是启动令牌加签名 cookie 的认证。
 
 认证之前，每个请求仍经过 `src/api-request-trust.ts`。其 `Host` 必须是 loopback，或与 `trustedHosts` 和 `privilegedHosts` 的并集匹配：带端口的 `host:port` 精确匹配，不带端口的条目匹配任意端口，两侧均经 WHATWG 归一化。若附带 `Origin`，它必须等于该 Host；`sec-fetch-site: cross-site` 一律拒绝。两份列表中的畸形 authority 都会让插件加载失败。这些检查防御 DNS rebinding 与跨站浏览器请求，绝不建立身份。Host/Origin 校验失败返回 403；Host 可信但未认证的请求返回 401。认证后所有 Host API 使用同一策略；`privilegedHosts` 只让匹配的远程页面启用随附 Host 配置 UI，绝不绕过或替代浏览器会话。`dsh web --host 0.0.0.0` 仍不受支持。决策记录：[浏览器请求信任](../../../.agents/notes/implemented/architecture/2026-07-28-api-browser-trust-boundary.zh.md)、[浏览器令牌认证](../../../.agents/notes/implemented/architecture/2026-08-24-browser-token-authentication.zh.md)与[部署声明的 Host 配置 UI](../../../.agents/notes/implemented/architecture/2026-08-29-deployment-declared-privileged-browser-authority.zh.md)。
 

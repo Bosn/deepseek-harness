@@ -259,4 +259,21 @@ describe('BrowserAuth', () => {
     await expect(createAuth(new RecordCredentials(), Number.MAX_SAFE_INTEGER))
       .rejects.toThrow(/safe timestamp range/u)
   })
+
+  it('bypass accepts every index and request check and prints a token-free URL', () => {
+    const auth = BrowserAuth.bypass()
+    expect(auth.authenticatedUrl('http://127.0.0.1:3080/?token=leftover#fragment'))
+      .toBe('http://127.0.0.1:3080/')
+    expect(new URL(auth.authenticatedUrl('http://127.0.0.1:3080')).searchParams.get('token')).toBeNull()
+
+    const served = response()
+    expect(auth.authorizeIndex(request('/index.html', '127.0.0.1:3080'), served.value)).toBe(true)
+    expect(served.state).toEqual({})
+
+    expect(auth.isAuthenticated(request('/', '127.0.0.1:3080'))).toBe(true)
+    expect(auth.isAuthenticated({ headers: {} })).toBe(true)
+    expect(auth.isAuthenticated({ headers: { host: 'anywhere:9999' } })).toBe(true)
+    expect(auth.isAuthenticatedFor(request('/', '127.0.0.1:3082'), ['127.0.0.1:3080'])).toBe(true)
+    expect(auth.isAuthenticatedFor({ headers: {} }, [])).toBe(true)
+  })
 })

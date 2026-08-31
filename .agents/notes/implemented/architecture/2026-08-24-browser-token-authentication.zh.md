@@ -20,7 +20,7 @@ HMAC 密钥是 `ctx.credentials` 中位于 `client-connection/browser-session` �
 
 页内 Web Worker preview 不暴露网络 socket。其由页面持有的 `postMessage` tunnel 先进入真实 route，收到 401 或 403 后再经 worker 本地 fetch handler 重试。这样既保留 Connection interceptor，又把认证绕过限制在创建 Host worker 的页面内。
 
-随附 CLI 继续拒绝 `--host 0.0.0.0`。认证不代表支持网络部署、TLS、转发 header 解释或代理配置。
+随附 CLI 继续拒绝 `--host 0.0.0.0`。认证不代表支持网络部署、TLS、转发 header 解释或代理配置。拥有网络准入的部署可以通过 `browserSessionAuth: false` 关闭整层会话机制，见 [opt-out 说明](2026-08-31-browser-session-auth-opt-out.zh.md)。
 
 ## 验证
 

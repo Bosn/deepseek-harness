@@ -1,4 +1,4 @@
-/** Real `dsh web` authentication against a temporary Harness home. */
+/** Real `dsh web` authentication and its opt-out against a temporary Harness home. */
 
 import type { ChildProcess } from 'node:child_process'
 import { spawn } from 'node:child_process'
@@ -7,7 +7,7 @@ import { request as httpRequest } from 'node:http'
 import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -204,6 +204,50 @@ describe('dsh web authentication through the real CLI', () => {
     } finally {
       if (second !== undefined) await stopWeb(second)
       if (first !== undefined) await stopWeb(first)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('serves the index and Host APIs session-free when the home layer disables browser authentication', { timeout: 180_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-web-auth-real-cli-'))
+    const dshHome = join(root, '.dsh')
+    await mkdir(dshHome, { recursive: true })
+    await writeFile(join(dshHome, 'cordis.patch.yml'), [
+      '# e2e overlay: this home serves the browser surface without browser-session authentication.',
+      '- id: connection',
+      '  config:',
+      '    browserSessionAuth: false',
+      '    trustedHosts: !!js ctx.webRuntime.trustedHosts',
+      '',
+    ].join('\n'))
+    const port = await freePort()
+    let running: RunningWeb | undefined
+    try {
+      running = await startWeb(root, dshHome, port)
+      const launchUrl = new URL(running.launchUrl)
+      expect(launchUrl.origin).toBe(`http://127.0.0.1:${String(port)}`)
+      expect(launchUrl.pathname).toBe('/')
+      expect(launchUrl.searchParams.get('token')).toBeNull()
+
+      const index = await fetch(running.launchUrl)
+      expect(index.status).toBe(200)
+      expect(index.headers.get('content-type')).toContain('text/html')
+      expect(await index.text()).not.toContain('dsh web authentication required')
+
+      const unauthenticated = await describeSettings(port, launchUrl.host)
+      expect(unauthenticated.status).toBe(200)
+      expect(JSON.parse(unauthenticated.body)).toMatchObject({
+        type: 'server-response',
+        rpcId: 'web-auth-real-cli',
+        result: { ok: true, value: { namespaces: expect.any(Array) as unknown } },
+      })
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\n${redact(running?.output() ?? '')}`,
+        { cause: error },
+      )
+    } finally {
+      if (running !== undefined) await stopWeb(running)
       await rm(root, { recursive: true, force: true })
     }
   })
