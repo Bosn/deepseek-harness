@@ -10,7 +10,7 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
@@ -90,9 +90,8 @@ function targetBudgetKey(target: Pick<LlmCallConfig, 'provider' | 'model'>): str
  */
 function requestBytes(session: Session): number {
   let bytes = estimateHeaderBytes(session.requestHeader())
-  const events = session.events
   for (const seq of session.surface.nodes) {
-    const event = events[seq]
+    const event = session.eventAt(seq)
     /* v8 ignore next -- validated surface seqs always name existing session events. */
     if (event === undefined) continue
     const message = session.deriveEventMessage(event)
@@ -111,12 +110,12 @@ function recoveryCanRetry(
   turn: number,
   step: number,
 ): boolean {
-  const turnBoundary = session.events.findLast(event => (
+  const turnBoundary = session.snapshotEvents().findLast(event => (
     event.type === 'turn/start' || event.type === 'turn/end'
   ))
   if (turnBoundary?.type !== 'turn/start') return false
   if (turnBoundary.data.turn !== turn) return false
-  const stepBoundary = session.events.findLast(event => (
+  const stepBoundary = session.snapshotEvents().findLast(event => (
     event.type === 'step/start' || event.type === 'step/end'
   ))
   if (stepBoundary?.type !== 'step/start') return false
@@ -484,8 +483,8 @@ export class BasicCompactionEngine extends CompactionEngine {
    * @returns the successful durable compaction result.
    */
   override async compactRegion(
-    start: number,
-    end: number,
+    start: SessionSeq,
+    end: SessionSeq,
     agent: Agent,
     signal?: AbortSignal,
     summarizationInputBytes?: number,

@@ -212,20 +212,12 @@ export interface Config {
 export interface Config {
   /** Maximum cold Session artifact size eligible for one full projection observation. */
   readonly coldBlankProbeMaxBytes?: number
-  /**
-   * Maximum UTF-8 size of a complete history message through the repository's
-   * standard Web clients, whose carrier correlation ids are 36-byte UUIDs.
-   * Raw or custom carriers with other id lengths are outside the complete-carrier
-   * guarantee. Older whole message groups are omitted first; zero disables the bound.
-   * @default 2097152
-   */
-  readonly historyPageMaxBytes?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
 }
 ```
 
-来源：[`packages/api/session-controller/src/index.ts:73`](../packages/api/session-controller/src/index.ts)
+来源：[`packages/api/session-controller/src/index.ts:68`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 
@@ -341,32 +333,6 @@ export interface ConnectionConfig {
    * bind. An entry that is not a bare, canonical authority fails plugin load.
    */
   trustedHosts?: string[]
-  /**
-   * Remote page authorities where the shipped client may expose Host-backed
-   * configuration UI, in the same `host[:port]` form as
-   * {@link ConnectionConfig.trustedHosts}. Each entry also joins the outer
-   * Host/Origin trust fence, but never bypasses browser-session authentication.
-   * This is a client capability declaration, not a method-specific API grant.
-   */
-  privilegedHosts?: string[]
-  /**
-   * Serve the browser surface without the launch-token exchange and signed
-   * cookies. Defaults to true; false accepts every root and /api request that
-   * clears the Host/Origin trust fence, leaving containment entirely to
-   * network reachability and {@link ConnectionConfig.trustedHosts}.
-   */
-  browserSessionAuth?: boolean
-  /**
-   * Optional dedicated workspace-file origin. With neither key present no
-   * listener exists; `files: {}` is intentionally a no-op because the config
-   * schema materializes absent nested objects.
-   */
-  files?: {
-    /** Listener port. Zero requests an OS-assigned direct-access port. */
-    port?: number
-    /** Bare external HTTP(S) origin when a reverse proxy republishes the listener. */
-    publicUrl?: string
-  }
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -374,7 +340,7 @@ export interface ConnectionConfig {
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:111`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:55`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -440,13 +406,7 @@ export interface Config {
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
-  /**
-   * Fraction of a failed request's estimated bytes adopted as the
-   * probe-learned byte budget after HTTP 413 or eligible large-request timeout
-   * recovery. Must be in `(0, 1)`. Defaults to `0.75`.
-   */
-  learnedByteSafetyRatio?: number
-  /** Enable automatic pressure and failed-request recovery listeners. Defaults to `true`. */
+  /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
 
@@ -466,30 +426,8 @@ export interface CompactionPolicyConfig {
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
   compactionRetries?: number
-  /** Maximum retries after context-overflow or request-size recovery; `0` disables recovery. Defaults to `1`. */
+  /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
-  /**
-   * Optional bound on the estimated wire-byte size of the routed model request.
-   * Gateways answer oversized bodies with HTTP 413, which token pressure on a
-   * mega-context model can never predict; when set, pressure compaction also
-   * fires at this byte bound. It also limits summarizer requests, so the
-   * resolved value must hold one minimal replay message plus the fixed
-   * compaction instruction. Unset by default (token pressure only).
-   */
-  maxRequestBytes?: number
-  /**
-   * Optional cap on each complete summarizer request's estimated wire bytes.
-   * Oversized ranges use balanced hierarchical compaction transactions so
-   * every summarized message stays within a bounded request. After exact-model
-   * inheritance, its minimum with `maxRequestBytes` must hold one minimal
-   * replay message plus the fixed compaction instruction. Defaults to `512 * 1024`.
-   */
-  summarizationInputBytes?: number
-  /**
-   * Minimum estimated request bytes at which a stream `TIMEOUT` may trigger
-   * request-size compaction before generic retry. Defaults to `512 * 1024`.
-   */
-  timeoutRecoveryBytes?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -501,7 +439,7 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 }
 ```
 
-来源：[`packages/compaction/compaction-basic/src/types.ts:58`](../packages/compaction/compaction-basic/src/types.ts)
+来源：[`packages/compaction/compaction-basic/src/types.ts:38`](../packages/compaction/compaction-basic/src/types.ts)
 
 <a id="deepseek-aidsh-compaction-tool-result-pruner"></a>
 
@@ -521,7 +459,7 @@ export interface ToolResultPruneConfig {
 }
 ```
 
-来源：[`packages/compaction/compaction-tool-result-pruner/src/types.ts:4`](../packages/compaction/compaction-tool-result-pruner/src/types.ts)
+来源：[`packages/compaction/compaction-tool-result-pruner/src/types.ts:5`](../packages/compaction/compaction-tool-result-pruner/src/types.ts)
 
 <a id="deepseek-aidsh-cordis-host-runner"></a>
 
@@ -600,6 +538,73 @@ export interface Config {
 ```
 
 来源：[`packages/experimental/agent-team/src/types.ts:125`](../packages/experimental/agent-team/src/types.ts)
+
+<a id="deepseek-aidsh-experimental-code-runtime-python"></a>
+
+## `@deepseek-ai/dsh-experimental-code-runtime-python`
+
+```ts config-catalog
+/** Plugin config: every cap, changeable from `cordis.yml` (no hardcoded tunables). */
+export interface Config {
+  /**
+   * RLIMIT_CPU in whole seconds (a positive integer — `setrlimit` in the child
+   * rejects a float). The child sets the soft limit to `cpuSeconds` and the
+   * hard limit to `cpuSeconds + 1`: the kernel delivers SIGXCPU at the soft
+   * limit, which the host classifies as a `timeout`; the +1s hard limit is a
+   * SIGKILL backstop for a program that traps SIGXCPU. Granularity is seconds —
+   * a coarser counterpart to the worker backend's millisecond `computeMs`.
+   */
+  cpuSeconds?: number
+  /** Wall-clock ceiling in milliseconds; backstops CPU time for programs awaiting a promise nobody resolves. */
+  maxWallMs?: number
+  /**
+   * RLIMIT_AS in mebibytes; caps address space so a runaway allocation fails
+   * cleanly. Not applied on Darwin, where the dyld shared cache mapped into
+   * every process at exec exceeds any practical cap and the kernel rejects
+   * the call; `cpuSeconds` and `maxWallMs` still bound the run there. Bounds
+   * `maxLogBytes`/`maxValueBytes` at load on EVERY platform (this static check
+   * runs on Darwin too, where only the runtime `setrlimit` is skipped): each
+   * budget times a worst-case Unicode expansion must fit this byte count minus a
+   * fixed interpreter baseline, so a near-budget output cannot breach the address
+   * space during the child's build-and-encode.
+   */
+  addressSpaceMb?: number
+  /**
+   * Shared byte budget for captured log text (host-side ledger). Bounded at load
+   * against `addressSpaceMb`: the child builds and encodes a near-budget entry
+   * under RLIMIT_AS with several copies live at once, so this cap times the
+   * worst-case Unicode expansion must fit the address space left after the
+   * interpreter baseline (see `addressSpaceMb`) — a load-time rejection, not a
+   * runtime clamp. Also bounded at load by the host's configured heap like
+   * `maxValueBytes` (see its JSDoc): the effective frame cap minus the frame
+   * envelope.
+   */
+  maxLogBytes?: number
+  /**
+   * Byte cap for the completion value. Bounded at load against `addressSpaceMb`
+   * the same way `maxLogBytes` is: the child builds and encodes a near-budget
+   * value under RLIMIT_AS with several copies live at once, so this cap times the
+   * worst-case Unicode expansion must fit the address space left after the
+   * interpreter baseline. Both budgets are ALSO bounded at load by the host's
+   * configured heap: the effective frame cap (the protocol cap, or a lower
+   * heap-derived ceiling when the host heap cannot safely parse a near-cap
+   * frame — see `hostFrameParseCeiling`) minus the frame envelope, so a budget
+   * whose honest frame could OOM the host's own JSON.parse is rejected up
+   * front.
+   */
+  maxValueBytes?: number
+  /** SIGTERM→SIGKILL grace period on kill, matching bash-local's default. */
+  graceMs?: number
+  /**
+   * Absolute path, relative path, or basename of a CPython 3.10+ interpreter.
+   * Resolved and validated once at plugin load under a five-second force-kill
+   * deadline; a basename searches `PATH`.
+   */
+  pythonBin?: string
+}
+```
+
+来源：[`packages/experimental/code-runtime-python/src/index.ts:42`](../packages/experimental/code-runtime-python/src/index.ts)
 
 <a id="deepseek-aidsh-experimental-inspector"></a>
 
@@ -760,7 +765,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/goal/goal/src/index.ts:171`](../packages/goal/goal/src/index.ts)
+来源：[`packages/goal/goal/src/index.ts:172`](../packages/goal/goal/src/index.ts)
 
 <a id="deepseek-aidsh-headless"></a>
 
@@ -982,7 +987,7 @@ export interface Config {
   fileRefreshMarginSeconds?: number
   /** Oldest harness-owned files deleted before one quota-recovery upload retry (default 100). */
   fileQuotaCleanupBatch?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries and a `RATE_LIMIT` cooldown schedule. */
+  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
 }
 
@@ -1088,7 +1093,7 @@ export interface PiAiProviderProfile {
    * to answer instead.
    */
   defaultInput?: PiAiModality[]
-  /** Provider request headers; Harness attribution wins reserved names. */
+  /** Provider request headers, validated against Fetch when the profile resolves; Harness attribution wins reserved names. */
   headers?: Record<string, string>
   /** Provider-neutral pi-ai reasoning level. */
   reasoning?: ModelThinkingLevel
@@ -1105,12 +1110,6 @@ export interface PiAiProviderProfile {
   /** Maximum provider idle time while one stream read is outstanding. */
   streamIdleTimeoutMs?: number
   /**
-   * Treat terminal-quota wording on an explicit HTTP 429 as transient
-   * throttling. Defaults to true for the built-in qwen token-plan routes and
-   * false for every other route; custom Model Studio gateways opt in here.
-   */
-  quotaWorded429IsRateLimit?: boolean
-  /**
    * Maximum base64-encoded image payload per request. When a request's
    * accumulated images exceed it, the oldest images are replaced by text
    * placeholders until the request fits, so a long session keeps completing
@@ -1124,7 +1123,7 @@ export interface PiAiProviderProfile {
    * the smallest quality-ladder output is used when no quality fits.
    */
   requestImageMaxBytes?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries and a `RATE_LIMIT` cooldown schedule. */
+  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
 }
 
@@ -1281,7 +1280,7 @@ export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFo
 
 依赖：`Api`（`@earendil-works/pi-ai`）· `CacheRetention`（`@earendil-works/pi-ai`）· `Model`（`@earendil-works/pi-ai`）· `ModelThinkingLevel`（`@earendil-works/pi-ai`）· `OpenAICompletionsCompat`（`@earendil-works/pi-ai`）· [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets`（`@earendil-works/pi-ai`）· `Transport`（`@earendil-works/pi-ai`)
 
-来源：[`packages/llm/llm-pi-ai/src/config.ts:233`](../packages/llm/llm-pi-ai/src/config.ts)
+来源：[`packages/llm/llm-pi-ai/src/config.ts:213`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 
@@ -1358,7 +1357,7 @@ export interface ReplayModelConfig {
 
 依赖：[`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts)
 
-来源：[`packages/test-support/llm-replay/src/index.ts:919`](../packages/test-support/llm-replay/src/index.ts)
+来源：[`packages/test-support/llm-replay/src/index.ts:924`](../packages/test-support/llm-replay/src/index.ts)
 
 <a id="deepseek-aidsh-llm-retry"></a>
 
@@ -1371,7 +1370,7 @@ export interface ReplayModelConfig {
 export type Config = Readonly<Record<string, never>>
 ```
 
-来源：[`packages/llm/llm-retry/src/index.ts:32`](../packages/llm/llm-retry/src/index.ts)
+来源：[`packages/llm/llm-retry/src/index.ts:25`](../packages/llm/llm-retry/src/index.ts)
 
 <a id="deepseek-aidsh-lsp-stdio"></a>
 
@@ -1414,36 +1413,6 @@ export interface LspLocalServerConfig {
 ```
 
 来源：[`packages/lsp/lsp-stdio/src/index.ts:82`](../packages/lsp/lsp-stdio/src/index.ts)
-
-<a id="deepseek-aidsh-maintenance-reporter"></a>
-
-## `@deepseek-ai/dsh-maintenance-reporter`
-
-需要：`agents` · `shellEnv`
-
-```ts config-catalog
-/** Deployment paths, release identity, timing, and supported preset coverage. */
-export interface Config {
-  /** Owner-only BOCC ingest Unix socket. */
-  socketPath: string
-  /** Source-managed automatic-repair policy whose bytes bind every command. */
-  policyPath: string
-  /** Hash of the admitted reporter release bytes. */
-  reporterHash: string
-  /** Stable reporter identity. */
-  reporterId?: string
-  /** Fixed holder and coverage renewal cadence. */
-  heartbeatMs?: number
-  /** One command request timeout. */
-  requestTimeoutMs?: number
-  /** Presets that load the user-global AGENTS instruction source. */
-  instructionCoveredPresets: string[]
-  /** Presets whose shell carries exact per-turn maintenance identity. */
-  reportingCapablePresets: string[]
-}
-```
-
-来源：[`packages/session/maintenance-reporter/src/index.ts:39`](../packages/session/maintenance-reporter/src/index.ts)
 
 <a id="deepseek-aidsh-mcp-client"></a>
 
@@ -1532,7 +1501,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/feedback/message-feedback/src/index.ts:49`](../packages/feedback/message-feedback/src/index.ts)
+来源：[`packages/feedback/message-feedback/src/index.ts:50`](../packages/feedback/message-feedback/src/index.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 
@@ -1833,7 +1802,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/session/session-log-deepseek/src/index.ts:23`](../packages/session/session-log-deepseek/src/index.ts)
+来源：[`packages/session/session-log-deepseek/src/index.ts:36`](../packages/session/session-log-deepseek/src/index.ts)
 
 <a id="deepseek-aidsh-session-log-export"></a>
 
@@ -1891,7 +1860,7 @@ export interface Config {
 export type JsonlCompression = 'zstd' | 'none'
 ```
 
-来源：[`packages/session/session-persistence-jsonl/src/index.ts:62`](../packages/session/session-persistence-jsonl/src/index.ts)
+来源：[`packages/session/session-persistence-jsonl/src/index.ts:70`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 <a id="deepseek-aidsh-session-projection-cache"></a>
 
@@ -1915,7 +1884,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/session/session-projection-cache/src/index.ts:48`](../packages/session/session-projection-cache/src/index.ts)
+来源：[`packages/session/session-projection-cache/src/index.ts:55`](../packages/session/session-projection-cache/src/index.ts)
 
 <a id="deepseek-aidsh-session-query-sqlite"></a>
 
@@ -1961,7 +1930,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 依赖：[`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
 
-来源：[`packages/session-query/session-query-sqlite/src/index.ts:89`](../packages/session-query/session-query-sqlite/src/index.ts)
+来源：[`packages/session-query/session-query-sqlite/src/index.ts:96`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 <a id="deepseek-aidsh-session-reference"></a>
 
@@ -2047,7 +2016,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/session/session-title/src/index.ts:55`](../packages/session/session-title/src/index.ts)
+来源：[`packages/session/session-title/src/index.ts:56`](../packages/session/session-title/src/index.ts)
 
 <a id="deepseek-aidsh-session-title-all-prompts-llm"></a>
 
@@ -2645,7 +2614,7 @@ export interface Config {
 export type TokenMeterConfig = Record<string, never>
 ```
 
-来源：[`packages/llm/token-meter/src/types.ts:12`](../packages/llm/token-meter/src/types.ts)
+来源：[`packages/llm/token-meter/src/types.ts:13`](../packages/llm/token-meter/src/types.ts)
 
 <a id="deepseek-aidsh-tool-bash"></a>
 
@@ -2994,28 +2963,6 @@ export interface Config {
 
 来源：[`packages/subagent/tool-subagent/src/index.ts:48`](../packages/subagent/tool-subagent/src/index.ts)
 
-<a id="deepseek-aidsh-tool-subagent-report"></a>
-
-## `@deepseek-ai/dsh-tool-subagent-report`
-
-需要：`subagents` · `tools` · `systemPrompt`
-
-```ts config-catalog
-/** Config: how accepted reports are scheduled on the parent. */
-export interface Config {
-  /**
-   * Parent scheduling (default `next-step`). `next-step` wakes the parent and
-   * enters at its nearest step boundary; `quiet` adds the same context without
-   * waking, so a parked parent waits for another waking input.
-   */
-  reportDelivery?: SubagentReportDelivery
-}
-```
-
-依赖：[`SubagentReportDelivery`](subsystems/subagent.zh.md)
-
-来源：[`packages/subagent/tool-subagent-report/src/index.ts:25`](../packages/subagent/tool-subagent-report/src/index.ts)
-
 <a id="deepseek-aidsh-tool-terminal"></a>
 
 ## `@deepseek-ai/dsh-tool-terminal`
@@ -3138,44 +3085,6 @@ export type ToolPresentationMode = 'native' | 'ptc' | 'both'
 
 来源：[`packages/core/tools/src/index.ts:647`](../packages/core/tools/src/index.ts)
 
-<a id="deepseek-aidsh-turn-notify-wechat"></a>
-
-## `@deepseek-ai/dsh-turn-notify-wechat`
-
-需要：`sessions` · `sessionTitle`
-
-```ts config-catalog
-/** Deployment route, presentation bounds, and sender configuration. */
-export interface Config {
-  /** Absolute owner wrapper or OpenClaw CLI path. */
-  command: string
-  /** Owner-only constants file containing the configured account and target. */
-  routeFile: string
-  /** Constants-file key holding the WeChat account id. */
-  accountKey?: string
-  /** Constants-file key holding the private owner target. */
-  targetKey?: string
-  /** Non-empty NUL-free OpenClaw channel name. */
-  channel?: string
-  /** Maximum wall time for one delivery subprocess. */
-  timeoutMs?: number
-  /** Maximum Unicode characters retained from the resolved session title. */
-  titleMaxChars?: number
-  /** Maximum Unicode characters retained from the final assistant message. */
-  summaryMaxChars?: number
-  /** Maximum UTF-8 bytes retained from the assembled channel message. */
-  messageMaxBytes?: number
-  /** Quiet time before title resolution and delivery; a newer turn replaces the pending notice. */
-  settleDelayMs?: number
-  /** Maximum number of notification subprocesses allowed to run at once. */
-  maxConcurrentDeliveries?: number
-  /** Maximum number of pending and queued deliveries retained across sessions. */
-  maxRetainedDeliveries?: number
-}
-```
-
-来源：[`packages/session/turn-notify-wechat/src/index.ts:42`](../packages/session/turn-notify-wechat/src/index.ts)
-
 <a id="deepseek-aidsh-typert-loader"></a>
 
 ## `@deepseek-ai/dsh-typert-loader`
@@ -3221,7 +3130,7 @@ export interface Config {
 export type ApprovalPolicy = 'ask' | 'never'
 ```
 
-来源：[`packages/interaction/user-approval/src/index.ts:142`](../packages/interaction/user-approval/src/index.ts)
+来源：[`packages/interaction/user-approval/src/index.ts:126`](../packages/interaction/user-approval/src/index.ts)
 
 <a id="deepseek-aidsh-web"></a>
 
@@ -3541,7 +3450,6 @@ export interface Config {
 - `@deepseek-ai/dsh-client-ui-slots`（[`packages/client/ui-slots/src/index.ts`](../packages/client/ui-slots/src/index.ts)）
 - `@deepseek-ai/dsh-client-web`（[`packages/client/web/src/index.ts`](../packages/client/web/src/index.ts)）
 - `@deepseek-ai/dsh-cmdline`（[`packages/boot/cmdline/src/index.ts`](../packages/boot/cmdline/src/index.ts)）
-- `@deepseek-ai/dsh-code-runtime-python`（[`packages/code-runtime/code-runtime-python/src/index.ts`](../packages/code-runtime/code-runtime-python/src/index.ts)）
 - `@deepseek-ai/dsh-deque`（[`packages/util/deque/src/index.ts`](../packages/util/deque/src/index.ts)）
 - `@deepseek-ai/dsh-experimental-agent-team-profile`（[`packages/experimental/agent-team-profile/src/index.ts`](../packages/experimental/agent-team-profile/src/index.ts)）
 - `@deepseek-ai/dsh-experimental-agent-team-web-profile`（[`packages/experimental/agent-team-web-profile/src/index.ts`](../packages/experimental/agent-team-web-profile/src/index.ts)）

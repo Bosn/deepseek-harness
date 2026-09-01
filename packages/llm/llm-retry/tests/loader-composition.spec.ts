@@ -127,7 +127,7 @@ describe('real Loader composition', () => {
     await agent.whenIdle()
 
     expect(adapter.requests).toBe(2)
-    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(1)
     expect(agent.session.deriveMessages().at(-1)).toMatchObject({
       role: 'assistant',
       content: [{ type: 'text', text: 'recovered' }],
@@ -188,7 +188,7 @@ describe('real Loader composition', () => {
 
     expect(mockServer?.requests.map(request => request.scriptBehavior))
       .toEqual(['quota_exceeded', 'success'])
-    const retried = agent.session.events.filter(event => event.type === 'llm/retry')
+    const retried = agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')
     expect(retried).toHaveLength(1)
     expect(retried[0]?.data).toMatchObject({
       provider: 'deepseek-official',
@@ -247,7 +247,7 @@ describe('real Loader composition', () => {
 
     expect(mockServer.requests.map(request => request.scriptBehavior))
       .toEqual(['quota_exceeded', 'success'])
-    const retried = agent.session.events.filter(event => event.type === 'llm/retry')
+    const retried = agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')
     expect(retried).toHaveLength(1)
     expect(retried[0]?.data).toMatchObject({
       provider: 'qwen-test',
@@ -303,8 +303,8 @@ describe('real Loader composition', () => {
     await agent.whenIdle()
 
     expect(mockServer.requests.map(request => request.scriptBehavior)).toEqual(['quota_exceeded'])
-    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(0)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(0)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: {
         reason: {
@@ -327,9 +327,9 @@ describe('real Loader composition', () => {
     await agent.whenIdle()
 
     expect(mockServer?.requests).toHaveLength(4)
-    expect(agent.session.events.filter(event => event.type === 'llm/retry')
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')
       .map(event => event.data.delayMs)).toEqual([25, 50, 75])
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: {
         reason: {

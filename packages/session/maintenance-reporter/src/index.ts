@@ -276,7 +276,7 @@ function topLevel(session: Session): boolean {
 }
 
 function activeTurn(session: Session): number | undefined {
-  const boundary = session.events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+  const boundary = session.snapshotEvents().findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
   return boundary?.type === 'turn/start' ? boundary.data.turn : undefined
 }
 

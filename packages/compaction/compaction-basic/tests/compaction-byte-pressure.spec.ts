@@ -232,7 +232,7 @@ function sizedHistorySeed(turns: readonly { user: string; assistant: string }[])
     session.append('step/end', { turn, step: 1 })
     session.append('turn/end', { turn, reason: { kind: 'completed' } })
   }
-  return [...session.events]
+  return [...session.snapshotEvents()]
 }
 
 /** One routed closed turn whose large image is transiently offloaded before dispatch. */
@@ -271,7 +271,7 @@ function imageHistorySeed(): SessionEvent[] {
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-  return [...session.events]
+  return [...session.snapshotEvents()]
 }
 
 async function createSeededAgent(
@@ -334,7 +334,7 @@ describe('gateway request-size recovery', () => {
       expect(retry).not.toContain(hugeTwo)
       expect((retry.match(/CHECKPOINT SUMMARY/g) ?? []).length).toBe(1)
 
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -393,7 +393,7 @@ describe('gateway request-size recovery', () => {
       expect(startedCompetitor).toBe(true)
       expect(delegated).toBe(1)
       expect(adapter.conversationRequests).toHaveLength(1)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -458,7 +458,7 @@ describe('gateway request-size recovery', () => {
       expect(startedCompetitor).toBe(true)
       expect(delegated).toBe(1)
       expect(adapter.conversationRequests).toHaveLength(1)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -498,7 +498,7 @@ describe('gateway request-size recovery', () => {
       for (const input of compact.capturedInputs) {
         expect(input.maxRequestBytes).toBe(recoveryBudget)
       }
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -532,7 +532,7 @@ describe('gateway request-size recovery', () => {
       const replay = JSON.stringify(compact.capturedInputs[0]?.messages)
       expect(replay).toContain(OFFLOADED_IMAGE_PREFIX)
       expect(replay).not.toContain('"type":"image"')
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -561,8 +561,8 @@ describe('gateway request-size recovery', () => {
       // the original overflow error — bounded, never a spin.
       expect(compact.capturedInputs).toHaveLength(0)
       expect(adapter.conversationRequests).toHaveLength(1)
-      expect([...agent.session.events].some(event => event.type === 'compaction/start')).toBe(false)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].some(event => event.type === 'compaction/start')).toBe(false)
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -592,7 +592,7 @@ describe('gateway request-size recovery', () => {
       // ended with the overflow error — bounded, never a spin.
       expect(compact.capturedInputs).toHaveLength(1)
       expect(adapter.conversationRequests).toHaveLength(2)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -627,7 +627,7 @@ describe('gateway request-size recovery', () => {
       const firstRequest = JSON.stringify(adapter.conversationRequests[0]!.messages)
       expect(firstRequest).not.toContain(oldFiller)
       expect(firstRequest).toContain('CHECKPOINT SUMMARY')
-      const events = [...agent.session.events]
+      const events = [...agent.session.snapshotEvents()]
       expect(events.some(event => event.type === 'compaction/start')).toBe(true)
       expect(events.at(-1)).toMatchObject({
         type: 'turn/end',
@@ -680,7 +680,7 @@ describe('gateway request-size recovery', () => {
       const lastRequest = JSON.stringify(adapter.conversationRequests[requests - 1]!.messages)
       expect(lastRequest).not.toContain('grow-0-')
       expect(lastRequest).toContain('grow-6-')
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -722,7 +722,7 @@ describe('gateway request-size recovery', () => {
       // below the mega-context threshold.
       expect(adapter.conversationRequests).toHaveLength(3)
       expect(compact.capturedInputs).toHaveLength(1)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -755,7 +755,7 @@ describe('gateway request-size recovery', () => {
       expect(adapter.conversationRequests).toHaveLength(2)
       expect(compact.capturedInputs.length).toBeGreaterThan(0)
       expect(JSON.stringify(adapter.conversationRequests[1]!.messages)).not.toContain('large-0-')
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -784,7 +784,7 @@ describe('gateway request-size recovery', () => {
 
       expect(adapter.conversationRequests).toHaveLength(1)
       expect(compact.capturedInputs).toHaveLength(0)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -814,7 +814,7 @@ describe('gateway request-size recovery', () => {
 
       expect(adapter.conversationRequests).toHaveLength(1)
       expect(compact.capturedInputs).toHaveLength(0)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'error' } },
       })
@@ -847,8 +847,8 @@ describe('gateway request-size recovery', () => {
 
       expect(adapter.conversationRequests).toHaveLength(1)
       expect(compact.capturedInputs.length).toBeGreaterThan(0)
-      expect([...agent.session.events].some(event => event.type === 'compaction/start')).toBe(true)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].some(event => event.type === 'compaction/start')).toBe(true)
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })
@@ -886,7 +886,7 @@ describe('gateway request-size recovery', () => {
 
       expect(adapter.conversationRequests).toHaveLength(4)
       expect(compact.capturedInputs.length).toBeGreaterThanOrEqual(3)
-      expect([...agent.session.events].at(-1)).toMatchObject({
+      expect([...agent.session.snapshotEvents()].at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'completed' } },
       })

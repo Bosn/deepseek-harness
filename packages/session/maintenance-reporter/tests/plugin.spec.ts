@@ -123,6 +123,7 @@ function session(id: string, options: { preset?: string; subagent?: boolean } = 
     id: sessionId,
     createdAt: 0,
     cwd: '/workspace',
+    isSeeded: false,
     agentPreset: options.preset ?? 'standard',
     ...(options.subagent ? { origin: 'subagent' as const, delegationDepth: 1 } : {}),
   })
