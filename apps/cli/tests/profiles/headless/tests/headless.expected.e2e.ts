@@ -23,7 +23,7 @@ const goalConfigPath = fileURLToPath(new URL('../goal-snapshot.patch.yml', impor
 const retryScenarioDir = join(goldensDir, 'provider-retry')
 const retryConfigPath = fileURLToPath(new URL('../retry-snapshot.patch.yml', import.meta.url))
 const servingWrapperScenarioDir = join(goldensDir, 'provider-serving-wrapper')
-const servingWrapperConfigPath = fileURLToPath(new URL('../serving-wrapper.cordis.snapshot.yml', import.meta.url))
+const servingWrapperConfigPath = fileURLToPath(new URL('../serving-wrapper-snapshot.patch.yml', import.meta.url))
 const credentialsScenarioDir = join(goldensDir, 'missing-credential')
 const credentialsConfigPath = fileURLToPath(new URL('../credentials-snapshot.patch.yml', import.meta.url))
 // Same keyless composition as the missing-credential scenario: the endpoint is
