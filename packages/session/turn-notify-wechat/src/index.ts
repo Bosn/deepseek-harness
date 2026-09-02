@@ -236,7 +236,7 @@ function summarizeMessage(message: string, limit: number): string {
 }
 
 function visibleAssistantText(session: Session, turn: number): string | undefined {
-  const assistant = session.events.findLast(event =>
+  const assistant = session.snapshotEvents().findLast(event =>
     event.type === 'assistant/message' && event.data.turn === turn)
   if (assistant?.type !== 'assistant/message') return undefined
   const text: string[] = []

@@ -162,7 +162,7 @@ describe('turn-notify-wechat through a real Loader composition', () => {
       expect((await readFile(callsPath, 'utf8')).trim()).not.toBe('')
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('notification failed for session loader-failed-notice turn 1'))
     })
-    expect(session.events.findLast(event => event.type === 'turn/end'))
+    expect(session.snapshotEvents().findLast(event => event.type === 'turn/end'))
       .toMatchObject({ data: { reason: { kind: 'completed' } } })
     expect(warn.mock.calls.flat().join('\n')).not.toContain('任务完成')
   })

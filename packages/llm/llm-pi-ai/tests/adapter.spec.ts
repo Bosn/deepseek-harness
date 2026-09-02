@@ -1030,6 +1030,15 @@ describe('provider profile lifecycle', () => {
     }).get('custom')?.quotaWorded429IsRateLimit).toBe(true)
   })
 
+  it.each([
+    ['bad header name', 'value'],
+    ['x-company', 'line\nbreak'],
+    ['x-company', '部署'],
+  ])('rejects provider header %j when Fetch cannot represent the entry', (name, value) => {
+    expect(() => resolveProfiles({ openai: { headers: { [name]: value } } }))
+      .toThrow(`provider "openai" header "${name}" is not valid for Fetch`)
+  })
+
   it.each(['maxRetries', 'maxRetryDelayMs'] as const)(
     'rejects removed profile field %s instead of silently restoring hidden SDK retries',
     async (field) => {

@@ -222,7 +222,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
-    expect(agent.session.events.filter(item => item.type === 'step/start').map(item => item.data))
+    expect(agent.session.snapshotEvents().filter(item => item.type === 'step/start').map(item => item.data))
       .toEqual([{ turn: 1, step: 1 }])
     expect(agent.session.deriveMessages().at(-1)).toEqual({
       id: expect.any(String) as unknown,
@@ -257,7 +257,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
-    expect(agent.session.events.filter(event => event.type === 'assistant/message').map(event => ({
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message').map(event => ({
       turn: event.data.turn,
       step: event.data.step,
     }))).toEqual([{ turn: 1, step: 1 }])
@@ -293,14 +293,14 @@ describe('provider-routed retry policy', () => {
     await vi.advanceTimersByTimeAsync(500)
     await idle
 
-    const retryEvent = agent.session.events.find(event => event.type === 'llm/retry')
-    const failedChunks = agent.session.events.filter(event =>
+    const retryEvent = agent.session.snapshotEvents().find(event => event.type === 'llm/retry')
+    const failedChunks = agent.session.snapshotEvents().filter(event =>
       event.type === 'assistant/chunk'
       && retryEvent !== undefined
       && event.seq < retryEvent.seq,
     )
     expect(failedChunks).toHaveLength(7)
-    const assistantMessages = agent.session.events.filter(event => event.type === 'assistant/message')
+    const assistantMessages = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
     expect(assistantMessages.map(event => ({
       turn: event.data.turn,
       step: event.data.step,
@@ -308,7 +308,7 @@ describe('provider-routed retry policy', () => {
     expect(failedChunks.every(event =>
       !assistantMessages[0]?.sourceEventSeqs?.includes(event.seq),
     )).toBe(true)
-    expect(agent.session.events.some(event => event.type === 'tool/call')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'tool/call')).toBe(false)
     expect(toolExecutions).toBe(0)
     expect(agent.session.deriveMessages().at(-1)).toMatchObject({
       role: 'assistant',
@@ -345,8 +345,8 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(3)
-    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(2)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(2)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'error', error: { message: 'busy three', code: 'SERVER' } } },
     })
@@ -372,8 +372,8 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
-    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(1)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'error', error: { message: 'idle timeout two', code: 'TIMEOUT' } } },
     })
@@ -408,7 +408,7 @@ describe('provider-routed retry policy', () => {
 
     expect(adapter.requests).toHaveLength(2)
     expect(agent.session.surface.replaceGeneration).toBe(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
   })
 
   it('does not override downstream durable recovery progress with normal fallback', async () => {
@@ -441,7 +441,7 @@ describe('provider-routed retry policy', () => {
 
     expect(adapter.requests).toHaveLength(1)
     expect(agent.session.surface.replaceGeneration).toBe(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
   })
 
   it('does not schedule normal fallback after downstream cancellation', async () => {
@@ -461,8 +461,8 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'aborted' } },
     })
@@ -555,7 +555,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -594,7 +594,7 @@ describe('provider-routed retry policy', () => {
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
     await idle
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -613,8 +613,8 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(0)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
-    const end = agent.session.events.at(-1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    const end = agent.session.snapshotEvents().at(-1)
     expect(end).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'error', error: { code: 'NO_ADAPTER' } } },
@@ -642,7 +642,7 @@ describe('provider-routed retry policy', () => {
     const normalIdle = waitForIdle(context, normalAgent)
     normalAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'normal' }], source: { kind: 'user' } }))
     await normalIdle
-    expect(normalAgent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(normalAgent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
 
     const alwaysAgent = context.agentLoop.create(SessionId('retry-provider-always'), {
       provider: 'other',
@@ -728,7 +728,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests.map(request => request.provider)).toEqual(['mock', 'other', 'other'])
-    expect(agent.session.events.filter(event => event.type === 'llm/retry').map(event => ({
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry').map(event => ({
       provider: event.data.provider,
       retry: event.data.retry,
     }))).toEqual([
@@ -839,7 +839,7 @@ describe('provider-routed retry policy', () => {
     await vi.runAllTimersAsync()
     await idle
 
-    const events = agent.session.events.filter(event => event.type === 'llm/retry')
+    const events = agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')
     expect(adapter.requests).toHaveLength(5)
     expect(events.map(event => ({
       provider: event.data.provider,
@@ -883,7 +883,7 @@ describe('provider-routed retry policy', () => {
     const retriedContext = JSON.stringify(adapter.requests[1]?.messages)
     expect(retriedContext).not.toContain(diagnostic)
     expect(retriedContext).not.toContain('discarded partial output')
-    expect(agent.session.events.some(event =>
+    expect(agent.session.snapshotEvents().some(event =>
       event.type === 'llm/retry' && event.data.failure.message === diagnostic,
     )).toBe(true)
   })
@@ -916,7 +916,7 @@ describe('provider-routed retry policy', () => {
 
     expect(adapter.requests).toHaveLength(2)
     expect(agent.session.surface.replaceGeneration).toBe(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
   })
 
   it('does not override downstream durable recovery progress with always fallback', async () => {
@@ -952,7 +952,7 @@ describe('provider-routed retry policy', () => {
 
     expect(adapter.requests).toHaveLength(1)
     expect(agent.session.surface.replaceGeneration).toBe(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
     expect(warnings).toContainEqual(expect.stringContaining('ignored a downstream recovery failure'))
   })
 
@@ -1004,7 +1004,7 @@ describe('provider-routed retry policy', () => {
     await vi.advanceTimersByTimeAsync(60_000)
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.filter(event => event.type === 'step/start')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start')).toHaveLength(1)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -1045,7 +1045,7 @@ describe('provider-routed retry policy', () => {
     expect(order[0]).toBe('downstream')
     expect(order).toEqual(expect.arrayContaining(['disposed', 'idle']))
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
   })
 
   it('drains delegated recovery before turn cancellation reaches idle', async () => {
@@ -1083,7 +1083,7 @@ describe('provider-routed retry policy', () => {
 
     expect(order).toEqual(['downstream', 'idle'])
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'aborted' } },
     })
@@ -1120,7 +1120,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'aborted' } },
     })
@@ -1177,7 +1177,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'aborted' } },
     })
@@ -1206,8 +1206,8 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.some(event => event.type === 'llm/retry')).toBe(false)
-    expect(agent.session.events.at(-1)).toMatchObject({
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
       type: 'turn/end',
       data: { reason: { kind: 'aborted' } },
     })
@@ -1230,7 +1230,7 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(1)
-    expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(1)
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -1281,8 +1281,8 @@ describe('provider-routed retry policy', () => {
       await idle
 
       expect(adapter.requests).toHaveLength(4)
-      expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(3)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(3)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: {
           reason: {
@@ -1312,7 +1312,7 @@ describe('provider-routed retry policy', () => {
       await idle
 
       expect(adapter.requests).toHaveLength(2)
-      expect(agent.session.events.filter(event => event.type === 'step/start').map(event => event.data))
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start').map(event => event.data))
         .toEqual([{ turn: 1, step: 1 }])
       expect(agent.session.deriveMessages().at(-1)).toMatchObject({
         role: 'assistant',
@@ -1506,8 +1506,8 @@ describe('provider-routed retry policy', () => {
       await idle
 
       expect(adapter.requests).toHaveLength(3)
-      expect(agent.session.events.filter(event => event.type === 'llm/retry')).toHaveLength(2)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(2)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: {
           reason: {
@@ -1562,7 +1562,7 @@ describe('provider-routed retry policy', () => {
       await vi.runAllTimersAsync()
       await idle
 
-      const events = agent.session.events.filter(event => event.type === 'llm/retry')
+      const events = agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')
       expect(adapter.requests).toHaveLength(5)
       expect(events.map(event => event.data.delayMs)).toEqual([2, 3, 4, 4])
       expect(agent.session.deriveMessages().at(-1)).toMatchObject({
@@ -1587,7 +1587,7 @@ describe('provider-routed retry policy', () => {
       await idle
 
       expect(adapter.requests).toHaveLength(1)
-      expect(agent.session.events.at(-1)).toMatchObject({
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
         type: 'turn/end',
         data: { reason: { kind: 'aborted' } },
       })

@@ -142,3 +142,5 @@ inspect registry 订阅 `ctx.connection.generation`。第一次握手尚未完�
 无。
 
 </details>
+
+**运行时不变式：** 不发布伴生入口。live Plugin 与 Plugin Run ID 的关系只存在于浏览器侧 service，Host 不变式无法观察；包内 load/teardown 测试直接覆盖该关系。

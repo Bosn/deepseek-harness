@@ -20,7 +20,7 @@ import { createUserMessage, errorChain, offloadRequestImagesUntil } from '@deeps
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
-import type { EpochHeader, Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type EpochHeader, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { estimateCompactionInstructionBytes, frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
@@ -32,11 +32,11 @@ interface RegionDependencies {
 
 /** One validated inclusive span of current surface positions. */
 interface SurfaceSelection {
-  readonly start: number
-  readonly end: number
+  readonly start: SessionSeq
+  readonly end: SessionSeq
   readonly startIdx: number
   readonly endIdx: number
-  readonly shadowedSeqs: readonly number[]
+  readonly shadowedSeqs: readonly SessionSeq[]
 }
 
 /** A selection with its priced snapshot and the replay input built from it. */
@@ -81,7 +81,7 @@ interface CompactionTransactionOptions {
 interface CompactionEntryState {
   readonly openTurn: number | null
   readonly unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
-  readonly latestEndSeedSeq: number | undefined
+  readonly latestEndSeedSeq: SessionSeq | undefined
 }
 
 /** Shared owner and provider-call budget for one hierarchical region operation. */
@@ -123,7 +123,7 @@ export function selectCompactableRange(
   session: Session,
   measurement: TokenMeasurement,
   retainTokens: number,
-): { start: number; end: number } | null {
+): { start: SessionSeq; end: SessionSeq } | null {
   const pricedNodes = measurement.nodes
   if (pricedNodes.length === 0) return null
 
@@ -175,15 +175,15 @@ export function selectCompactableRange(
 export async function compactSurfaceRegion(
   dependencies: RegionDependencies,
   session: Session,
-  start: number,
-  end: number,
+  start: SessionSeq,
+  end: SessionSeq,
   agent: Agent,
   options: CompactionTransactionOptions,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
   if (options.owner === null) signal?.throwIfAborted()
   const initial = validateSurfaceRegion(session, start, end)
-  const entryState = inspectCompactionEntryState(session.events)
+  const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
@@ -219,7 +219,7 @@ async function compactSurfaceSelection(
 ): Promise<CompactionResult> {
   // Front messages outside the request cap compact in earlier transactions;
   // every durable replacement is backed by a bounded summarizer request.
-  let remainingSeqs: readonly number[] = initial.shadowedSeqs
+  let remainingSeqs: readonly SessionSeq[] = initial.shadowedSeqs
   while (true) {
     if (options.owner === null) signal?.throwIfAborted()
     const headSeq = remainingSeqs[0]
@@ -265,7 +265,7 @@ async function compactSurfaceSelection(
     // The replacement user message is appended immediately before the closing
     // event. Carry it into the next bounded pass so partition summaries
     // converge to one checkpoint instead of accumulating on the surface.
-    const checkpointSeq = prefix.endSeq - 1
+    const checkpointSeq = SessionSeq(prefix.endSeq - 1)
     remainingSeqs = [checkpointSeq, ...remainingSeqs.slice(prepared.dropCount)]
   }
 }
@@ -311,7 +311,7 @@ async function runCompactionTransaction(
   operation: CompactionOperationState,
   signal?: AbortSignal,
 ): Promise<CompactionResult> {
-  const entryState = inspectCompactionEntryState(session.events)
+  const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
@@ -434,7 +434,7 @@ function throwManualFailure(failure: TransactionFailure): never {
  */
 function assertCompactionInactive(
   unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined,
-  latestEndSeedSeq: number | undefined,
+  latestEndSeedSeq: SessionSeq | undefined,
   stage: string,
 ): void {
   if (unmatchedCompactionStart === undefined
@@ -452,7 +452,7 @@ function assertCompactionInactive(
  * @param stage - operation label included in the busy diagnostic.
  */
 export function assertNoActiveCompaction(session: Session, stage: string): void {
-  const entryState = inspectCompactionEntryState(session.events)
+  const entryState = inspectCompactionEntryState(session)
   assertCompactionInactive(
     entryState.unmatchedCompactionStart,
     entryState.latestEndSeedSeq,
@@ -461,7 +461,7 @@ export function assertNoActiveCompaction(session: Session, stage: string): void 
 }
 
 /** Validate one requested surface-position span before asynchronous work begins. */
-function validateSurfaceRegion(session: Session, start: number, end: number): SurfaceSelection {
+function validateSurfaceRegion(session: Session, start: SessionSeq, end: SessionSeq): SurfaceSelection {
   const nodes = session.surface.nodes
   const startIdx = nodes.indexOf(start)
   const endIdx = nodes.indexOf(end)
@@ -696,7 +696,7 @@ function completeCompaction(
  */
 function buildSummarizationInput(
   session: Session,
-  shadowedSeqs: readonly number[],
+  shadowedSeqs: readonly SessionSeq[],
   maxBytes: number | undefined,
 ): {
   input: SummarizationInput
@@ -707,11 +707,10 @@ function buildSummarizationInput(
 } {
   const header = session.requestHeader()
   const headerBytes = estimateHeaderBytes(header)
-  const events = session.events
   // shadowedSeqs are current surface seqs, so each is a valid log index of a
   // settled message event and the projection is total.
   // oxlint-disable-next-line typescript/no-non-null-assertion
-  const messages = shadowedSeqs.map(seq => session.deriveEventMessage(events[seq]!)!)
+  const messages = shadowedSeqs.map(seq => session.deriveEventMessage(session.eventAt(seq)!)!)
   const durableInputByteCount = messages
     .reduce((total, message) => total + estimateMessageBytes(message), 0)
   const fitted = maxBytes === undefined
@@ -746,7 +745,7 @@ function buildSummarizationInput(
  */
 function trimToByteCap(
   session: Session,
-  shadowedSeqs: readonly number[],
+  shadowedSeqs: readonly SessionSeq[],
   messages: readonly Message[],
   header: EpochHeader | undefined,
   maxBytes: number,
@@ -795,7 +794,7 @@ function trimToByteCap(
 /** Whether a front/suffix partition preserves tool-call/result pairing. */
 function isBalancedPartition(
   session: Session,
-  shadowedSeqs: readonly number[],
+  shadowedSeqs: readonly SessionSeq[],
   dropCount: number,
 ): boolean {
   // oxlint-disable-next-line typescript/no-non-null-assertion
@@ -806,15 +805,15 @@ function isBalancedPartition(
 }
 
 /** Inspect open-turn, unmatched-compaction, and latest seed-boundary state independently. */
-function inspectCompactionEntryState(events: readonly SessionEvent[]): CompactionEntryState {
+function inspectCompactionEntryState(session: Session): CompactionEntryState {
   let openTurn: number | null = null
   let openTurnStateKnown = false
   let unmatchedCompactionStart: SessionEvent<'compaction/start'> | undefined
   let compactionEntryStateKnown = false
-  let latestEndSeedSeq: number | undefined
-  for (let index = events.length - 1; index >= 0; index -= 1) {
+  let latestEndSeedSeq: SessionSeq | undefined
+  for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
     // oxlint-disable-next-line typescript/no-non-null-assertion
-    const event = events[index]!
+    const event = session.eventAt(SessionSeq(seq))!
     if (latestEndSeedSeq === undefined && event.type === 'session/end-seed') {
       latestEndSeedSeq = event.seq
     }

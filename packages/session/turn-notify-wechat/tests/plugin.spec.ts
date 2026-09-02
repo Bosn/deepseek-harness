@@ -197,6 +197,7 @@ function createSession(origin?: 'subagent'): Session {
     version: SESSION_FORMAT_VERSION,
     id,
     createdAt: sessionSequence,
+    isSeeded: false,
     ...origin === undefined ? {} : { origin },
   })
 }
