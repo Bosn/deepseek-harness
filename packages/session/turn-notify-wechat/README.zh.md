@@ -90,7 +90,8 @@ DSH任务 [完成]：<session title>
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件配置、session observer、通知组装、有界队列和命令回执校验 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生注册；外部渠道关系不可查询，因此不安装运行时检查 |
+
+不发布不变式伴生：外部微信渠道关系无法在插件树内独立观测，命令回执校验由真实组合测试承担。
 
 </details>
 

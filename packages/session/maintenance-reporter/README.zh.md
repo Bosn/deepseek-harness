@@ -62,6 +62,7 @@ Environment value 永不进入 request prefix。安装后的 AGENTS baseline 按
 
 - `minimal` 会加载 user-global instructions，但运行时明确上报 coverage unavailable：它的 persistent shell 在 per-call `shell-env` registry 之外创建，因此无法向 owner helper 证明 exact current turn。BoAgents mutation 应使用 `standard`、`ptc` 或 `cordis`。
 - Source presence 不是 adoption。数据库表、owner helper、profile row、reporter hash、user-global AGENTS projection 与 live coverage readback 属于独立 activation work。
+- 不发布不变式伴生：权威 holder 与 coverage 关系位于外部 typed command transport 之后，因此 lifecycle、identity 与 teardown 校验由真实组合测试承担。
 
 <a id="dev-note"></a>
 ### 开发备注

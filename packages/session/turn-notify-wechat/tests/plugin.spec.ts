@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { createAssistantMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import {
   Session,
   SessionId,
@@ -19,7 +18,6 @@ const characterSegmenter = new Intl.Segmenter(undefined, { granularity: 'graphem
 vi.mock('node:child_process', () => ({ execFile: execFileMock }))
 
 import { apply, Config as ConfigSchema, type Config } from '../src/index.ts'
-import * as Invariant from '../src/invariant.ts'
 
 type SessionEventListener = (session: Session, event: SessionEvent) => void
 
@@ -869,22 +867,5 @@ describe('turn-notify-wechat plugin', () => {
     pending.callback(Object.assign(new Error('aborted'), { name: 'AbortError' }), '')
     await disposal
     expect(mounted.warn).not.toHaveBeenCalled()
-  })
-})
-
-describe('turn-notify-wechat invariant companion', () => {
-  it('reserves the package name with an explained empty installer', async () => {
-    const dispose = vi.fn()
-    let installer: InvariantInstaller | undefined
-    const register = vi.fn((packageName: string, candidate: InvariantInstaller) => {
-      expect(packageName).toBe('@deepseek-ai/dsh-turn-notify-wechat')
-      installer = candidate
-      return dispose
-    })
-    const ctx = { invariants: { register } } as unknown as Context
-    await expect(Invariant.apply(ctx)).resolves.toBe(dispose)
-    expect(installer).toBeDefined()
-    const fail = (): never => { throw new Error('unexpected invariant failure') }
-    expect(installer?.({} as Context, fail)).toBeUndefined()
   })
 })

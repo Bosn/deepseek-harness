@@ -62,6 +62,7 @@ Environment values never enter the request prefix. The installed AGENTS baseline
 
 - `minimal` loads user-global instructions but deliberately reports coverage unavailable while running: its persistent shell is created outside the per-call `shell-env` registry and therefore cannot prove an exact current turn to the owner helper. Use `standard`, `ptc`, or `cordis` for a BoAgents mutation.
 - Source presence is not adoption. The database tables, owner helper, profile row, reporter hash, user-global AGENTS projection, and live coverage readback are separate activation work.
+- No invariant companion is published: the authoritative holder and coverage relationships live behind the external typed command transport, so lifecycle, identity, and teardown verification stays in the real-composition test.
 
 <a id="dev-note"></a>
 ### Dev Note
