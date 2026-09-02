@@ -652,8 +652,8 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'abstract compactIfNeeded( agent: CompactionAgentContext, trigger: CompactionTrigger, signal: AbortSignal, ): Promise<CompactionResult | null>',
-        description: 'Consider automatic compaction for one explicit trigger. Pressure policy uses the latest durable routed request, while context-overflow policy may force a useful balanced reduction even below the normal threshold. Return `null` when no safe range can be compacted. A single oversized retained unit or request envelope cannot be repaired through surface compaction.',
-        parameters: [{ name: 'agent', description: 'agent context owning the session surface and routing options.' }, { name: 'trigger', description: 'normal pressure or provider-confirmed context overflow.' }, { name: 'signal', description: 'cancellation signal; model-backed implementations must forward it.' }],
+        description: 'Consider automatic compaction for one explicit trigger. Pressure policy uses the latest durable routed request, while context-overflow and request-size recovery may force a useful balanced reduction below the normal threshold. Return `null` when no safe range can be compacted. A single oversized retained unit cannot be repaired through surface compaction.',
+        parameters: [{ name: 'agent', description: 'agent context owning the session surface and routing options.' }, { name: 'trigger', description: 'normal pressure, semantic context overflow, or request-size recovery.' }, { name: 'signal', description: 'cancellation signal; model-backed implementations must forward it.' }],
         returns: 'the compaction result, or `null` if no compaction was needed.',
       },
       {
@@ -2477,6 +2477,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'message', description: 'message to price without mutation.' }],
         returns: 'content and role-framing tokens under the fixed service heuristic.',
       },
+      {
+        signature: 'estimateMessages(messages: readonly Message[], requestHeader?: EpochHeader): number',
+        description: 'Price a detached message sequence under one routed request envelope. Transient projections such as image offload use this operation so their route-token comparisons do not depend on durable surface nodes.',
+        parameters: [{ name: 'messages', description: 'ordered model-visible messages to price without mutation.' }, { name: 'requestHeader', description: 'optional envelope selecting route-owned image pricing.' }],
+        returns: 'total route-priced tokens across the detached messages.',
+      },
     ],
   },
   {
@@ -3704,7 +3710,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'CompactionTrigger',
-    declaration: 'export type CompactionTrigger = \'pressure\' | \'context-overflow\';',
+    declaration: 'export type CompactionTrigger = \'pressure\' | \'context-overflow\' | \'request-size\';',
   },
   {
     name: 'CompositionRowEnablement',
@@ -4292,7 +4298,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailure',
-    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n}',
+    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly requestBytesEstimate?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n}',
   },
   {
     name: 'LlmImageRequestPrice',
@@ -4696,11 +4702,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedNormalRetryPolicy',
-    declaration: 'export interface ResolvedNormalRetryPolicy extends ResolvedRetryBackoff {\n    readonly mode: \'normal\';\n    readonly maxRetries: number;\n    readonly retryableCodes: readonly string[];\n}',
+    declaration: 'export interface ResolvedNormalRetryPolicy extends ResolvedRetryBackoff {\n    readonly mode: \'normal\';\n    readonly maxRetries: number;\n    readonly retryableCodes: readonly string[];\n    readonly maxRetriesByCode: Readonly<Record<string, number>>;\n}',
   },
   {
     name: 'ResolvedRetryBackoff',
-    declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly jitterRatio: number;\n}',
+    declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly jitterRatio: number;\n    readonly rateLimitDelaysMs: readonly number[];\n}',
   },
   {
     name: 'ResolvedRetryPolicy',
@@ -4916,7 +4922,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionFollowFrame',
-    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly projections: SessionProjectionBaseline;\n} | SessionEventEntry;',
+    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly projections?: SessionProjectionBaseline;\n} | SessionEventEntry;',
   },
   {
     name: 'SessionFollowRequest',
