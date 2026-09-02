@@ -8,7 +8,6 @@
     {"path": "../../../vendor/schemastery"},
     {"path": "../../core/agent"},
     {"path": "../../core/session"},
-    {"path": "../../shell/shell-env"},
-    {"path": "../../runtime-diagnostics/invariants"}
+    {"path": "../../shell/shell-env"}
   ]
 }

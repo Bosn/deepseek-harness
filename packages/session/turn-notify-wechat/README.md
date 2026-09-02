@@ -90,7 +90,8 @@ The subprocess receives an allowlisted environment rather than the ambient DSH e
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin configuration, session observer, notice assembly, bounded queue, and command receipt validation |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion registration; it installs no runtime check because the external channel relationship is not queryable |
+
+No invariant companion is published: the external WeChat channel relationship is not independently observable from inside the plugin tree, so command receipt validation stays in the real-composition tests.
 
 </details>
 

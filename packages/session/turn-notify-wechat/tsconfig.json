@@ -22,9 +22,6 @@
     },
     {
       "path": "../session-title"
-    },
-    {
-      "path": "../../runtime-diagnostics/invariants"
     }
   ]
 }
