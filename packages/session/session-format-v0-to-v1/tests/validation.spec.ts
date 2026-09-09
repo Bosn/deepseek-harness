@@ -61,7 +61,7 @@ const validPayloads: Readonly<Record<string, SessionFormatJsonValue>> = {
   'hook/result': { turn: 1, point: 'PreToolUse', handlerId: 'hook-1', decision: 'pass', durationMs: 1 },
   'llm/retry': {
     retryId: 'retry-1', turn: 1, step: 0, provider: 'mock', mode: 'normal', policyKey: 'default',
-    retry: 1, maxRetries: 2, delayMs: 10, failure: { message: 'retry', code: 'SERVER' },
+    retry: 1, maxRetries: 2, delayMs: 10, failure: { message: 'retry', code: 'SERVER', requestBytesEstimate: 1948914 },
   },
   'llm/retry-started': { retryId: 'retry-1', turn: 1, step: 0, retry: 1 },
   'model/selection': { provider: 'mock', model: 'mock', reasoningEffort: 'high' },
@@ -271,6 +271,19 @@ describe('released event and payload inventory', () => {
     ]
     for (const [index, [type, data]] of cases.entries()) {
       expect(() => { assertPayload(type, data) }, `${type}-${index}`).toThrow()
+    }
+  })
+
+  it('refuses a non-positive requestBytesEstimate in failure records', () => {
+    const base = validPayloads['llm/retry'] as Record<string, SessionFormatJsonValue>
+    const failure = base['failure'] as Record<string, SessionFormatJsonValue>
+    for (const value of [0, -1, 1.5]) {
+      expect(() => {
+        assertPayload('llm/retry', {
+          ...base,
+          failure: { ...failure, requestBytesEstimate: value },
+        })
+      }, String(value)).toThrow(value === 0 ? /positive/ : /non-negative safe integer/)
     }
   })
 
@@ -489,7 +502,7 @@ describe('released event and payload inventory', () => {
       { type: 'finish', reason: { kind: 'tool-calls' } },
       { type: 'finish', reason: { kind: 'max-tokens' } },
       { type: 'finish', reason: { kind: 'aborted', failure: { message: 'abort', code: 'ABORT' } } },
-      { type: 'finish', reason: { kind: 'error', failure: { message: 'error', code: 'ERROR' } } },
+      { type: 'finish', reason: { kind: 'error', failure: { message: 'error', code: 'ERROR', requestBytesEstimate: 1948914 } } },
     ]
     for (const chunk of chunks) {
       expect(() => { assertPayload('assistant/chunk', { turn: 1, step: 0, chunk }) }).not.toThrow()
@@ -502,7 +515,7 @@ describe('released event and payload inventory', () => {
       { kind: 'aborted', reason: { kind: 'disposed' } },
       { kind: 'aborted', reason: { kind: 'legacy' } },
       { kind: 'aborted', reason: { kind: 'hook', reason: 'hook' } },
-      { kind: 'error', error: { message: 'error', code: 'ERROR', status: 500, providerRetryAfterMs: 1, requestId: 'id' } },
+      { kind: 'error', error: { message: 'error', code: 'ERROR', status: 500, providerRetryAfterMs: 1, requestId: 'id', requestBytesEstimate: 1948914 } },
     ]
     for (const reason of turnReasons) {
       expect(() => { assertPayload('turn/end', { turn: 1, reason }) }).not.toThrow()

@@ -105,7 +105,7 @@ describe('released v0 legacy normalization', () => {
             step: 0,
             failure: {
               message: 'detailed', code: 'RATE_LIMIT', status: 429,
-              providerRetryAfterMs: 1000, requestId: 'request-1',
+              providerRetryAfterMs: 1000, requestId: 'request-1', requestBytesEstimate: 1948914,
             },
           },
         },
@@ -138,7 +138,7 @@ describe('released v0 legacy normalization', () => {
           kind: 'error',
           error: {
             message: 'detailed', code: 'RATE_LIMIT', status: 429,
-            providerRetryAfterMs: 1000, requestId: 'request-1',
+            providerRetryAfterMs: 1000, requestId: 'request-1', requestBytesEstimate: 1948914,
           },
         },
       },

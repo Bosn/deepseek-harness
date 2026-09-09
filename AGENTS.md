@@ -17,6 +17,12 @@ Public APIs are pre-stable; update every consumer. Released Session JSONL follow
 - **Fork code the new upstream covers is deleted** (implementation, config, tests, fixtures) in the same PR; fork-local code stays only while upstream-absent.
 - **No heavy local testing; do not wait for CI.** Run only the focused checks `dsh-pre-push-checks` selects for the sync's fork-side delta; merge-introduced snapshot/doc noise resolves to upstream.
 
+## Fork-local change log
+
+Custom changes on top of upstream code must stay traceable. [FORK-CHANGES.md](FORK-CHANGES.md) records every accepted fork-local change from 2026-09-10 on — date, PR link, scope, summary — so a later agent can see what this fork changed beyond upstream and which PR each change shipped in. Upstream sync merges are not entries; upstream stays authoritative ([sync policy](#syncing-this-fork-with-upstream)). Rows are append-only.
+
+After a custom change passes acceptance (owner approval, checks green), do this automatically without waiting to be asked: submit its PR to `Bosn/deepseek-harness:master` if one does not exist yet, then append its row to FORK-CHANGES.md in the same branch before the PR merges. When the PR number is only known after commit time, add the row in a follow-up commit on the same branch after the PR is created; never rewrite historical rows.
+
 ## Repository layout
 
 ```
@@ -140,7 +146,7 @@ Real-API tests and demos read `DEEPSEEK_API_KEY`, optional `DEEPSEEK_BASE_URL`, 
 - **Both SDKs project the loop.** Agent-loop, session-lifecycle, and `SessionEventMap` changes update the TypeScript and Python SDK expected outputs in the same PR; `pnpm run test` covers neither ([surfaces](docs/testing.md#when-a-snapshot-test-is-required)).
 - **Choose PR history deliberately.** Split independent changes and fix the introducing PR before propagation. Standalone/stack branches may merge-forward or rebase. Rewrites use `--force-with-lease`, abort on remote movement, never raw `--force`; preserve an in-progress merge-forward checkpoint before taking a newer base ([rationale](.agents/notes/implemented/process/2026-08-02-native-github-stacks-and-optional-rebases.md)).
 - **Engineering updates happen in dedicated checkouts.** Develop and merge upstream commits in a separate worktree (for example under `/home/ec2-user/tmp`), never in the checkout that runs the live DSH service; modify that live checkout in place only when a task states it explicitly.
-- **PRs:** target `Bosn/deepseek-harness:master`, never upstream; apply one `kind/*`, all material `area/*`, and native Issue Type ([taxonomy](.agents/notes/implemented/process/2026-08-08-unified-github-label-taxonomy.md)).
+- **PRs:** target `Bosn/deepseek-harness:master`, never upstream; apply one `kind/*`, all material `area/*`, and native Issue Type ([taxonomy](.agents/notes/implemented/process/2026-08-08-unified-github-label-taxonomy.md)). Accepted custom changes also append their row to [FORK-CHANGES.md](FORK-CHANGES.md) ([rule](#fork-local-change-log)).
 - TODO markers: `FIXME`/`TODO`/`XXX` by urgency ([semantics](docs/development.md)).
 - Files end with exactly one trailing newline; `git diff --cached --check` (pre-commit) gates it.
 
