@@ -320,7 +320,7 @@ function normalizeLegacyErrorReason(
     assertReleasedV0Keys(
       record,
       ['message', 'code'],
-      ['status', 'providerRetryAfterMs', 'requestId'],
+      ['status', 'providerRetryAfterMs', 'requestId', 'requestBytesEstimate'],
       `turn/end ${seq} failure`,
     )
     if (typeof record['message'] !== 'string' || typeof record['code'] !== 'string') {

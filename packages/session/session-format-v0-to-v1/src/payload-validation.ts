@@ -398,7 +398,12 @@ function seqArray(
 }
 
 function llmFailureValue(value: SessionFormatJsonValue | undefined, label: string): void {
-  const failure = exactRecord(value, label, ['message', 'code'], ['status', 'providerRetryAfterMs', 'requestId'])
+  const failure = exactRecord(
+    value,
+    label,
+    ['message', 'code'],
+    ['status', 'providerRetryAfterMs', 'requestId', 'requestBytesEstimate'],
+  )
   nonEmptyString(failure['message'], `${label} message`)
   nonEmptyString(failure['code'], `${label} code`)
   if (failure['status'] !== undefined) {
@@ -410,6 +415,9 @@ function llmFailureValue(value: SessionFormatJsonValue | undefined, label: strin
     throw new SessionFormatError(`${label} providerRetryAfterMs must be positive`)
   }
   if (failure['requestId'] !== undefined) nonEmptyString(failure['requestId'], `${label} requestId`)
+  if (failure['requestBytesEstimate'] !== undefined) {
+    positiveIntegerValue(failure['requestBytesEstimate'], `${label} requestBytesEstimate`)
+  }
 }
 
 function tokenUsageValue(value: SessionFormatJsonValue | undefined, label: string): void {
