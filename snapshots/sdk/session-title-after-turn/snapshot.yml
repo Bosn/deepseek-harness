@@ -10,6 +10,3 @@ header:
   toolSchemasSource: session/text-turn
 replay:
   override: true
-workspace:
-  setup: turn-notify-wechat
-  final: true

@@ -1,14 +1,13 @@
 /** Cold Session history pagination and live-event source. */
 
-import { Buffer } from 'node:buffer'
 import type { Context } from '@deepseek-ai/cordis'
 import { Deque } from '@deepseek-ai/dsh-deque'
+import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import {
   isAppendSurfaceEvent,
   SessionLogOffset,
   SessionSeq,
 } from '@deepseek-ai/dsh-session'
-import { isChunkRow, packChunkRuns, type ChunkRow } from '@deepseek-ai/dsh-session/chunk-rows'
 import type {
   SessionEvent,
   SessionHeader,
@@ -19,9 +18,10 @@ import type {
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {
   SessionAddress,
-  SessionChunkRun,
+  SessionAssistantStreamFrame,
   SessionEventEntry,
   SessionFollowRequest,
   SessionFollowFrame,
@@ -33,29 +33,35 @@ import type {
   SessionWireHeader,
   SessionWireEvent,
 } from './types.ts'
+import { SessionAssistantStreamAccumulator } from './assistant-stream.ts'
 
 const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
-// Browser Connection and Gateway clients mint 36-byte UUIDs for both carrier identifiers.
-const CARRIER_UUID = '00000000-0000-4000-8000-000000000000'
-
-/** Default maximum UTF-8 size of one browser-carried history page or opening snapshot. */
-export const DEFAULT_HISTORY_PAGE_MAX_BYTES = 2 * 1024 * 1024
 
 /** Implements cold-safe history operations delegated by the Session Controller. */
 export class SessionHistoryController {
   private readonly closeFollowers = new Set<() => void>()
+  private readonly assistantStreams = new Map<SessionId, SessionAssistantStreamAccumulator>()
 
   /**
    * @param ctx - Host context carrying Session query and projection services.
    * @param promote - starts ordinary Session activation after snapshot delivery.
-   * @param maxPageBytes - complete browser-carrier byte budget; zero disables the bound.
    */
   constructor(
     private readonly ctx: Context,
     private readonly promote: (observation: SessionObservation) => void,
-    private readonly maxPageBytes = DEFAULT_HISTORY_PAGE_MAX_BYTES,
   ) {
+    ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+      let stream = this.assistantStreams.get(agent.session.id)
+      if (stream === undefined) {
+        stream = new SessionAssistantStreamAccumulator()
+        this.assistantStreams.set(agent.session.id, stream)
+      }
+      stream.accept(frame, cursorBeforeNext(agent.session.seq))
+    }, { global: true })
+    ctx.on('agent/disposed', ({ agent }) => {
+      this.assistantStreams.delete(agent.session.id)
+    }, { global: true })
     ctx.effect(() => () => {
       for (const close of this.closeFollowers) close()
       this.closeFollowers.clear()
@@ -98,24 +104,32 @@ export class SessionHistoryController {
       throughSeq,
     )
     const records = pageRecords(page.events)
-    return boundHistoryValue({
+    return {
       records,
       hasMore: page.hasMore,
-    }, this.maxPageBytes, unaryCarrierBytes)
+    }
   }
 
   /**
    * Follow events appended after an initial cursor on one durable address.
    * @param request - durable address and last committed sequence already held by the caller.
    * @param signal - stream cancellation owned by the Remote carrier.
-   * @returns a complete opening snapshot followed by gap-free event frames.
+   * @returns a complete opening snapshot followed by gap-free durable events and opted-in assistant frames.
    */
   async *follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
     validateFollowRequest(request)
     const { address } = request
     const target = addressId(address)
-    const buffered = new Deque<SessionEvent>()
+    const buffered = new Deque<
+      | { readonly type: 'event'; readonly event: SessionEvent }
+      | {
+        readonly type: 'assistant-stream'
+        readonly frame: SessionAssistantStreamFrame
+        readonly ordinal: number
+      }
+    >()
     let snapshotCursor: SessionSeqCursor | undefined
+    let assistantStreamOrdinal = 0
     let wake: (() => void) | undefined
     const notify = (): void => {
       const resume = wake
@@ -130,7 +144,7 @@ export class SessionHistoryController {
     this.closeFollowers.add(close)
     const disposeEvent = this.ctx.on('session/event', (session, event) => {
       if (session.id !== target) return
-      buffered.pushBack(event)
+      buffered.pushBack({ type: 'event', event })
       notify()
     }, { global: true })
     const disposeCreated = this.ctx.on('session/created', (session) => {
@@ -142,10 +156,21 @@ export class SessionHistoryController {
         ? session.firstLiveSeq
         : SessionLogOffset(snapshotCursor + 1))
       for (let index = suffix.length - 1; index >= 0; index -= 1) {
-        buffered.pushFront(suffix[index] as SessionEvent)
+        buffered.pushFront({ type: 'event', event: suffix[index] as SessionEvent })
       }
       notify()
     }, { global: true })
+    const disposeAssistantStream = request.assistantStream !== true
+      ? undefined
+      : this.ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+        if (agent.session.id !== target) return
+        buffered.pushBack({
+          type: 'assistant-stream',
+          frame: wireAssistantStreamFrame(frame, cursorBeforeNext(agent.session.seq)),
+          ordinal: ++assistantStreamOrdinal,
+        })
+        notify()
+      }, { global: true })
     const onAbort = (): void => { notify() }
     signal.addEventListener('abort', onAbort, { once: true })
     try {
@@ -155,16 +180,25 @@ export class SessionHistoryController {
       const cursor = source.cursor
       snapshotCursor = cursor
       const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES)
-      yield boundHistoryValue({
-        type: 'snapshot' as const,
-        header: wireHeader(source.header, source.inheritedEventCount),
+      const assistantStream = request.assistantStream === true
+        ? this.assistantStreams.get(target)?.snapshot() ?? { revision: 0 }
+        : undefined
+      // The accumulator snapshot and this watermark are synchronous. Frames
+      // through the cut are represented or superseded by that baseline,
+      // including larger revisions from a retired Agent; later revision
+      // resets reach Client continuity validation.
+      const assistantStreamOrdinalCut = assistantStreamOrdinal
+      yield {
+        type: 'snapshot',
+        header: wireHeader(source.header),
         cursor,
         records: pageRecords(page.events),
         hasMore: page.hasMore,
         projections: source.projections === undefined
           ? { asOfSeq: cursor, values: {} }
           : projectionBlock(source.projections),
-      }, this.maxPageBytes, streamCarrierBytes)
+        ...assistantStream === undefined ? {} : { assistantStream },
+      }
       if (address.kind === 'session' && source.source === 'prepared') {
         const promotion = source.retain()
         try {
@@ -181,19 +215,26 @@ export class SessionHistoryController {
           await new Promise<void>((resolve) => { wake = resolve })
           continue
         }
+        if (item.type === 'assistant-stream') {
+          if (item.ordinal > assistantStreamOrdinalCut) {
+            yield { type: 'assistant-stream', frame: item.frame }
+          }
+          continue
+        }
         const expectedSeq = SessionSeq(nextOffset)
-        if (item.seq < expectedSeq) continue
-        if (item.seq !== expectedSeq) {
+        if (item.event.seq < expectedSeq) continue
+        if (item.event.seq !== expectedSeq) {
           throw new RemoteError('gateway/internal', `session event stream skipped seq ${String(expectedSeq)}`, {})
         }
         nextOffset = SessionLogOffset(nextOffset + 1)
-        yield entryFor(item)
+        yield entryFor(item.event)
       }
     } finally {
       this.closeFollowers.delete(close)
       signal.removeEventListener('abort', onAbort)
       disposeCreated()
       disposeEvent()
+      disposeAssistantStream?.()
     }
   }
 
@@ -231,6 +272,22 @@ export class SessionHistoryController {
     }
   }
 
+}
+
+function cursorBeforeNext(nextSeq: SessionLogOffsetType): SessionSeqCursor {
+  return nextSeq === 0 ? -1 : SessionSeq(nextSeq - 1)
+}
+
+function wireAssistantStreamFrame(
+  frame: AssistantStreamFrame,
+  durableCursor: SessionSeqCursor,
+): SessionAssistantStreamFrame {
+  if (frame.type === 'start') return { ...frame, startedAfterSeq: durableCursor }
+  if (frame.type === 'end') return frame
+  return {
+    ...frame,
+    chunk: frame.chunk as JsonValue,
+  }
 }
 
 function projectionBlock(
@@ -351,16 +408,9 @@ function paginate(
   return { events: events.slice(cut, end), hasMore: cut > 0 }
 }
 
-/** Translate logical Session metadata to the unchanged v0 browser wire. */
-function wireHeader(
-  header: SessionHeader,
-  inheritedEventCount: SessionLogOffsetType,
-): SessionWireHeader {
-  const { isSeeded, ...wire } = header
-  return {
-    ...wire,
-    ...isSeeded ? { seedLength: inheritedEventCount } : {},
-  }
+/** Translate current logical Session metadata to the browser wire. */
+function wireHeader(header: SessionHeader): SessionWireHeader {
+  return { ...header }
 }
 
 function entryFor(event: SessionEvent): SessionEventEntry {
@@ -371,145 +421,7 @@ function entryFor(event: SessionEvent): SessionEventEntry {
   }
 }
 
-function chunkEntryFor(row: ChunkRow): SessionChunkRun {
-  switch (row.type) {
-    case 'text-chunks':
-      return {
-        type: 'chunks',
-        event: { type: 'chunkrow/text-chunks', seq: row.seq0, time: row.time0, data: row.data },
-      }
-    case 'reasoning-chunks':
-      return {
-        type: 'chunks',
-        event: { type: 'chunkrow/reasoning-chunks', seq: row.seq0, time: row.time0, data: row.data },
-      }
-    case 'tool-call-chunks':
-      return {
-        type: 'chunks',
-        event: { type: 'chunkrow/tool-call-chunks', seq: row.seq0, time: row.time0, data: row.data },
-      }
-  }
-}
-
-type BoundedHistoryValue = {
-  readonly records: readonly SessionHistoryRecord[]
-  readonly hasMore: boolean
-  readonly projections?: SessionProjectionBaseline
-}
-
-type CarrierBytes<T> = (value: T) => number
-
-/** Price one unary page inside the complete Connection response JSON message. */
-function unaryCarrierBytes(value: unknown): number {
-  return serializedBytes({
-    type: 'server-response',
-    rpcId: CARRIER_UUID,
-    result: { ok: true, value },
-  })
-}
-
-/** Price one opening snapshot inside the complete Gateway stream JSON message. */
-function streamCarrierBytes(value: unknown): number {
-  return serializedBytes({ type: 'item', streamId: CARRIER_UUID, value })
-}
-
-function serializedBytes(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value), 'utf8')
-}
-
-/** Read the inclusive final Session sequence represented by one wire record. */
-function recordLastSeq(record: SessionHistoryRecord): number {
-  if (record.type === 'event') return record.event.seq
-  const length = record.event.type === 'chunkrow/tool-call-chunks'
-    ? record.event.data.args.length
-    : record.event.data.texts.length
-  return record.event.seq + length - 1
-}
-
-/** Find the first record containing or following one logical Session sequence. */
-function recordIndexFromSeq(records: readonly SessionHistoryRecord[], target: number): number {
-  let low = 0
-  let high = records.length
-  while (low < high) {
-    const middle = (low + high) >> 1
-    if (recordLastSeq(records[middle] as SessionHistoryRecord) < target) low = middle + 1
-    else high = middle
-  }
-  return low
-}
-
-/** Read the append-message group start represented by one scalar history record. */
-function messageGroupStart(record: SessionHistoryRecord): number | undefined {
-  if (record.type !== 'event'
-    || !MESSAGE_TYPES.has(record.event.type)
-    || !isAppendSurfaceEvent(record.event as unknown as SessionEvent)) return undefined
-  let start = record.event.seq
-  for (const source of record.event.sourceEventSeqs ?? []) start = Math.min(start, source)
-  return start
-}
-
-/**
- * Keep the newest contiguous message-group suffix that fits a complete carrier
- * message. The newest group remains intact when it alone exceeds the budget.
- */
-function boundHistoryValue<T extends BoundedHistoryValue>(
-  value: T,
-  maxBytes: number,
-  carrierBytes: CarrierBytes<T>,
-): T {
-  if (maxBytes <= 0) return value
-  const records = value.records
-  const prefix = new Array<number>(records.length + 1).fill(0)
-  for (let index = 0; index < records.length; index++) {
-    prefix[index + 1] = (prefix[index] as number) + serializedBytes(records[index])
-  }
-
-  const fit = (candidate: T): { readonly cut: number; readonly fits: boolean } => {
-    const untrimmedShellBytes = carrierBytes({ ...candidate, records: [] })
-    const trimmedShellBytes = candidate.hasMore
-      ? untrimmedShellBytes
-      : carrierBytes({ ...candidate, records: [], hasMore: true })
-    const total = (cut: number): number => (cut === 0 ? untrimmedShellBytes : trimmedShellBytes)
-      + ((prefix[records.length] as number) - (prefix[cut] as number))
-      + Math.max(0, records.length - cut - 1)
-    if (total(0) <= maxBytes) return { cut: 0, fits: true }
-
-    let cut = 0
-    let foundNewest = false
-    for (let index = records.length - 1; index >= 0; index--) {
-      const startSeq = messageGroupStart(records[index] as SessionHistoryRecord)
-      if (startSeq === undefined) continue
-      const candidateCut = recordIndexFromSeq(records, startSeq)
-      if (total(candidateCut) <= maxBytes) {
-        cut = candidateCut
-        foundNewest = true
-        continue
-      }
-      if (!foundNewest) return { cut: candidateCut, fits: false }
-      return { cut, fits: true }
-    }
-    return { cut, fits: false }
-  }
-
-  const applyCut = (candidate: T, cut: number): T => ({
-    ...candidate,
-    records: records.slice(cut),
-    hasMore: candidate.hasMore || cut > 0,
-  })
-  const first = fit(value)
-  if (first.fits) return applyCut(value, first.cut)
-  if ('projections' in value) {
-    const withoutProjections = { ...value } as T & { projections?: SessionProjectionBaseline }
-    delete withoutProjections.projections
-    const second = fit(withoutProjections)
-    return applyCut(withoutProjections, second.cut)
-  }
-  return applyCut(value, first.cut)
-}
-
 /** Encode one bounded logical page without changing its pagination cut. */
 function pageRecords(events: readonly SessionEvent[]): SessionHistoryRecord[] {
-  return packChunkRuns(events).map(record => isChunkRow(record)
-    ? chunkEntryFor(record)
-    : entryFor(record))
+  return events.map(entryFor)
 }

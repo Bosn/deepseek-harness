@@ -227,6 +227,7 @@ export function mapStopReason(
  *   in-band terminal error an aborted finish.
  * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
  * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
+ * @param requestedModel - request model identity for durable replay provenance.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */
@@ -236,6 +237,7 @@ export async function* toStreamChunks(
   callerSignal?: AbortSignal,
   requestBytesEstimate?: number,
   quotaWorded429IsRateLimit = false,
+  requestedModel?: string,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -307,7 +309,7 @@ export async function* toStreamChunks(
             requestBytesEstimate,
             quotaWorded429IsRateLimit,
           ),
-          replayState: toPiReplayState(event.message),
+          replayState: toPiReplayState(event.message, requestedModel),
         }
         return
       case 'error':

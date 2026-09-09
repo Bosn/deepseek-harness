@@ -2,11 +2,20 @@
 
 DeepSeek Harness is an all-plugin Cordis agent harness. Read [docs/architecture.md](docs/architecture.md) before changing `packages/`; follow [docs/AGENTS.md](docs/AGENTS.md) for documentation.
 
-## Pre-release stance: foundation over blast radius
+## Pre-stable APIs and released Session data
 
-**Remove at first tagged release.** Until then, prefer foundations to compatibility shims: rename or repackage freely and update every reference. Backends reject old on-disk formats. SQLite uses monotonic `SCHEMA_VERSION`; `dsh-session` keeps `SESSION_FORMAT_VERSION` at `0` with no compatibility promise.
+Public APIs are pre-stable; update every consumer. Released Session JSONL follows [adjacent migration](.agents/notes/implemented/architecture/2026-08-31-released-session-format-migrations.md): body reads may add a version-named successor but never move, overwrite, or delete committed generations; predecessors imply neither fallback nor downgrade support. SQLite domains use monotonic `SCHEMA_VERSION`.
 
 **Application launch.** Only `dsh` profiles launch supported Node apps; package bins, demos, and public SDK argv escapes are forbidden ([rule](docs/architecture.md#application-launch)).
+
+## Syncing this fork with upstream
+
+`origin` is this `Bosn/deepseek-harness` fork; `upstream` is `deepseek-ai/deepseek-harness`. Version updates merge the latest `upstream/master` into fork `master` merge-first, in one PR (`chore: merge upstream <ref>`), always in a dedicated checkout under `/home/ec2-user/tmp`.
+
+- **Upstream code is authoritative.** Merge as-is: never fix, drop, cherry-pick, or "improve" upstream code, tests, docs, or fixtures during a sync; report genuine upstream bugs separately.
+- **Conflicts resolve to upstream** except hunks that implement a kept fork-local feature; adapt those minimally onto upstream's new extension points.
+- **Fork code the new upstream covers is deleted** (implementation, config, tests, fixtures) in the same PR; fork-local code stays only while upstream-absent.
+- **No heavy local testing; do not wait for CI.** Run only the focused checks `dsh-pre-push-checks` selects for the sync's fork-side delta; merge-introduced snapshot/doc noise resolves to upstream.
 
 ## Repository layout
 
@@ -48,11 +57,12 @@ packages/    @deepseek-ai/dsh-<pkg> workspaces at packages/<group>/<pkg>/
   experimental/ private prototypes excluded from official releases
   support/     dev/test infrastructure
   util/        zero-dependency utilities
-python/      Python SDK and bundled runtime (see python/README.md)
-native/      @deepseek-ai/node-addon-landlock-run source of record (see native/README.md)
+python/      Python SDK/runtime (see python/README.md)
+native/      @deepseek-ai/node-addon-system source of record (see native/README.md)
+benchmarks/  performance gates
 .agents/     Agent workflows and Agent Notes (`notes/`)
 docs/        architecture, generated catalogs, postmortems, cookbook (see docs/AGENTS.md)
-scripts/     repo gates and generators
+scripts/     gates and generators
 website/     VitePress projection of selected bilingual docs/ sources
 ```
 
@@ -88,7 +98,7 @@ If a required `gh`, `pnpm`, build, test, or generator command fails because the 
 
 ### Run relevant checks locally
 
-Run checks before pushes via [dsh-pre-push-checks](.agents/skills/dsh-pre-push-checks/SKILL.md); report commands run. After `gh stack sync`, validate immediately; do not merge before checks pass.
+Run checks before pushes via [dsh-pre-push-checks](.agents/skills/dsh-pre-push-checks/SKILL.md); report only commands run. After `gh stack sync`, validate immediately; do not merge before checks pass.
 
 - Match evidence to the surface: focused behavior tests, model/user-output snapshots, `doc-sync` for docs, built smokes for published paths, and real-API e2e for providers.
 - Never default to the full suite or repeat a passing check for commit or push. CI owns exhaustive coverage and the platform matrix; rehearse all locally only by explicit request, for CI diagnosis, or for an irreducibly repository-wide change.
@@ -132,7 +142,7 @@ Real-API tests and demos read `DEEPSEEK_API_KEY`, optional `DEEPSEEK_BASE_URL`, 
 - **Engineering updates happen in dedicated checkouts.** Develop and merge upstream commits in a separate worktree (for example under `/home/ec2-user/tmp`), never in the checkout that runs the live DSH service; modify that live checkout in place only when a task states it explicitly.
 - **PRs:** target `Bosn/deepseek-harness:master`, never upstream; apply one `kind/*`, all material `area/*`, and native Issue Type ([taxonomy](.agents/notes/implemented/process/2026-08-08-unified-github-label-taxonomy.md)).
 - TODO markers: `FIXME`/`TODO`/`XXX` by urgency ([semantics](docs/development.md)).
-- Files end with one trailing newline; `git diff --cached --check` (pre-commit) gates it.
+- Files end with exactly one trailing newline; `git diff --cached --check` (pre-commit) gates it.
 
 ## Defensive patterns
 

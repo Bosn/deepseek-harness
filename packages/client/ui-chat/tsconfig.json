@@ -27,9 +27,6 @@
       "path": "../../attachment/attachment"
     },
     {
-      "path": "../connection/tsconfig.client.json"
-    },
-    {
       "path": "../../compaction/compaction"
     },
     {
@@ -90,6 +87,9 @@
       "path": "../ui-session"
     },
     {
+      "path": "../ui-sidebar-right"
+    },
+    {
       "path": "../ui-settings"
     },
     {
@@ -97,6 +97,9 @@
     },
     {
       "path": "../ui-workspace"
+    },
+    {
+      "path": "../ui-sidebar-textpreview"
     }
   ]
 }

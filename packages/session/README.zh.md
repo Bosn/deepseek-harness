@@ -1,5 +1,5 @@
 ---
-description: "持久会话数据平面的包映射：持久化、检查点策略、投影、标题、维护上报与外发遥测。"
+description: "持久会话数据平面的包映射：持久化 seam 及其后端、检查点策略、投影、基于日志的标题与外发会话遥测。"
 kind: "package-group"
 ---
 
@@ -9,7 +9,7 @@ kind: "package-group"
 
 ## 概述
 
-session 组让 agent（智能体）的对话在实时 loop 之外持久可复用：持久化 seam 存储事件日志并在恢复时还原，检查点策略让请求、工具副作用与已完成步骤在下一步动作前持久化，投影向客户端载体提供日志派生的完整值，标题根据会话内容为其命名，维护上报跟随 exact top-level turn 生命周期，遥测则向外上报会话活动。先挂载随产品交付的 JSONL 持久化 provider，再按部署需要挂载检查点策略以及投影、标题、协调或遥测包。本页是组的映射；每个包 README 负责各自的约定，`session-query/` 是同级独立组，其读取／工具接口独立消费持久化。
+session 组让对话持久保存，恢复已发布的日志格式，并使已提交历史在重启后仍可用。存储与检查点包保护请求、工具副作用和已完成步骤；投影包生成客户端可用的值；标题包为会话命名；遥测包上报活动。先使用随产品交付的 JSONL 存储，再仅按部署需要添加检查点、投影、标题策略或遥测。每个包 README 负责各自的保证与配置，同级查询组则提供独立的读取和工具访问。
 
 ## 目录
 
@@ -22,14 +22,18 @@ session 组让 agent（智能体）的对话在实时 loop 之外持久可复用
 <a id="packages"></a>
 ## 包
 
-本组分为五个家族：持久存储（持久化 seam、后端、检查点策略）、投影、标题、协调与遥测。每个包 README 负责各自的约定与配置。
+本组分为四个家族：持久存储（持久化 seam、后端、检查点策略）、投影、标题与遥测。每个包 README 负责各自的约定与配置。
 
 ### 持久化
 
 | 包 | 职责 | ctx key |
 |---|---|---|
+| [`session-format/`](session-format/README.zh.md) | 纯相邻格式链与产物校验库 | 库，不使用 ctx key |
+| [`session-format-v0-to-v1/`](session-format-v0-to-v1/README.zh.md) | 冻结的 released-v0 解码器，以及到 released v1 的恒等迁移 | 库，不使用 ctx key |
+| [`session-format-v1-to-v2/`](session-format-v1-to-v2/README.zh.md) | 冻结的 released-v1 解码器，以及把 Assistant 流嵌入 released v2 的基数变化迁移 | 库，不使用 ctx key |
+| [`session-format-catalog/`](session-format-catalog/README.zh.md) | 已交付相邻迁移的生成式静态目录 | 库，不使用 ctx key |
 | [`session-persistence/`](session-persistence/README.zh.md) | 定义持久会话存储服务，以及每个后端组合的共享写入协调机制 | `ctx.sessionPersistence` |
-| [`session-persistence-jsonl/`](session-persistence-jsonl/README.zh.md) | 随产品交付的后端：每会话一份仅追加 JSONL 日志，可选 Zstandard 压缩 | 注册到 `ctx.sessionPersistence` |
+| [`session-persistence-jsonl/`](session-persistence-jsonl/README.zh.md) | 随产品交付的后端：逐 Session 使用不可变规范 generation 文件名并排他发布后继；可选 Zstandard 压缩 | 注册到 `ctx.sessionPersistence` |
 | [`session-checkpoint-policy/`](session-checkpoint-policy/README.zh.md) | 让模型请求、顶层工具副作用与已完成步骤在下一步动作前持久化 | 包装 `ctx.llm` 与 `ctx.tools` |
 | [`session-log-deepseek/`](session-log-deepseek/README.zh.md) | 把增量规范日志作为可选的官方 DeepSeek 请求元数据上传 | 贡献 `dsh_session_log` |
 
@@ -51,18 +55,12 @@ session 组让 agent（智能体）的对话在实时 loop 之外持久可复用
 | [`session-title-first-prompt-llm/`](session-title-first-prompt-llm/README.zh.md) | 根据第一条合格的人类消息为会话生成标题 | 注册到 `ctx.sessionTitle` |
 | [`session-title-all-prompts-llm/`](session-title-all-prompts-llm/README.zh.md) | 根据所有合格的人类消息为会话生成标题 | 注册到 `ctx.sessionTitle` |
 
-### 协调
-
-| 包 | 职责 | ctx key |
-|---|---|---|
-| [`maintenance-reporter/`](maintenance-reporter/README.zh.md) | 续租和释放 exact top-level BoAgents maintenance holder，并上报 DSH coverage | 注册生命周期 listener 与受管 shell environment |
-
 ### 遥测
 
 | 包 | 职责 | ctx key |
 |---|---|---|
 | [`session-telemetry/`](session-telemetry/README.zh.md) | 捕获会话活动并把记录交给配置的上报后端 | `ctx.sessionTelemetry` |
-| [`session-telemetry-otel/`](session-telemetry-otel/README.zh.md) | 通过 OpenTelemetry 日志以 `FULL`、`FEEDBACK_ONLY` 或 `DISABLED` 模式投递遥测 | 注册到 `ctx.sessionTelemetry` |
+| [`session-telemetry-otel/`](session-telemetry-otel/README.zh.md) | 通过 OpenTelemetry 日志以 `FEEDBACK_ONLY` 或 `DISABLED` 模式投递遥测 | 注册到 `ctx.sessionTelemetry` |
 
 同一时间只允许一个标题提供方注册；未注册时，标题服务保留其确定性回退。下面的子系统页面是各家族后端无关的参考资料。
 

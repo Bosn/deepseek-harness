@@ -9,25 +9,9 @@ import { API_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority } from './api-request-trust.ts'
 import { BrowserAuth } from './browser-auth.ts'
-import { assertFilesPublicUrl, listenForWorkspaceFiles } from './files-server.ts'
 import { PRIVILEGED_HOSTS_GLOBAL } from './privileged-hosts.ts'
 import { HostConnectionService } from './rpc-host.ts'
-import { FILES_INFO_GLOBAL, type WorkspaceFilesInfo } from './workspace-files.ts'
-
-declare module '@deepseek-ai/cordis' {
-  interface Events {
-    /**
-     * Resolve one Session cwd without activating its Agent. The Session domain
-     * owns the first answer; an absent owner delegates to undefined.
-     * @param sessionId - opaque Session identity from the `/f` path.
-     * @mode waterfall
-     */
-    'client-connection/workspace-root'(
-      sessionId: string,
-      next: () => Promise<string | undefined>,
-    ): Promise<string | undefined>
-  }
-}
+import { ConnectionRecoveryConfigSchema, resolveConnectionConfig, type ConnectionRecoveryConfig } from './recovery-config.ts'
 
 export type {
   ConnectionFetchMethod,
@@ -40,6 +24,7 @@ export type {
   ConnectionRpcHandler,
   ConnectionRequestRejection,
   ConnectionRpcResult,
+  ConnectionRequestBodyMode,
   ConnectionTrustRequest,
   ClientRequest,
   HostConnectionHandle,
@@ -105,10 +90,12 @@ export function browserApplicationAuthorities(
 }
 
 /** Services required before providing Connection. */
-export const inject = ['webServer', 'credentials']
+export const inject = ['credentials']
 
-/** Plugin config: the deployment's non-loopback serving authorities. */
+/** Browser authentication, request limits, and connection recovery configuration. */
 export interface ConnectionConfig {
+  /** Browser recovery timing, injected into each served page. */
+  recovery?: ConnectionRecoveryConfig
   /**
    * Authorities this deployment serves beyond loopback: exact `host:port`, or
    * port-less `host` matching any port. The /api trust fence refuses any
@@ -133,17 +120,6 @@ export interface ConnectionConfig {
    * network reachability and {@link ConnectionConfig.trustedHosts}.
    */
   browserSessionAuth?: boolean
-  /**
-   * Optional dedicated workspace-file origin. With neither key present no
-   * listener exists; `files: {}` is intentionally a no-op because the config
-   * schema materializes absent nested objects.
-   */
-  files?: {
-    /** Listener port. Zero requests an OS-assigned direct-access port. */
-    port?: number
-    /** Bare external HTTP(S) origin when a reverse proxy republishes the listener. */
-    publicUrl?: string
-  }
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -151,29 +127,26 @@ export interface ConnectionConfig {
 }
 
 export const Config: z<ConnectionConfig> = z.object({
+  recovery: ConnectionRecoveryConfigSchema.default({}),
   trustedHosts: z.array(String).default([]),
   privilegedHosts: z.array(String).default([]),
   browserSessionAuth: z.boolean().default(true),
-  // No inner defaults: key presence is the enable signal.
-  files: z.object({
-    port: z.natural().max(65535),
-    publicUrl: z.string(),
-  }),
   cookieMaxAgeDays: z.natural().min(1).default(30),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
 })
 
 /**
- * Mounts the API gateway under the browser transport prefix. Every request on
- * the prefix passes the Host/Origin browser-trust fence and, unless
- * `browserSessionAuth` is false, persistent browser authentication before
- * dispatch. `privilegedHosts` contributes to the outer trust fence and client
- * capability injection only; it never replaces the browser session or creates
- * a method-specific authorization path.
+ * Provides carrier-neutral RPC and Fetch registries. When `webServer` is
+ * present, the plugin also mounts the `/api` browser transport with Host/Origin
+ * checks and, unless `browserSessionAuth` is false, persistent browser
+ * authentication. `privilegedHosts` contributes to the outer trust fence and
+ * client capability injection only; it never replaces the browser session or
+ * creates a method-specific authorization path.
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
 export async function apply(ctx: Context, config?: ConnectionConfig): Promise<void> {
+  const recovery = resolveConnectionConfig(config?.recovery)
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
   const privilegedHosts = config?.privilegedHosts ?? []
@@ -183,28 +156,6 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
   for (const entry of fenceHosts) assertTrustedAuthority(entry)
-  const filesPort = config?.files?.port
-  const filesPublicOrigin = config?.files?.publicUrl === undefined
-    ? undefined
-    : assertFilesPublicUrl(config.files.publicUrl)
-  const filesEnabled = filesPort !== undefined || filesPublicOrigin !== undefined
-  if (filesPublicOrigin !== undefined && !filesPort) {
-    throw new Error('client-connection: files.publicUrl requires a fixed files.port')
-  }
-  const applicationAuthorities = browserApplicationAuthorities(fenceHosts, ctx.webServer.port)
-  if (filesPublicOrigin !== undefined) {
-    const filesHostname = new URL(filesPublicOrigin).hostname
-    const sharesApplicationHostname = applicationAuthorities.some(
-      authority => new URL(`http://${authority}`).hostname === filesHostname,
-    )
-    if (!sharesApplicationHostname) {
-      throw new Error(
-        'client-connection: files.publicUrl hostname must match an application authority '
-        + 'so the browser session reaches the files origin',
-      )
-    }
-  }
-  assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const browserAuth = config?.browserSessionAuth === false
     ? BrowserAuth.bypass()
     : await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
@@ -213,53 +164,34 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
     fenceHosts,
     browserAuth,
   )
-  const fetchHandler = connection.createSharedFetchHandler(API_PATH)
-  const route: WebRoute = {
-    kind: 'prefix',
-    path: API_PATH,
-    handler: async (req, res) => {
-      const rejection = connection.requestRejection(req)
-      if (rejection !== undefined) {
-        res.writeHead(rejection)
-        res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
-        return
-      }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
-    },
-  }
-  ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
+  ctx.inject(['webServer'], (webCtx) => {
+    assertImageBodyCapacity(webCtx, maxRequestBodyBytes)
+    webCtx.on('webserver/index-inject', (table) => {
+      table.push({ kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: recovery })
+    })
+    const fetchHandler = connection.createSharedFetchHandler(API_PATH)
+    const route: WebRoute = {
+      kind: 'prefix',
+      path: API_PATH,
+      handler: async (req, res) => {
+        const rejection = connection.requestRejection(req)
+        if (rejection !== undefined) {
+          res.writeHead(rejection)
+          res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+          return
+        }
+        await bridge(req, res, fetchHandler, maxRequestBodyBytes)
+      },
+    }
+    webCtx.effect(() => webCtx.webServer.register(route), 'client-connection: /api route')
+    // The browser uses this to decide whether the shipped client exposes Host
+    // configuration surfaces. Every request still passes the uniform Host fence
+    // and BrowserAuth session check above.
+    webCtx.on('webserver/index-inject', (table) => {
+      table.push({ kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: privilegedHosts })
+    })
+  })
   ctx.inject(['attachments'], (attachmentCtx) => {
     assertImageBodyCapacity(attachmentCtx, maxRequestBodyBytes)
   })
-  // The browser uses this to decide whether the shipped client exposes Host
-  // configuration surfaces. Every request still passes the uniform Host fence
-  // and BrowserAuth session check above.
-  ctx.on('webserver/index-inject', (table) => {
-    table.push({ kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: privilegedHosts })
-  })
-  if (!filesEnabled) return
-
-  const files = await listenForWorkspaceFiles(
-    ctx.webServer.host,
-    filesPort ?? 0,
-    fenceHosts,
-    filesPublicOrigin,
-    request => browserAuth.isAuthenticatedFor(request, applicationAuthorities),
-    {
-      cwdFor: sessionId => ctx.waterfall(
-        'client-connection/workspace-root',
-        sessionId,
-        () => Promise.resolve(undefined),
-      ),
-    },
-    (error) => { ctx.logger.error(error) },
-  )
-  const info: WorkspaceFilesInfo = {
-    port: files.port,
-    ...(filesPublicOrigin === undefined ? {} : { publicUrl: filesPublicOrigin }),
-  }
-  ctx.on('webserver/index-inject', (table) => {
-    table.push({ kind: 'global', name: FILES_INFO_GLOBAL, value: info })
-  })
-  ctx.effect(() => files.close, 'client-connection: /f listener')
 }

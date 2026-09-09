@@ -12,13 +12,11 @@ import {
   type ConnectionState,
 } from '../src/client/index.ts'
 import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
-import { FILES_INFO_GLOBAL, type WorkspaceFilesInfo } from '../src/workspace-files.ts'
 
 type Win = {
   location?: { hostname: string; port?: string; protocol?: string; search: string; origin?: string }
   __DSH_TRANSPORT__?: ClientTransportHooks
   [PRIVILEGED_HOSTS_GLOBAL]?: readonly string[]
-  [FILES_INFO_GLOBAL]?: WorkspaceFilesInfo
 }
 
 afterEach(() => {
@@ -77,6 +75,51 @@ async function mount(): Promise<ConnectionHandle> {
 }
 
 describe('connection client apply', () => {
+  it('uses Host bootstrap timing when Gateway starts without overrides', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('__DSH_CONNECTION_RECOVERY__', {
+      backoffBaseMs: 10, backoffMaxMs: 10, generationReadyTimeoutMs: 20,
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const handle = await mount()
+    const signals: AbortSignal[] = []
+    handle.registerGenerationSource(signal => new Promise<void>((resolve) => {
+      signals.push(signal)
+      signal.addEventListener('abort', () => { resolve() }, { once: true })
+    }))
+    const loop = handle.start({})
+    try {
+      await vi.advanceTimersByTimeAsync(20)
+      expect(signals[0]?.aborted).toBe(true)
+      expect(handle.state.getSnapshot()).toBe('connecting')
+      await vi.advanceTimersByTimeAsync(10)
+      expect(signals).toHaveLength(2)
+    } finally {
+      loop.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      warnSpy.mockRestore()
+    }
+  })
+
+  it.each([{ generationReadyTimeoutMs: 0 }, { backoffFactor: NaN }])('rejects malformed bootstrap recovery before publishing the service: %j', (recovery) => {
+    vi.stubGlobal('__DSH_CONNECTION_RECOVERY__', recovery)
+    const ctx = new Context()
+    expect(() => { apply(ctx) }).toThrow()
+    expect(ctx.get('connection')).toBeUndefined()
+  })
+
+  it('rejects a NaN start override without acquiring the generation source', async () => {
+    const handle = await mount()
+    const source = vi.fn<ConnectionGenerationSource>()
+    const unregister = handle.registerGenerationSource(source)
+    try {
+      expect(() => handle.start({}, { backoffFactor: NaN })).toThrow(/backoffFactor.*finite/)
+      expect(source).not.toHaveBeenCalled()
+    } finally {
+      unregister()
+    }
+  })
+
   it('treats a runtime without browser location as local', async () => {
     delete (globalThis as Win).location
     const handle = await mount()
@@ -105,29 +148,7 @@ describe('connection client apply', () => {
     expect(handle.canUseHostConfiguration).toBe(false)
   })
 
-  it('builds only confined URLs on the injected workspace-file origin', async () => {
-    const win = globalThis as Win
-    win.location = {
-      hostname: 'klaus-server.tailcdff9a.ts.net',
-      port: '3080',
-      protocol: 'https:',
-      search: '',
-    }
-    const handleWithoutFiles = await mount()
-    expect(handleWithoutFiles.fileUrl('s-1' as never, '/work', 'out/a.html')).toBeUndefined()
-
-    win[FILES_INFO_GLOBAL] = { port: 3082 }
-    const direct = await mount()
-    expect(direct.fileUrl('s-1' as never, '/work', 'out/a b.html')).toBe(
-      'https://klaus-server.tailcdff9a.ts.net:3082/f/s-1/out/a%20b.html',
-    )
-    expect(direct.fileUrl('s-1' as never, '/work', '/etc/hosts')).toBeUndefined()
-
-    win[FILES_INFO_GLOBAL] = { port: 3082, publicUrl: 'https://files.tailnet.example:7443' }
-    expect((await mount()).fileUrl('s/1' as never, '/work', '/work/a#b.html')).toBe(
-      'https://files.tailnet.example:7443/f/s%2F1/a%23b.html',
-    )
-  })
+)
 
   it('fails closed when the injected configuration-authority global is not an array', async () => {
     ;(globalThis as Win).location = { hostname: 'harness.example', port: '3080', search: '' }
@@ -191,7 +212,6 @@ describe('connection client apply', () => {
       generations.push(handle.generation.getSnapshot()?.host.home)
     })
     expect(handle.generation.getSnapshot()).toBeUndefined()
-    // config omitted: the `config ?? {}` default arm is part of the surface.
     let connected = 0
     const loop = handle.start({ onConnected: () => { connected++ } })
     expect(() => handle.start({})).toThrow(/already owned by another consumer/)

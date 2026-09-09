@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`@deepseek-ai/dsh-llm-retry` is the retry executor for failed model requests: it applies each provider's resolved retry policy at the agent loop's open-step `agent/request-error` extension point, so every retry re-runs the same step inside the same open turn over the same durable history. It does not wrap the streaming call itself — every adapter call remains one provider attempt, and direct `ctx.llm.stream()` consumers stay single-attempt. Retry scheduling is durable: the plugin appends `llm/retry` events to the session log before waiting, and cancellation during backoff leaves the log consistent. Normal mode retries a bounded set of failure codes up to `maxRetries` with exponential backoff; always mode asks downstream recovery first, then retries every failure without an attempt limit.
+Mount `@deepseek-ai/dsh-llm-retry` to retry failed model requests at durable agent-step boundaries. Provider `retryPolicy` settings choose bounded normal-mode retries or unlimited always-mode retries; scheduled attempts reach the session log before backoff, and cancellation leaves consistent history. Retries re-run the failed step in the same open turn, while direct `ctx.llm.stream()` calls remain single-attempt. Each retry is another billed provider request, and always mode continues until success, cancellation, or disposal.
 
 ## Table of Contents
 
@@ -43,18 +43,15 @@ Choose it when a composition runs the agent loop and wants durable request recov
         initialDelayMs: 1000
         maxDelayMs: 30000
         jitterRatio: 0.2
-        rateLimitDelaysMs: [60000, 180000, 300000]
 
 - name: '@deepseek-ai/dsh-llm-retry'
 ```
 
-Omission of `retryPolicy` uses normal mode: five shared retries for `CONTENT_FILTERED`, `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, and `TRANSPORT`, with bounded exponential backoff from 500 ms to 10 seconds and 10 percent jitter. The default `maxRetriesByCode: { TIMEOUT: 1 }` limits a long idle timeout to one repeat independently of the shared budget. `CONTENT_FILTERED` is safe to repeat because the next sampled response receives a fresh moderation decision. Normal mode can change its finite budget, eligible codes, per-code caps, and backoff; both modes ask downstream specialized recovery first, accept its explicit retry, and suppress fallback after a durable replacement that does not authorize another request.
-
-`RATE_LIMIT` uses `backoff.rateLimitDelaysMs` instead of the fast exponential schedule. The default `[60000, 180000, 300000]` gives three cooldown retries after one, three, and five minutes; only `RATE_LIMIT` attempts advance it. In normal mode the schedule length is that code's retry budget capped by `maxRetries`; an empty array restores exponential backoff, while always mode falls back to exponential delay after exhausting the schedule. This includes quota-worded HTTP 429 responses only on routes that classify that wording as transient, such as pi-ai's built-in qwen token-plan routes. A valid provider `Retry-After` raises the cooldown floor, and jitter never reduces the wait below either floor.
+Omission of `retryPolicy` uses normal mode: five retries for `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, and `TRANSPORT`, with bounded exponential backoff from 500 ms to 10 seconds and 10 percent jitter. Normal mode can change its finite budget, eligible codes, and backoff; always mode asks downstream recovery first, then retries every model-request failure without an attempt limit, stopping only on success, cancellation, or plugin disposal.
 
 ### What you can observe
 
-Each scheduled retry is durable before its wait: the plugin appends a non-surface `llm/retry` event carrying the retry id, provider, mode, complete canonical policy key, failure, and scheduled delay, then a `llm/retry-started` event immediately before the retry begins. Retry numbering continues only for the same provider and complete policy key. When the wait completes, the loop re-runs the failed step inside the same open turn over the same durable history, so the retried request is reconstructable from the session log exactly like the original. Cancellation or plugin disposal aborts active backoff, drains active delegated recovery, and makes a callback captured before disposal fail closed.
+Each scheduled retry is durable before its wait: the plugin appends a non-surface `llm/retry` event carrying the retry id, provider, mode, policy key, failure, and scheduled delay, then a `llm/retry-started` event immediately before the retry begins. A valid `Retry-After` from the provider replaces local backoff when it fits the policy bounds. When the wait completes, the loop re-runs the failed step inside the same open turn over the same durable history, so the retried request is reconstructable from the session log exactly like the original. Cancellation or plugin disposal aborts active backoff, drains active delegated recovery, and makes a callback captured before disposal fail closed.
 
 ### Failures and recovery
 
@@ -85,7 +82,7 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 
 ### Recovery flow
 
-A failed step arrives on the waterfall with its provider and resolved policy. Both modes settle downstream recovery first, honor a downstream `retry` decision, and veto fallback after a durable replacement that did not authorize another request. Normal mode then checks that the failure code and its shared, per-code, or cooldown budget remain eligible. The plugin computes the delay — the `RATE_LIMIT` cooldown floor, a valid provider `Retry-After`, or local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
+A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — provider `Retry-After` when valid and within bounds, otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
 
 ### Waterfall composition
 
@@ -115,11 +112,11 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-No retry event, delay, provider error, or failed partial output is model-visible. The retry attempt reconstructs the same explicit provider/model request from durable surface history unless a downstream recovery policy deliberately changes that surface; failed chunks never enter derived messages.
+No retry event, delay, provider error, or failed partial output is model-visible. The retried step reconstructs the same explicit provider/model request from durable surface history unless a downstream recovery policy deliberately changes that surface; failed chunks never enter derived messages.
 
 #### Token effect
 
-Each retry is a new provider request and may repeat input-token billing. Normal mode has a finite budget; always mode can consume unbounded requests until success, cancellation, or a downstream durable replacement suppresses fallback. `llm/retry` itself contributes no tokens.
+Each retry is a new provider request and may repeat input-token billing. Normal mode has a finite budget; always mode can consume unbounded requests until success or cancellation. `llm/retry` itself contributes no tokens.
 
 #### KV Cache effect
 
@@ -133,9 +130,9 @@ The reconstructed request preserves the prior prefix and is eligible for provide
 These limits define where the executor stops and future work begins. They are current package constraints, not a general retry comparison or a task backlog.
 
 - **Agent turns are the only retry boundary** — direct `ctx.llm.stream()` consumers remain single-attempt because a raw stream cannot separate already-emitted chunks durably.
-- **Always mode retries permanent failures** — authentication, quota, invalid-request, protocol, and unrecoverable context errors continue until success, cancellation, disposal, or a downstream durable replacement suppresses fallback; deployments own provider-specific cost and latency controls.
-- **Finite recovery budgets remain independent** — specialized recovery runs first and may rebuild durable state; normal retry counts only attempts it schedules under the exact provider policy. A specialized policy that declines leaves the unchanged failure to generic retry.
-- **Recovery policies compose by waterfall order** — both modes accept a downstream retry before applying their fallback. A later policy that ignores cancellation and never settles also prevents fallback, turn quiescence, and plugin disposal from completing.
+- **Always mode retries permanent failures** — authentication, quota, invalid-request, protocol, and unrecoverable context errors continue until success, cancellation, or disposal; deployments own provider-specific cost and latency controls.
+- **Finite plugin budgets add** — normal mode counts only its configured codes and exact provider policy, while context-overflow compaction owns a separate budget. Any overlapping policy must define registration-order behavior.
+- **Recovery policies compose by waterfall order** — always mode accepts a downstream retry before applying its fallback. A later policy that ignores cancellation and never settles also prevents fallback, turn quiescence, and plugin disposal from completing.
 - **`llm/retry` records scheduling, not completion** — later step and turn events establish success, exhaustion, or cancellation.
 
 <a id="dev-note"></a>

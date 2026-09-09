@@ -403,6 +403,7 @@ export class PiAiAdapter extends LlmAdapter {
         options.signal,
         requestBytesEstimate,
         profile.quotaWorded429IsRateLimit,
+        model.id,
       )[Symbol.asyncIterator]()
       let exhausted = false
       try {

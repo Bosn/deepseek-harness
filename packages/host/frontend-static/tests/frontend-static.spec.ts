@@ -84,7 +84,7 @@ async function loadComposition(bypassSessionAuth = false): Promise<Context> {
   return context
 }
 
-/** GET (by default) one path against the running server; returns status, content-type, and its full fixture body. */
+/** GET (by default) one path against the running server; returns status, content-type, and the body. */
 async function request(port: number, path: string, init?: RequestInit): Promise<{ status: number; type: string | null; body: string }> {
   const response = await fetch(`http://127.0.0.1:${String(port)}${path}`, init)
   return {
