@@ -17,3 +17,4 @@ When a custom change passes acceptance (owner approval, checks green): create or
 | Date | PR | Scope | Summary |
 |---|---|---|---|
 | 2026-09-10 | [#26](https://github.com/Bosn/deepseek-harness/pull/26) | `session-format-v0-to-v1` | Admit `requestBytesEstimate` in released-v0 failure records: the frozen v0→v1 edge no longer refuses real v0 Sessions written before the format migration; the member is validated as a positive integer and preserved unchanged through v3. |
+| 2026-09-10 | [#27](https://github.com/Bosn/deepseek-harness/pull/27) | repo process | Add `FORK-CHANGES.md` and the AGENTS.md rule: every accepted fork-local custom change automatically gets a PR and an append-only change-log row with its PR link; history before 2026-09-10 is not backfilled. |
