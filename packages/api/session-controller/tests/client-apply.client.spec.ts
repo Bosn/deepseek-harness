@@ -51,7 +51,6 @@ async function mount(initialGeneration?: ConnectionGeneration): Promise<Bench> {
   const connection: ConnectionHandle = {
     isLoopback: true,
     canUseHostConfiguration: true,
-    fileUrl: () => undefined,
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {
@@ -67,6 +66,11 @@ async function mount(initialGeneration?: ConnectionGeneration): Promise<Bench> {
     registerGenerationSource: () => () => {},
     start: () => ({ stop: () => {} }),
   }
+  ctx.reflect.provide('connection', connection)
+  ctx.reflect.provide('fileUpload', {
+    available: true,
+    post: () => Promise.reject(new Error('unexpected file upload')),
+  })
   ctx.reflect.provide('remote', {
     ...remote,
     $stream: <Item>(options: RemoteStreamOptions<Item>) => (

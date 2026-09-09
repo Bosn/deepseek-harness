@@ -9,16 +9,14 @@
     "src/api-path.ts",
     "src/api-request-trust.ts",
     "src/browser-auth.ts",
-    "src/files-server.ts",
     "src/http-bridge.ts",
     "src/index.ts",
     "src/loopback-hostname.ts",
     "src/privileged-hosts.ts",
+    "src/recovery-config.ts",
     "src/rpc-host.ts",
     "src/rpc-schema.ts",
-    "src/rpc.ts",
-    "src/workspace-file-handler.ts",
-    "src/workspace-files.ts"
+    "src/rpc.ts"
   ],
   "references": [
     {

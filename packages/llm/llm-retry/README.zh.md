@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-retry` 是失败模型请求的重试执行器：它在 agent loop 的打开步骤 `agent/request-error` 扩展点上应用各提供方解析后的重试策略，因此每次重试都会在同一个打开的轮次内重跑同一个步骤（基于同一份持久历史）。它不包装流式调用本身——每次适配器调用仍是一次提供方尝试，直接 `ctx.llm.stream()` 消费方仍是单次尝试。重试调度是持久的：插件在等待之前就把 `llm/retry` 事件追加进会话日志，退避期间取消会让日志保持一致。normal mode 以指数退避重试一组有界的失败 code，最多 `maxRetries` 次；always mode 先询问下游恢复，然后无尝试上限地重试每个失败。
+挂载 `@deepseek-ai/dsh-llm-retry`，可在持久 agent 步骤边界重试失败的模型请求。提供方的 `retryPolicy` 设置可选择有界的 normal mode 重试或无上限的 always mode 重试；计划的尝试会在退避前写入会话日志，取消后历史仍保持一致。重试会在同一个打开的轮次内重跑失败步骤，而直接 `ctx.llm.stream()` 调用仍只尝试一次。每次重试都会产生另一次提供方请求计费，always mode 会持续到成功、取消或释放。
 
 ## 目录
 
@@ -43,18 +43,15 @@ kind: "package-reference"
         initialDelayMs: 1000
         maxDelayMs: 30000
         jitterRatio: 0.2
-        rateLimitDelaysMs: [60000, 180000, 300000]
 
 - name: '@deepseek-ai/dsh-llm-retry'
 ```
 
-省略 `retryPolicy` 时使用 normal mode：为 `CONTENT_FILTERED`、`EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT` 共享五次重试，退避从 500 毫秒到 10 秒、带 10% 抖动。默认 `maxRetriesByCode: { TIMEOUT: 1 }` 会独立于共享预算，把长时间空闲超时限制为一次重复。`CONTENT_FILTERED` 可以重试，因为下一次采样的响应会接受新的审核判定。normal mode 可以更改有界预算、合格 code、按 code 上限与退避；两种 mode 都先询问下游专用恢复，接受其显式重试，并在持久替换未授权另一请求时抑制回退。
-
-`RATE_LIMIT` 使用 `backoff.rateLimitDelaysMs` 而不是快速指数调度。默认 `[60000, 180000, 300000]` 提供三次分别等待一、三、五分钟的冷却重试；只有 `RATE_LIMIT` 尝试会推进该调度。normal mode 下，调度长度就是该 code 的重试预算，并受 `maxRetries` 上限约束；空数组恢复指数退避，always mode 则在调度耗尽后回退到指数延迟。只有把 quota 措辞分类为瞬态的路由才会让带 quota 措辞的 HTTP 429 进入该路径，例如 pi-ai 内建 qwen token-plan 路由。有效的提供方 `Retry-After` 会抬高冷却下限，抖动绝不会把等待降到任一下限以下。
+省略 `retryPolicy` 时使用 normal mode：对 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT` 最多重试五次，退避从 500 毫秒到 10 秒、带 10% 抖动。normal mode 可以更改其有界预算、合格 code 与退避；always mode 先询问下游恢复，然后无尝试上限地重试每个模型请求失败，只在成功、取消或插件释放时停止。
 
 ### 你可以观察到什么
 
-每次计划的重试在等待前就是持久的：插件会先追加携带重试 id、提供方、模式、完整规范策略键、失败与计划延迟的非 surface `llm/retry` 事件，然后在重试开始前立即追加 `llm/retry-started` 事件。只有提供方与完整策略键都相同时才延续重试编号。等待完成后，loop 会在同一个打开的轮次内重跑失败步骤，仍基于同一份持久历史，因此重试请求与原始请求一样可以从会话日志重建。取消或插件释放会中止进行中的退避、排空活动中的委派恢复，并让释放前捕获的回调快速失败。
+每次计划的重试在等待前就是持久的：插件会先追加携带重试 id、提供方、模式、策略键、失败与计划延迟的非 surface `llm/retry` 事件，然后在重试开始前立即追加 `llm/retry-started` 事件。提供方给出且符合策略边界的有效 `Retry-After` 会替换本地退避。等待完成后，loop 会在同一个打开的轮次内重跑失败步骤，仍基于同一份持久历史，因此重试请求与原始请求一样可以从会话日志重建。取消或插件释放会中止进行中的退避、排空活动中的委派恢复，并让释放前捕获的回调快速失败。
 
 ### 失败与恢复
 
@@ -85,7 +82,7 @@ kind: "package-reference"
 
 ### 恢复流程
 
-失败步骤连同其提供方与解析后的策略一起到达 waterfall。两种 mode 都先结算下游恢复、遵循下游的 `retry` 决定，并在持久替换未授权另一请求时否决回退。normal mode 随后检查失败 code 以及共享、按 code 或冷却预算是否仍然合格。插件计算延迟——`RATE_LIMIT` 冷却下限、有效的提供方 `Retry-After`，或带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
+失败步骤连同其提供方与解析后的策略一起到达 waterfall。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。插件计算延迟——有效且在边界内的提供方 `Retry-After`，否则带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
 
 ### Waterfall 组合
 
@@ -115,11 +112,11 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-模型不会看到重试事件、延迟、提供方错误或失败的部分输出。重试尝试会从持久表层历史中重建相同的显式提供方／模型请求，除非下游恢复策略有意更改该表层；失败分片绝不会进入派生消息。
+重试事件、延迟、提供方错误或失败的部分输出都不会对模型可见。除非下游恢复策略刻意改变表面，重试步骤从持久表面历史重建同一显式提供方／模型请求；失败分片绝不进入派生消息。
 
 #### Token 影响
 
-每次重试都是新的提供方请求，可能重复计费输入 token。normal mode 具有有限预算；always mode 可以在成功、取消或下游持久替换抑制回退前消耗无界数量的请求。`llm/retry` 自身不产生 token。
+每次重试都是一次新的提供方请求，可能重复输入 token 计费。normal mode 有有界预算；always mode 在成功或取消前可能消耗无上限请求。`llm/retry` 本身不贡献任何 token。
 
 #### KV Cache 影响
 
@@ -133,9 +130,9 @@ kind: "package-reference"
 这些限制说明执行器在哪里停止、由未来工作接续。它们是当前包约束，不是通用重试对比或任务积压。
 
 - **agent 轮次是唯一重试边界**——直接 `ctx.llm.stream()` 消费方仍是单次尝试，因为原始流无法持久地区分已发出的分片。
-- **always mode 会重试永久性失败**——认证、配额、无效请求、协议与不可恢复的上下文错误会持续到成功、取消、释放或下游持久替换抑制回退；部署方负责提供方专属的成本与延迟控制。
-- **有限恢复预算保持独立**——专用恢复先运行并可能重建持久状态；normal 重试只统计由精确提供方策略调度的尝试。专用策略拒绝处理后，通用重试才接收未变化的失败。
-- **恢复策略按 waterfall 顺序组合**——两种 mode 都会先接受下游重试，再应用自己的回退。之后忽略取消且永不结算的策略也会阻止回退、轮次完全停稳与插件释放完成。
+- **always mode 会重试永久性失败**——认证、配额、无效请求、协议与不可恢复的上下文错误会持续到成功、取消或释放；部署方负责提供方专属的成本与延迟控制。
+- **有界插件预算相加**——normal mode 只统计其配置的 code 与精确提供方策略，而上下文溢出压缩（compaction）拥有独立预算。任何重叠策略都必须定义注册顺序行为。
+- **恢复策略按 waterfall 顺序组合**——always mode 先接受下游重试，再应用其回退。之后忽略取消且永不结算的策略也会阻止回退、轮次完全停稳与插件释放完成。
 - **`llm/retry` 记录调度，而非完成**——后续步骤与轮次事件才确立成功、耗尽或取消。
 
 <a id="dev-note"></a>

@@ -128,7 +128,6 @@ async function boot(): Promise<Bench> {
   const connection: ConnectionHandle = {
     isLoopback: true,
     canUseHostConfiguration: true,
-    fileUrl: () => undefined,
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {

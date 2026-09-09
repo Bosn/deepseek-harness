@@ -90,15 +90,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "maxRetries": 5,
-      "maxRetriesByCode": {
-        "TIMEOUT": 1,
-      },
       "mode": "normal",
-      "rateLimitDelaysMs": [
-        60000,
-        180000,
-        300000,
-      ],
       "retryableCodes": [
         "CONTENT_FILTERED",
         "EMPTY_RESPONSE",
@@ -118,11 +110,6 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "mode": "always",
-      "rateLimitDelaysMs": [
-        60000,
-        180000,
-        300000,
-      ],
     }
   `)
   await ctx.settings.update('llm-pi-ai', {
@@ -137,15 +124,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "maxRetries": 5,
-      "maxRetriesByCode": {
-        "TIMEOUT": 1,
-      },
       "mode": "normal",
-      "rateLimitDelaysMs": [
-        60000,
-        180000,
-        300000,
-      ],
       "retryableCodes": [
         "CONTENT_FILTERED",
         "EMPTY_RESPONSE",
@@ -162,11 +141,6 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "mode": "always",
-      "rateLimitDelaysMs": [
-        60000,
-        180000,
-        300000,
-      ],
     }
   `)
   // The catalog belongs to an AGENT, not to the process: every model-facing row

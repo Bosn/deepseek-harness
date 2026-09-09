@@ -29,6 +29,7 @@ import {
   resolveRouteModels,
   SUPPORTED_THINKING_FORMATS,
   THINKING_LEVELS,
+  THINKING_TOKEN_BUDGET_FIELDS,
 } from './catalog.ts'
 import type {
   PiAiCompatProfile,
@@ -186,7 +187,7 @@ export interface PiAiProviderProfile {
    * the smallest quality-ladder output is used when no quality fits.
    */
   requestImageMaxBytes?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries and a `RATE_LIMIT` cooldown schedule. */
+  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
   retryPolicy?: RetryPolicyConfig
 }
 
@@ -278,6 +279,9 @@ const compatProfile: z<PiAiCompatProfile> = z.object({
   chatTemplateKwargs: z.dict(chatTemplateKwarg),
   chatTemplateArgs: z.dict(chatTemplateKwarg),
   supportsThinkingTokenBudget: z.boolean(),
+  thinkingTokenBudgetField: z.union(THINKING_TOKEN_BUDGET_FIELDS),
+  vllmPriority: z.number().step(1),
+  supportsMaxOutputTokens: z.boolean(),
   supportsStrictMode: z.boolean(),
   cacheControlFormat: z.union(CACHE_CONTROL_FORMATS),
   supportsLongCacheRetention: z.boolean(),

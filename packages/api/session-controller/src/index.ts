@@ -2,30 +2,27 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type {} from '@deepseek-ai/dsh-client-connection'
 import { errorChain } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-client-file-upload'
 import { canOpenNativePath, openNativePath } from '@deepseek-ai/dsh-native-command'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
-  ApiSessionNotFound,
   ApiSessionAgentController,
   inspectApiSession,
   type ApiSessionAgentResult,
 } from './agent.ts'
 import { SessionCommandController } from './commands.ts'
 import { SessionControlController } from './control.ts'
-import {
-  DEFAULT_HISTORY_PAGE_MAX_BYTES,
-  SessionHistoryController,
-} from './history.ts'
+import { SessionHistoryController } from './history.ts'
 import { SessionFileReferences } from './file-references.ts'
-import { ApiSessionList, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from './list.ts'
+import { ApiSessionList } from './list.ts'
 import { buildModelCatalog } from './catalog.ts'
 import { installModelSelectionProjection } from './model-selection-projection.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
+import { SessionMediaReferences } from './media-references.ts'
 import type {
   ModelCatalog,
   SessionAttachmentRequest,
@@ -60,7 +57,6 @@ import type {
 export type * from './types.ts'
 export { ApiSessionNotFound } from './agent.ts'
 export { SessionFileReferences } from './file-references.ts'
-export { DEFAULT_HISTORY_PAGE_MAX_BYTES } from './history.ts'
 export { SessionSkillCatalog } from './skill-catalog.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -72,16 +68,6 @@ declare module '@deepseek-ai/cordis' {
 
 /** Session Controller deployment policy. */
 export interface Config {
-  /** Maximum cold Session artifact size eligible for one full projection observation. */
-  readonly coldBlankProbeMaxBytes?: number
-  /**
-   * Maximum UTF-8 size of a complete history message through the repository's
-   * standard Web clients, whose carrier correlation ids are 36-byte UUIDs.
-   * Raw or custom carriers with other id lengths are outside the complete-carrier
-   * guarantee. Older whole message groups are omitted first; zero disables the bound.
-   * @default 2097152
-   */
-  readonly historyPageMaxBytes?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
 }
@@ -100,6 +86,7 @@ export class SessionController extends TypertRemoteService {
     'agentDefaultModel',
     'agents',
     'attachments',
+    'fileUploads',
     'llm',
     'sessions',
     'sessionProjections',
@@ -109,8 +96,6 @@ export class SessionController extends TypertRemoteService {
   ]
 
   static Config: z<Config> = z.object({
-    coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
-    historyPageMaxBytes: z.natural().default(DEFAULT_HISTORY_PAGE_MAX_BYTES),
     nativeOpen: z.boolean(),
   })
 
@@ -125,43 +110,32 @@ export class SessionController extends TypertRemoteService {
 
   /**
    * @param ctx - Host context containing the Session capability assembly.
-   * @param config - Session history, cold-list observation, and native-open policy.
+   * @param config - native-opener deployment policy.
+   * @param internals - host integrations replaceable by direct unit tests.
    */
   constructor(ctx: Context, config: Config, internals: SessionControllerInternals = {}) {
     super(ctx, 'sessionController', { namespace: 'session' })
     installModelSelectionProjection(ctx)
     this.agents = new ApiSessionAgentController(ctx)
     this.commands = new SessionCommandController(ctx, this.agents, process.cwd())
+    ctx.effect(() => ctx.fileUploads.registerAgentResolver(async (sessionId) => {
+      const result = await this.agents.resolveAgent(sessionId)
+      if ('error' in result) throw result.error
+      return result.agent
+    }), 'session-controller: file-upload Agent resolver')
     this.controlState = new SessionControlController(ctx)
     // Registered before history so reverse-order teardown closes every
     // follower before waiting for already-admitted promotions.
     ctx.effect(() => async () => {
       await Promise.allSettled([...this.promotions])
     }, 'session-controller.promotions')
-    this.history = new SessionHistoryController(
-      ctx,
-      (observation) => { this.promote(observation) },
-      config.historyPageMaxBytes ?? DEFAULT_HISTORY_PAGE_MAX_BYTES,
-    )
-    this.listState = new ApiSessionList(
-      ctx,
-      config.coldBlankProbeMaxBytes ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
-    )
-    ctx.on('client-connection/workspace-root', async (rawSessionId, next) => {
-      const sessionId = SessionId(rawSessionId)
-      let cwd: string | undefined
-      try {
-        const inspected = await this.inspect(sessionId)
-        cwd = inspected.meta.cwd
-      } catch (error: unknown) {
-        if (!(error instanceof ApiSessionNotFound)) throw error
-      }
-      return cwd ?? next()
-    })
+    this.history = new SessionHistoryController(ctx, (observation) => { this.promote(observation) })
+    this.listState = new ApiSessionList(ctx)
     this.openPath = internals.openPath ?? openNativePath
     this.canOpenPath = internals.canOpenPath
       ?? (() => config.nativeOpen ?? (internals.openPath !== undefined || canOpenNativePath()))
     ctx.plugin(SessionFileReferences)
+    ctx.plugin(SessionMediaReferences)
     ctx.plugin(SessionSkillCatalog)
 
     ctx.on('session/created', (session) => {
@@ -404,7 +378,8 @@ export class SessionController extends TypertRemoteService {
    * Follow one Session log from its opening or resume cursor.
    * @param request - durable address and last committed sequence already held by the caller.
    * @param signal - cancellation owned by the Remote stream carrier.
-   * @returns a complete opening snapshot followed by gap-free event frames.
+   * @returns a complete opening snapshot followed by gap-free durable event
+   *   frames and optional cursorless assistant-stream frames.
    */
   @Remote({ mode: 'stream' })
   follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {

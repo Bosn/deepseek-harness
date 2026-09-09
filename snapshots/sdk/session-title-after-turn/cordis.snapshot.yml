@@ -25,7 +25,7 @@
 - id: system-prompt
   name: '@deepseek-ai/dsh-system-prompt'
   config:
-    persona: |
+    personaPrefix: |
       You are a coding assistant powered by the {{model}} model. Your working directory is {{cwd}}. Your bash tool runs under a file sandbox — a `[sandbox: file access denied …]` result is policy, not a command bug.
 
       Verify your work by running the code or tests. Keep answers brief and factual.
@@ -59,11 +59,3 @@
         timeoutMs: 5000
         provider: title-replay
         model: title-model
-    - id: turn-notify-wechat
-      name: '@deepseek-ai/dsh-turn-notify-wechat'
-      config:
-        command: !!js "process.cwd() + '/.snapshot-patches/turn-notify-wechat-sender.mjs'"
-        routeFile: !!js "process.cwd() + '/.snapshot-patches/turn-notify-wechat-route.env'"
-        timeoutMs: 5000
-        settleDelayMs: 500
-        maxConcurrentDeliveries: 1

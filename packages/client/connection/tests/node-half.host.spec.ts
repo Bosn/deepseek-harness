@@ -21,7 +21,6 @@ import {
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
 import { provideBrowserCredentials } from './browser-credentials.ts'
 import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
-import { FILES_INFO_GLOBAL, type WorkspaceFilesInfo } from '../src/workspace-files.ts'
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
@@ -129,22 +128,6 @@ function browserCookie(connection: HostConnectionHandle, authority: string): str
   return setCookie.split(';', 1)[0]!
 }
 
-async function unusedPort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
-  })
-  const port = (server.address() as AddressInfo).port
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error === undefined) resolve()
-      else reject(error)
-    })
-  })
-  return port
-}
-
 describe('connection node half', () => {
   it('derives exact cookie authorities for loopback and port-less deployments', () => {
     expect(browserApplicationAuthorities(
@@ -156,6 +139,45 @@ describe('connection node half', () => {
       'harness.example:3080',
       'exact.example:7443',
     ])
+  })
+
+  it('provides the carrier-neutral service without a Web server', async () => {
+    const ctx = new Context()
+    provideBrowserCredentials(ctx)
+    const fiber = ctx.plugin({ inject: [...inject], apply })
+    await fiber.await()
+    expect(ctx.get('connection')).toBeInstanceOf(Object)
+    await fiber.dispose()
+  })
+
+  it('injects validated browser recovery timing and withdraws it on disposal', async () => {
+    const { ctx, dispose } = await mounted({ recovery: { generationReadyTimeoutMs: 25_000 } })
+    try {
+      const rows: IndexInjection[] = []
+      ctx.emit('webserver/index-inject', rows)
+      expect(rows).toEqual([{
+        kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: {
+          backoffBaseMs: 500, backoffFactor: 2, backoffMaxMs: 10_000,
+          generationReadyWarnMs: 3_000, generationReadyTimeoutMs: 25_000,
+        },
+      }])
+      await dispose()
+      const after: IndexInjection[] = []
+      ctx.emit('webserver/index-inject', after)
+      expect(after).toEqual([])
+    } finally {
+      await dispose()
+    }
+  })
+
+  it.each([
+    { recovery: { backoffBaseMs: 0 }, error: /backoffBaseMs/ },
+    { recovery: { backoffFactor: NaN }, error: /backoffFactor.*finite/ },
+  ])('rejects invalid recovery timing before acquiring Host resources: $recovery', async ({ recovery, error }) => {
+    const ctx = new Context()
+    await expect(apply(ctx, { recovery })).rejects.toThrow(error)
+    expect(ctx.get('connection')).toBeUndefined()
+
   })
 
   it('reserves enough default carrier capacity for the 200 MiB image batch', () => {
@@ -199,59 +221,9 @@ describe('connection node half', () => {
     expect(upgrades).toHaveLength(0)
   })
 
-  it('keeps an absent or empty files block disabled', async () => {
-    for (const config of [undefined, { files: {} }] satisfies Array<ConnectionConfig | undefined>) {
-      const { ctx, dispose } = await mounted(config)
-      const table: IndexInjection[] = []
-      ctx.emit('webserver/index-inject', table)
-      expect(table.some(row => row.kind === 'global' && row.name === FILES_INFO_GLOBAL)).toBe(false)
-      await dispose()
-    }
-  })
 
-  it('binds, injects, and disposes the dedicated workspace-file origin', async () => {
-    const { ctx, connection, dispose } = await mounted({ files: { port: 0 } })
-    const table: IndexInjection[] = []
-    ctx.emit('webserver/index-inject', table)
-    const row = table.find(candidate => candidate.kind === 'global' && candidate.name === FILES_INFO_GLOBAL)
-    const info = row?.kind === 'global' ? row.value as WorkspaceFilesInfo : undefined
-    expect(info?.port).toBeGreaterThan(0)
-    expect(info?.publicUrl).toBeUndefined()
-    const origin = `http://127.0.0.1:${String(info?.port)}`
-    expect((await fetch(`${origin}/f/unknown/a.txt`, {
-      headers: { cookie: browserCookie(connection, '127.0.0.1:0') },
-    })).status).toBe(404)
-    await dispose()
-    await expect(fetch(`${origin}/f/unknown/a.txt`)).rejects.toThrow()
-  })
 
-  it('requires a fixed listener port and a bare public files origin', async () => {
-    await expect(mounted({ files: { publicUrl: 'https://files.example:3082' } }))
-      .rejects.toThrow('files.publicUrl requires a fixed files.port')
-    await expect(mounted({ files: { port: 3082, publicUrl: 'https://files.example/path' } }))
-      .rejects.toThrow(/must be a bare http\(s\) origin/)
-    await expect(mounted({
-      trustedHosts: ['app.example:3080'],
-      files: { port: 3082, publicUrl: 'https://files.example:3082' },
-    })).rejects.toThrow(/hostname must match an application authority/)
-  })
 
-  it('publishes a normalized same-host public files origin', async () => {
-    const port = await unusedPort()
-    const publicUrl = `https://harness.example:${String(port)}`
-    const { ctx, dispose } = await mounted({
-      trustedHosts: ['harness.example:3080'],
-      files: { port, publicUrl: `${publicUrl}/` },
-    })
-    const table: IndexInjection[] = []
-    ctx.emit('webserver/index-inject', table)
-    expect(table).toContainEqual({
-      kind: 'global',
-      name: FILES_INFO_GLOBAL,
-      value: { port, publicUrl },
-    })
-    await dispose()
-  })
 
   it('refuses an untrusted Host on any /api path before the bridge runs', async () => {
     const { routes, dispose } = await mounted()

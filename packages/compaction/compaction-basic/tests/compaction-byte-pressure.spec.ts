@@ -228,6 +228,7 @@ function sizedHistorySeed(turns: readonly { user: string; assistant: string }[])
         content: [{ type: 'text', text: item.assistant }],
         source: { kind: 'model', provider: 'mock', model: 'mock' },
       }),
+      stream: [],
     }, { surfaceOp: 'append' })
     session.append('step/end', { turn, step: 1 })
     session.append('turn/end', { turn, reason: { kind: 'completed' } })
@@ -268,6 +269,7 @@ function imageHistorySeed(): SessionEvent[] {
       content: [{ type: 'text', text: 'historical response' }],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     }),
+      stream: [],
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
