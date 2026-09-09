@@ -128,22 +128,6 @@ function browserCookie(connection: HostConnectionHandle, authority: string): str
   return setCookie.split(';', 1)[0]!
 }
 
-async function unusedPort(): Promise<number> {
-  const server = createServer()
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolve)
-  })
-  const port = (server.address() as AddressInfo).port
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error === undefined) resolve()
-      else reject(error)
-    })
-  })
-  return port
-}
-
 describe('connection node half', () => {
   it('derives exact cookie authorities for loopback and port-less deployments', () => {
     expect(browserApplicationAuthorities(
@@ -155,6 +139,7 @@ describe('connection node half', () => {
       'harness.example:3080',
       'exact.example:7443',
     ])
+  })
 
   it('provides the carrier-neutral service without a Web server', async () => {
     const ctx = new Context()
@@ -236,13 +221,9 @@ describe('connection node half', () => {
     expect(upgrades).toHaveLength(0)
   })
 
-)
 
-)
 
-)
 
-)
 
   it('refuses an untrusted Host on any /api path before the bridge runs', async () => {
     const { routes, dispose } = await mounted()

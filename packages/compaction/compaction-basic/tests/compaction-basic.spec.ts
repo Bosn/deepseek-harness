@@ -2298,7 +2298,7 @@ describe('automatic listener and loader composition', () => {
         content: [{ type: 'text', text: 'durable prune replacement' }],
         source: { kind: 'plugin', plugin: 'test' },
       }), {
-        surfaceOp: { op: 'replace', start: head, end: head },
+        surfaceOp: { op: 'replace', startSeq: head, endSeq: head },
         sourceEventSeqs: [head],
       })
       return Promise.resolve(null)
@@ -2441,7 +2441,7 @@ describe('automatic listener and loader composition', () => {
         content: [{ type: 'text', text: 'durable partial recovery' }],
         source: { kind: 'plugin', plugin: 'test' },
       }), {
-        surfaceOp: { op: 'replace', start: head, end: head },
+        surfaceOp: { op: 'replace', startSeq: head, endSeq: head },
         sourceEventSeqs: [head],
       })
       mutateBoundary(session, turn, step)

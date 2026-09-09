@@ -23,7 +23,6 @@ afterEach(() => {
   delete (globalThis as Win).location
   delete (globalThis as Win).__DSH_TRANSPORT__
   delete (globalThis as Win).__DSH_PRIVILEGED_HOSTS__
-  delete (globalThis as Win).__DSH_FILES__
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -148,7 +147,6 @@ describe('connection client apply', () => {
     expect(handle.canUseHostConfiguration).toBe(false)
   })
 
-)
 
   it('fails closed when the injected configuration-authority global is not an array', async () => {
     ;(globalThis as Win).location = { hostname: 'harness.example', port: '3080', search: '' }

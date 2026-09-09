@@ -78,9 +78,7 @@ describe('byte-priced estimation (gateway request-size pressure)', () => {
     expect(estimateContentBytes([unknown])).toBe(serializedBytes([unknown]))
   })
 
-  it('prices the request header as system and tool-schema bytes', () => {
-    expect(estimateHeaderBytes({ config: { provider: 'mock', model: 'mock' }, system: '中文' }))
-      .toBe(serializedBytes({ system: '中文' }))
+  it('prices the request header as tool-schema bytes', () => {
     expect(estimateHeaderBytes({
       config: { provider: 'mock', model: 'mock' },
       tools: [{ name: 'work', description: 'x', parameters: {} }],

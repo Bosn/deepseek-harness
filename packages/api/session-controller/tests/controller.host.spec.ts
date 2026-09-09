@@ -139,8 +139,6 @@ describe('SessionController facade', () => {
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
   })
 
-)
-
   it.each(['success', 'domain-error', 'throw'] as const)(
     'promotes a prepared follow observation in the background: %s',
     async (outcome) => {

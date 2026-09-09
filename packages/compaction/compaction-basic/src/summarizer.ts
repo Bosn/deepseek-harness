@@ -186,7 +186,6 @@ export async function summarizeWithLlm(
   if (input.maxRequestBytes !== undefined) {
     const totalBytes = estimateHeaderBytes({
       config: { provider: target.provider, model: target.model },
-      ...input.system === undefined ? {} : { system: input.system },
       ...input.tools === undefined ? {} : { tools: [...input.tools] },
     }) + messages.reduce((sum, message) => sum + estimateMessageBytes(message), 0)
     if (totalBytes > input.maxRequestBytes) {

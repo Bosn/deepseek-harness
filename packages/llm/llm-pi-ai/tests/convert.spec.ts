@@ -684,7 +684,7 @@ describe('toStreamChunks', () => {
     })
     const chunks = await collect(toStreamChunks(feed(
       { type: 'done', reason: 'stop', message: native },
-    ), undefined, undefined, requestedModel))
+    ), undefined, undefined, undefined, false, requestedModel))
     const finish = chunks.find(chunk => chunk.type === 'finish')
     const replayState: unknown = JSON.parse(JSON.stringify(finish?.replayState))
     expect(replayState).toMatchObject({ response: { model: requestedModel } })

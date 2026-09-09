@@ -1,6 +1,5 @@
 /** Browser wire client: Remote transport and connection generations. */
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionId } from './api.ts'
 import {
   ConnectionController,
   type ConnectionRecoveryConfig,

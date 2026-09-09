@@ -199,7 +199,6 @@ function provideClientServices(ctx: Context, remote: WorkspaceRemote): void {
   const connection: ConnectionHandle = {
     isLoopback: true,
     canUseHostConfiguration: true,
-    fileUrl: () => undefined,
     generation: AVAILABLE_CONNECTION.generation,
     state: { getSnapshot: () => 'connected' as const, subscribe: () => () => {} },
     rpc: {
