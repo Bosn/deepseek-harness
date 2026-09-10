@@ -280,6 +280,13 @@ describe('web e2e: navigation & panes over a rich seeded session', () => {
     const snapshot = (await captureStableAria(page, '[class*="viewArea"]', scaffold.workspaceCwd))
       .split(SEED_ID).join('{{seededId}}')
     await compareOrRefreshGolden(TRAJECTORY_EXPECTED, snapshot, MODE)
+    // A settled Assistant record read back from history reports the Stream's
+    // recorded first-token time instead of "First token unavailable".
+    await page.locator('tr[data-kind="message"]').first().click()
+    const recordedTtft = details.locator('dt:text-is("TTFT") + dd')
+    await expect.poll(() => recordedTtft.count(), { timeout: 10_000 }).toBe(1)
+    await expect.poll(() => recordedTtft.textContent(), { timeout: 5_000 }).toMatch(/\d/)
+    expect(await recordedTtft.textContent()).not.toBe('First token unavailable')
     await details.getByRole('button', { name: 'Close details' }).click()
   }, 60_000)
 
