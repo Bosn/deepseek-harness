@@ -106,7 +106,7 @@ async function appendCompletedTurn(ctx: Context, id: string, assistantText: stri
       ],
       source: { provider: 'test', model: 'test' },
     }),
-      stream: [],
+    stream: [],
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })

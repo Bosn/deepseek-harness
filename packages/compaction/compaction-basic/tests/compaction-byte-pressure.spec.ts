@@ -20,7 +20,6 @@ import * as AgentLoopInvariant from '@deepseek-ai/dsh-agent-loop/invariant'
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter, { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -158,7 +157,6 @@ async function harness(
   await mountAgentLoopTestDependencies(ctx)
   await mountInvariants(ctx)
   if (options.withRetry === true) await ctx.plugin(LlmRetry)
-  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(TokenMeter)
   const adapter = new SizeGateAdapter(
@@ -269,7 +267,7 @@ function imageHistorySeed(): SessionEvent[] {
       content: [{ type: 'text', text: 'historical response' }],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     }),
-      stream: [],
+    stream: [],
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })

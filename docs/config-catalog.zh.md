@@ -361,6 +361,21 @@ export interface ConnectionConfig {
    * bind. An entry that is not a bare, canonical authority fails plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Remote page authorities where the shipped client may expose Host-backed
+   * configuration UI, in the same `host[:port]` form as
+   * {@link ConnectionConfig.trustedHosts}. Each entry also joins the outer
+   * Host/Origin trust fence, but never bypasses browser-session authentication.
+   * This is a client capability declaration, not a method-specific API grant.
+   */
+  privilegedHosts?: string[]
+  /**
+   * Serve the browser surface without the launch-token exchange and signed
+   * cookies. Defaults to true; false accepts every root and /api request that
+   * clears the Host/Origin trust fence, leaving containment entirely to
+   * network reachability and {@link ConnectionConfig.trustedHosts}.
+   */
+  browserSessionAuth?: boolean
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -385,7 +400,7 @@ export interface ConnectionRecoveryConfig {
 }
 ```
 
-来源： [`packages/client/connection/src/index.ts:72`](../packages/client/connection/src/index.ts)
+来源： [`packages/client/connection/src/index.ts:96`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -451,7 +466,13 @@ export interface Config {
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
-  /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
+  /**
+   * Fraction of a failed request's estimated bytes adopted as the
+   * probe-learned byte budget after HTTP 413 or eligible large-request timeout
+   * recovery. Must be in `(0, 1)`. Defaults to `0.75`.
+   */
+  learnedByteSafetyRatio?: number
+  /** Enable automatic pressure and failed-request recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
 
@@ -471,8 +492,30 @@ export interface CompactionPolicyConfig {
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
   compactionRetries?: number
-  /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
+  /** Maximum retries after context-overflow or request-size recovery; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
+  /**
+   * Optional bound on the estimated wire-byte size of the routed model request.
+   * Gateways answer oversized bodies with HTTP 413, which token pressure on a
+   * mega-context model can never predict; when set, pressure compaction also
+   * fires at this byte bound. It also limits summarizer requests, so the
+   * resolved value must hold one minimal replay message plus the fixed
+   * compaction instruction. Unset by default (token pressure only).
+   */
+  maxRequestBytes?: number
+  /**
+   * Optional cap on each complete summarizer request's estimated wire bytes.
+   * Oversized ranges use balanced hierarchical compaction transactions so
+   * every summarized message stays within a bounded request. After exact-model
+   * inheritance, its minimum with `maxRequestBytes` must hold one minimal
+   * replay message plus the fixed compaction instruction. Defaults to `512 * 1024`.
+   */
+  summarizationInputBytes?: number
+  /**
+   * Minimum estimated request bytes at which a stream `TIMEOUT` may trigger
+   * request-size compaction before generic retry. Defaults to `512 * 1024`.
+   */
+  timeoutRecoveryBytes?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -484,7 +527,7 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 }
 ```
 
-来源：[`packages/compaction/compaction-basic/src/types.ts:38`](../packages/compaction/compaction-basic/src/types.ts)
+来源：[`packages/compaction/compaction-basic/src/types.ts:60`](../packages/compaction/compaction-basic/src/types.ts)
 
 <a id="deepseek-aidsh-compaction-tool-result-pruner"></a>
 
@@ -1192,6 +1235,12 @@ export interface PiAiProviderProfile {
   /** Maximum provider idle time while one stream read is outstanding. */
   streamIdleTimeoutMs?: number
   /**
+   * Treat terminal-quota wording on an explicit HTTP 429 as transient
+   * throttling. Defaults to true for the built-in qwen token-plan routes and
+   * false for every other route; custom Model Studio gateways opt in here.
+   */
+  quotaWorded429IsRateLimit?: boolean
+  /**
    * Maximum base64-encoded image payload per request. When a request's
    * accumulated images exceed it, the oldest images are replaced by text
    * placeholders until the request fits, so a long session keeps completing
@@ -1371,7 +1420,7 @@ export type PiAiThinkingTokenBudgetField = NonNullable<OpenAICompletionsCompat['
 
 依赖：`Api`（`@earendil-works/pi-ai`）· `CacheRetention`（`@earendil-works/pi-ai`）· `Model`（`@earendil-works/pi-ai`）· `ModelThinkingLevel`（`@earendil-works/pi-ai`）· `OpenAICompletionsCompat`（`@earendil-works/pi-ai`）· [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets`（`@earendil-works/pi-ai`）· `Transport`（`@earendil-works/pi-ai`)
 
-来源：[`packages/llm/llm-pi-ai/src/config.ts:221`](../packages/llm/llm-pi-ai/src/config.ts)
+来源：[`packages/llm/llm-pi-ai/src/config.ts:238`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 

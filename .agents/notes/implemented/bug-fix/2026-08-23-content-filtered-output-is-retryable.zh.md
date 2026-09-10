@@ -31,4 +31,4 @@ Status: implemented
 - 一次被审核的采样至多消耗共享重试预算（默认 5 次、指数退避），随后以精确的 `CONTENT_FILTERED` code 和消息让该轮次失败。
 - 每次采样都被审核的提示现在会先消耗重试再失败，而不是立即失败——接受它作为有界且可诊断的取舍。
 - `content-filter-retry` ACP 快照场景（人工编写的无密钥场景，复用重试 overlay，位于 `empty-response-retry` 旁）钉住产品可见的流程：携带 `CONTENT_FILTERED` 的持久 `llm/retry` 事件、被拒绝的尝试不产生任何 ACP 输出、恢复后的回复、一次正常完成的轮次。
-- 相关但未被取代：[LLM 请求失败的受限恢复](../architecture/2026-06-21-bounded-llm-request-recovery.zh.md) 拥有被本记录扩展出 `CONTENT_FILTERED` 的默认暂时性集合；[空模型补全可重试](2026-07-24-empty-model-response-is-retryable.zh.md) 负责退化空 completion 类别；[pi-ai 传输截断分类](2026-07-22-pi-ai-transport-truncation-classification.zh.md) 负责同一函数中的传输措辞分类。受限恢复记录已同步更新新 code 及其请求侧 `INVALID_REQUEST` 边界。
+- 相关但未被取代：[LLM 请求失败的受限恢复](../architecture/2026-06-21-bounded-llm-request-recovery.zh.md) 拥有被本记录扩展出 `CONTENT_FILTERED` 的默认暂时性集合；[空模型补全可重试](../../archived/bug-fix/2026-07-24-empty-model-response-is-retryable.md) 负责退化空 completion 类别；[pi-ai 传输截断分类](../../archived/bug-fix/2026-07-22-pi-ai-transport-truncation-classification.md) 负责同一函数中的传输措辞分类。受限恢复记录已同步更新新 code 及其请求侧 `INVALID_REQUEST` 边界。
