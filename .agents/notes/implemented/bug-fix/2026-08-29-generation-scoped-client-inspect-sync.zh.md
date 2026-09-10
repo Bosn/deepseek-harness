@@ -36,4 +36,4 @@ Web 启动与重连只会通过 active Connection 发布 Client inspect 能力�
 
 ## 取代审计
 
-没有活动笔记被归档、拒绝或删除。[Cordis Web 动态包](../../proposed/architecture/2026-08-08-cordis-web-dynamic-packages.zh.md) 继续拥有更广的 Host/Client runner 设计；本笔记拥有 Client inspect manifest 的 Connection 生命周期，对该方案做局部专化但不取代它。
+没有活动笔记被归档、拒绝或删除。[Cordis Web 动态包](../../rejected/architecture/2026-08-08-cordis-web-dynamic-packages.zh.md) 继续拥有更广的 Host/Client runner 设计；本笔记拥有 Client inspect manifest 的 Connection 生命周期，对该方案做局部专化但不取代它。

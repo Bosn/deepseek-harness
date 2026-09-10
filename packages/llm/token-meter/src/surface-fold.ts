@@ -74,7 +74,12 @@ function collectProjectedAttachments(
   return { imageTokens, fileTokens }
 }
 
-/** Build one priced node from a surface event's derived message. */
+/**
+ * Build one priced node from a surface event's derived message.
+ * @param seq - surface sequence number the node describes.
+ * @param message - derived event message to price, or null when the event carries none.
+ * @returns the priced surface node for that sequence.
+ */
 export function analyzeNode(seq: SessionSeq, message: Message | null): MeterSurfaceNode {
   if (message === null) {
     return {

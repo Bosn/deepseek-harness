@@ -216,7 +216,7 @@ function emitTurn(
       content,
       source: { provider: 'test', model: 'test' },
     }),
-      stream: [],
+    stream: [],
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn, step: 1 })
   const terminal = session.append('turn/end', { turn, reason })

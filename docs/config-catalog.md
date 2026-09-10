@@ -213,7 +213,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/api/session-controller/src/index.ts:70`](../packages/api/session-controller/src/index.ts)
+Source: [`packages/api/session-controller/src/index.ts:71`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 
@@ -233,7 +233,7 @@ Source: [`packages/api/settings-controller/src/index.ts:36`](../packages/api/set
 
 ## `@deepseek-ai/dsh-api-workspace-files`
 
-Requires: `fs` · `sandboxPolicy` · `typert`
+Requires: `fs` · `sandboxPolicy` · `sessions` · `typert`
 
 ```ts config-catalog
 /** Deployment caps on one page or one listing. */
@@ -246,6 +246,8 @@ export interface Config {
    * way. The file itself has no size cap: a caller pages through it.
    */
   readonly maxBytes: number
+  /** Inclusive byte cap on a complete-file read; larger files are refused, never truncated. */
+  readonly maxFileBytes: number
   /** Default and largest page size in lines; a request asking for more is refused. */
   readonly maxLines: number
   /** Cap on returned directory entries; the rest is dropped and reported cut. */
@@ -253,7 +255,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/api/workspace-files/src/index.ts:57`](../packages/api/workspace-files/src/index.ts)
+Source: [`packages/api/workspace-files/src/index.ts:69`](../packages/api/workspace-files/src/index.ts)
 
 <a id="deepseek-aidsh-attachment-local"></a>
 
@@ -357,6 +359,21 @@ export interface ConnectionConfig {
    * bind. An entry that is not a bare, canonical authority fails plugin load.
    */
   trustedHosts?: string[]
+  /**
+   * Remote page authorities where the shipped client may expose Host-backed
+   * configuration UI, in the same `host[:port]` form as
+   * {@link ConnectionConfig.trustedHosts}. Each entry also joins the outer
+   * Host/Origin trust fence, but never bypasses browser-session authentication.
+   * This is a client capability declaration, not a method-specific API grant.
+   */
+  privilegedHosts?: string[]
+  /**
+   * Serve the browser surface without the launch-token exchange and signed
+   * cookies. Defaults to true; false accepts every root and /api request that
+   * clears the Host/Origin trust fence, leaving containment entirely to
+   * network reachability and {@link ConnectionConfig.trustedHosts}.
+   */
+  browserSessionAuth?: boolean
   /** Absolute browser-session lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
@@ -381,7 +398,7 @@ export interface ConnectionRecoveryConfig {
 }
 ```
 
-Source: [`packages/client/connection/src/index.ts:72`](../packages/client/connection/src/index.ts)
+Source: [`packages/client/connection/src/index.ts:96`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -447,7 +464,13 @@ Requires: `llm` · `tokenMeter` · `sessions`
 export interface BasicCompactionConfig extends CompactionPolicyConfig {
   /** Exact provider/model overrides; duplicate targets fail plugin load. */
   modelPolicies?: ModelCompactPolicyConfig[]
-  /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
+  /**
+   * Fraction of a failed request's estimated bytes adopted as the
+   * probe-learned byte budget after HTTP 413 or eligible large-request timeout
+   * recovery. Must be in `(0, 1)`. Defaults to `0.75`.
+   */
+  learnedByteSafetyRatio?: number
+  /** Enable automatic pressure and failed-request recovery listeners. Defaults to `true`. */
   auto?: boolean
 }
 
@@ -467,8 +490,30 @@ export interface CompactionPolicyConfig {
   maxTokens?: number
   /** Extra attempts after the first compaction when pressure remains above threshold. Defaults to `1`. */
   compactionRetries?: number
-  /** Maximum retries after canonical context overflow; `0` disables recovery. Defaults to `1`. */
+  /** Maximum retries after context-overflow or request-size recovery; `0` disables recovery. Defaults to `1`. */
   maxOverflowRetries?: number
+  /**
+   * Optional bound on the estimated wire-byte size of the routed model request.
+   * Gateways answer oversized bodies with HTTP 413, which token pressure on a
+   * mega-context model can never predict; when set, pressure compaction also
+   * fires at this byte bound. It also limits summarizer requests, so the
+   * resolved value must hold one minimal replay message plus the fixed
+   * compaction instruction. Unset by default (token pressure only).
+   */
+  maxRequestBytes?: number
+  /**
+   * Optional cap on each complete summarizer request's estimated wire bytes.
+   * Oversized ranges use balanced hierarchical compaction transactions so
+   * every summarized message stays within a bounded request. After exact-model
+   * inheritance, its minimum with `maxRequestBytes` must hold one minimal
+   * replay message plus the fixed compaction instruction. Defaults to `512 * 1024`.
+   */
+  summarizationInputBytes?: number
+  /**
+   * Minimum estimated request bytes at which a stream `TIMEOUT` may trigger
+   * request-size compaction before generic retry. Defaults to `512 * 1024`.
+   */
+  timeoutRecoveryBytes?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -480,7 +525,7 @@ export interface ModelCompactPolicyConfig extends CompactionPolicyConfig {
 }
 ```
 
-Source: [`packages/compaction/compaction-basic/src/types.ts:38`](../packages/compaction/compaction-basic/src/types.ts)
+Source: [`packages/compaction/compaction-basic/src/types.ts:60`](../packages/compaction/compaction-basic/src/types.ts)
 
 <a id="deepseek-aidsh-compaction-tool-result-pruner"></a>
 
@@ -1035,7 +1080,7 @@ export interface Config {
   maxTokens?: number
   /** Positive context capacity used when the selected model has no exact value (default 1,000,000). */
   defaultContextWindow?: number
-  /** Advisory models shown by discovery consumers; defaults to V4 Flash, V4 Pro, and V4 Flash Vision Exp. */
+  /** Advisory models shown by discovery consumers; defaults to V41 Flash, V4 Flash, V4 Pro, and V4 Flash Vision Exp. */
   models?: DeepSeekCatalogModel[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
@@ -1092,7 +1137,7 @@ export interface DeepSeekCatalogModel {
 
 Depends on: [`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · [`SystemPromptUpdate`](../packages/llm/llm/src/index.ts)
 
-Source: [`packages/llm/llm-deepseek/src/index.ts:125`](../packages/llm/llm-deepseek/src/index.ts)
+Source: [`packages/llm/llm-deepseek/src/index.ts:134`](../packages/llm/llm-deepseek/src/index.ts)
 
 <a id="deepseek-aidsh-llm-pi-ai"></a>
 
@@ -1187,6 +1232,12 @@ export interface PiAiProviderProfile {
   websocketConnectTimeoutMs?: number
   /** Maximum provider idle time while one stream read is outstanding. */
   streamIdleTimeoutMs?: number
+  /**
+   * Treat terminal-quota wording on an explicit HTTP 429 as transient
+   * throttling. Defaults to true for the built-in qwen token-plan routes and
+   * false for every other route; custom Model Studio gateways opt in here.
+   */
+  quotaWorded429IsRateLimit?: boolean
   /**
    * Maximum base64-encoded image payload per request. When a request's
    * accumulated images exceed it, the oldest images are replaced by text
@@ -1367,7 +1418,7 @@ export type PiAiThinkingTokenBudgetField = NonNullable<OpenAICompletionsCompat['
 
 Depends on: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`)
 
-Source: [`packages/llm/llm-pi-ai/src/config.ts:217`](../packages/llm/llm-pi-ai/src/config.ts)
+Source: [`packages/llm/llm-pi-ai/src/config.ts:238`](../packages/llm/llm-pi-ai/src/config.ts)
 
 <a id="deepseek-aidsh-llm-replay"></a>
 
@@ -1620,7 +1671,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/feedback/message-feedback/src/index.ts:39`](../packages/feedback/message-feedback/src/index.ts)
+Source: [`packages/feedback/message-feedback/src/index.ts:40`](../packages/feedback/message-feedback/src/index.ts)
 
 <a id="deepseek-aidsh-permission-presets"></a>
 
@@ -2770,7 +2821,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/shell/tool-bash-persistent/src/index.ts:432`](../packages/shell/tool-bash-persistent/src/index.ts)
+Source: [`packages/shell/tool-bash-persistent/src/index.ts:435`](../packages/shell/tool-bash-persistent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-fs"></a>
 
@@ -2898,6 +2949,22 @@ export interface Config {
 ```
 
 Source: [`packages/lsp/tool-lsp/src/index.ts:57`](../packages/lsp/tool-lsp/src/index.ts)
+
+<a id="deepseek-aidsh-tool-present"></a>
+
+## `@deepseek-ai/dsh-tool-present`
+
+Requires: `tools` · `fs` · `sessionProjections`
+
+```ts config-catalog
+/** Per-call delivery limit. */
+export interface Config {
+  /** Maximum number of files in one call. */
+  maxFiles: number
+}
+```
+
+Source: [`packages/fs/tool-present/src/index.ts:15`](../packages/fs/tool-present/src/index.ts)
 
 <a id="deepseek-aidsh-tool-pwsh"></a>
 
@@ -3509,7 +3576,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-commands` ([`packages/client/ui-commands/src/index.ts`](../packages/client/ui-commands/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-conversation` ([`packages/client/ui-conversation/src/index.ts`](../packages/client/ui-conversation/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-cordis` ([`packages/extensions/ui-cordis/src/index.ts`](../packages/extensions/ui-cordis/src/index.ts))
-- `@deepseek-ai/dsh-client-ui-deliverables` — requires `systemPrompt` ([`packages/client/ui-deliverables/src/index.ts`](../packages/client/ui-deliverables/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-deliverables` — requires `systemPrompt` · `connection` · `sessionQuery` · `sessionController` · `workspaceFiles` · `fs` · `sandboxPolicy` ([`packages/client/ui-deliverables/src/index.ts`](../packages/client/ui-deliverables/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-directory-picker-browse` ([`packages/client/ui-directory-picker-browse/src/index.ts`](../packages/client/ui-directory-picker-browse/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-directory-picker-native` ([`packages/client/ui-directory-picker-native/src/index.ts`](../packages/client/ui-directory-picker-native/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-goal` ([`packages/client/ui-goal/src/index.ts`](../packages/client/ui-goal/src/index.ts))
@@ -3531,9 +3598,9 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-settings-plugin-inventory` ([`packages/client/ui-settings-plugin-inventory/src/index.ts`](../packages/client/ui-settings-plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-settings-plugins` ([`packages/client/ui-settings-plugins/src/index.ts`](../packages/client/ui-settings-plugins/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-sidebar` ([`packages/client/ui-sidebar/src/index.ts`](../packages/client/ui-sidebar/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-sidebar-documentpreview` ([`packages/client/ui-sidebar-documentpreview/src/index.ts`](../packages/client/ui-sidebar-documentpreview/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-sidebar-files` ([`packages/client/ui-sidebar-files/src/index.ts`](../packages/client/ui-sidebar-files/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-sidebar-right` ([`packages/client/ui-sidebar-right/src/index.ts`](../packages/client/ui-sidebar-right/src/index.ts))
-- `@deepseek-ai/dsh-client-ui-sidebar-textpreview` ([`packages/client/ui-sidebar-textpreview/src/index.ts`](../packages/client/ui-sidebar-textpreview/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-skill` ([`packages/client/ui-skill/src/index.ts`](../packages/client/ui-skill/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-subagent` ([`packages/client/ui-subagent/src/index.ts`](../packages/client/ui-subagent/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-theme` ([`packages/client/ui-theme/src/index.ts`](../packages/client/ui-theme/src/index.ts))
@@ -3607,6 +3674,7 @@ Imported as libraries by other packages; a `cordis.yml` cannot load them.
 - `@deepseek-ai/dsh-atomic-write` ([`packages/util/atomic-write/src/index.ts`](../packages/util/atomic-write/src/index.ts))
 - `@deepseek-ai/dsh-base` ([`packages/bundle/base/src/index.ts`](../packages/bundle/base/src/index.ts))
 - `@deepseek-ai/dsh-brand` ([`packages/util/brand/src/index.ts`](../packages/util/brand/src/index.ts))
+- `@deepseek-ai/dsh-chunked-list` ([`packages/util/chunked-list/src/index.ts`](../packages/util/chunked-list/src/index.ts))
 - `@deepseek-ai/dsh-client-store` ([`packages/client/store/src/index.ts`](../packages/client/store/src/index.ts))
 - `@deepseek-ai/dsh-client-test-runtime` ([`packages/test-support/client-runtime/src/index.ts`](../packages/test-support/client-runtime/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-dockkit` ([`packages/client/ui-dockkit/src/index.ts`](../packages/client/ui-dockkit/src/index.ts))

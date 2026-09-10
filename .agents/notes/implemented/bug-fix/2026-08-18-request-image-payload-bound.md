@@ -26,7 +26,7 @@ The placeholder is model-visible but not logged as a session event. It stays wit
 ## Related
 
 - [Unified image request pipeline](../feature/2026-08-20-unified-image-request-pipeline.md) — the admission-layer companion fix; together they close the two observed session-poisoning failures (400 dimension, 413 body size).
-- [DeepSeek Files inline fallback](2026-08-21-deepseek-files-inline-fallback.md) — applies this provider-neutral conversion to the official multimodal route.
+- [DeepSeek Files inline fallback](../../archived/bug-fix/2026-08-21-deepseek-files-inline-fallback.md) — applies this provider-neutral conversion to the official multimodal route.
 - [Request-size and stalled-stream recovery](2026-08-21-request-size-timeout-recovery.md) — owns 413 classification, bounded summarizer requests, and the rebuilt-request retry.
 
 ## Consequences

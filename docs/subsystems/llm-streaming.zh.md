@@ -242,6 +242,8 @@ interface LlmFailure {
   readonly code: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
+  /** Estimated UTF-8 bytes in the adapter-converted request content, when available. */
+  readonly requestBytesEstimate?: number
   /** Provider-requested delay in milliseconds, when valid and available. */
   readonly providerRetryAfterMs?: number
   /** Opaque provider-issued request identifier for diagnostics. */
@@ -498,6 +500,8 @@ interface LlmConfigurableProvider {
    * from outside.
    */
   declared?: boolean
+  /** Configuration diagnostic for repair; unaffected models may remain serviceable. */
+  error?: string
 }
 ```
 

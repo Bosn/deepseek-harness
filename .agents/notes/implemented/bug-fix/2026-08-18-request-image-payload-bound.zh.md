@@ -26,7 +26,7 @@ pi-ai 适配器把会话历史中的每张图片 base64 内联进每一个模型
 ## Related
 
 - [统一图片请求管道](../feature/2026-08-20-unified-image-request-pipeline.zh.md)，准入层的配套修复；两者合起来封住已观测到的两类会话毒化故障（400 尺寸、413 请求体）。
-- [DeepSeek Files 内联回退](2026-08-21-deepseek-files-inline-fallback.zh.md)把这项提供方无关转换应用于官方多模态路由。
+- [DeepSeek Files 内联回退](../../archived/bug-fix/2026-08-21-deepseek-files-inline-fallback.md)把这项提供方无关转换应用于官方多模态路由。
 - [请求大小与停滞流恢复](2026-08-21-request-size-timeout-recovery.zh.md)负责 413 分类、有界摘要请求和重建请求后的重试。
 
 ## Consequences
