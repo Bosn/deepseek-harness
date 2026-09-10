@@ -3,7 +3,7 @@ import type {
   ChatConversationViewNode, ChatSnapshot,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {
-  SessionEventLikeEntry, SessionLiveEventEntry,
+  SessionEventLikeEntry, SessionLiveEventEntry, SessionTransientEventEntry,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import {
   ConversationNodeAssembler,
@@ -13,6 +13,7 @@ import {
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { inspectSystemPrompt } from '../../ui-conversation/src/client/contract/system-prompt.ts'
 import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-stream'
+import { LlmAttemptId } from '@deepseek-ai/dsh-llm/brand'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { hasAssistantReplyContent } from '../src/client/contract/assistant-content.ts'
 import { assistantDefinition } from '../src/client/conversation-nodes/assistant.ts'
@@ -163,6 +164,28 @@ function snapshot(value: ConversationNodeAssembler): ChatSnapshot {
 
 function node(value: ChatSnapshot, kind: string): ChatConversationViewNode | undefined {
   return value.nodes.values().find(candidate => candidate.kind === kind)
+}
+
+function transientChunk(
+  seq: number,
+  turn: number,
+  step: number,
+  chunk: StreamChunk,
+  time: number,
+): SessionTransientEventEntry {
+  return {
+    type: 'transient',
+    event: {
+      type: 'assistant/live-chunk',
+      seq,
+      time,
+      data: { attemptId: LlmAttemptId('attempt-1'), turn, step, chunk },
+    },
+  }
+}
+
+function settledAssistant(value: ChatSnapshot) {
+  return (node(value, 'assistant-step')?.data as AssistantChatData | undefined)?.finalNode
 }
 
 function textMessage(id: string, text: string) {
@@ -941,7 +964,7 @@ describe('built-in conversation node Definitions', () => {
     })
   })
 
-  it('uses live Assistant deltas without replaying settled embedded streams', () => {
+  it('reads first-token timing from a settled embedded stream without replaying its members', () => {
     const runningHistory = [
       at(1, 'turn/start', { turn: 1 }),
       at(2, 'step/start', { turn: 1, step: 1 }),
@@ -1056,7 +1079,7 @@ describe('built-in conversation node Definitions', () => {
     const finalNode = (node(finalizedPacked, 'assistant-step')?.data as AssistantChatData).finalNode
     expect(finalNode).toMatchObject({
       blocks: [{ kind: 'text', text: 'done' }],
-      timing: { firstTokenTime: null },
+      timing: { firstTokenTime: 1_700_000_000_027 },
     })
 
     const namedToolHistory = [
@@ -1083,7 +1106,36 @@ describe('built-in conversation node Definitions', () => {
     const namedTool = (node(namedToolPacked, 'assistant-step')?.data as AssistantChatData).finalNode
     expect(namedTool).toMatchObject({
       blocks: [{ kind: 'tool-call', callId: 'call-2', name: 'read', argsRaw: '' }],
-      timing: { firstTokenTime: null },
+      timing: { firstTokenTime: 4_000 },
+    })
+  })
+
+  it('keeps the streamed first-token time when the attempt settles into a durable message', () => {
+    const stepStart = 1_700_000_000_002
+    const firstToken = stepStart + 498
+    const completed = stepStart + 2_558
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+    ])
+    value.append(transientChunk(2.5, 1, 1, { type: 'text-delta', index: 0, text: 'answer' }, firstToken))
+    value.flush()
+    expect((node(snapshot(value), 'assistant-step')?.data as AssistantChatData).status).toBe('running')
+
+    const settlement = at(3, 'assistant/message', {
+      turn: 1,
+      step: 1,
+      message: assistantMessage('settled', 'answer'),
+      stream: [{ type: 'text-chunks', time0: firstToken, index: 0, dt: [], texts: ['answer'] }],
+      usage: { inputTokens: 10, outputTokens: 2 },
+    }, { surfaceOp: 'append', time: completed })
+    if (settlement.event.type !== 'assistant/message') throw new Error('expected Assistant settlement')
+    value.settleAssistant(LlmAttemptId('attempt-1'), { type: 'event', event: settlement.event })
+    value.flush()
+
+    // Settlement retires the transient chunks; the node's timing must survive it.
+    expect(settledAssistant(snapshot(value))).toMatchObject({
+      timing: { stepStartTime: stepStart, firstTokenTime: firstToken, completedTime: completed },
     })
   })
 
