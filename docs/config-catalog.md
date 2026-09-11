@@ -3283,6 +3283,12 @@ export interface Config {
   command: string
   /** Owner-only constants file containing the configured account and target. */
   routeFile: string
+  /** Absolute private outbox file; never shared between host processes. */
+  outboxFile: string
+  /** Initial exponential retry delay for a definite provider rejection. */
+  retryDelayMs?: number
+  /** Total sends per notice, including the first attempt. */
+  maxAttempts?: number
   /** Constants-file key holding the WeChat account id. */
   accountKey?: string
   /** Constants-file key holding the private owner target. */

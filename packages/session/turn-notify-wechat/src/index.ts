@@ -5,7 +5,6 @@
  * @module @deepseek-ai/dsh-turn-notify-wechat
  */
 
-import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -15,6 +14,7 @@ import z from '@deepseek-ai/schemastery'
 import type { Session, SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session'
 // Type-only: applies the ctx.sessionTitle service declaration to this package face.
 import type {} from '@deepseek-ai/dsh-session-title'
+import { DeliveryOutbox, type DeliveryRecord } from './outbox.ts'
 
 /** Cordis plugin name. */
 export const name = 'turn-notify-wechat'
@@ -45,6 +45,12 @@ export interface Config {
   command: string
   /** Owner-only constants file containing the configured account and target. */
   routeFile: string
+  /** Absolute private outbox file; never shared between host processes. */
+  outboxFile: string
+  /** Initial exponential retry delay for a definite provider rejection. */
+  retryDelayMs?: number
+  /** Total sends per notice, including the first attempt. */
+  maxAttempts?: number
   /** Constants-file key holding the WeChat account id. */
   accountKey?: string
   /** Constants-file key holding the private owner target. */
@@ -71,6 +77,9 @@ export interface Config {
 export const Config: z<Config> = z.object({
   command: z.string().required(),
   routeFile: z.string().required(),
+  outboxFile: z.string().required(),
+  retryDelayMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
+  maxAttempts: z.number().step(1).min(1).max(10).default(5),
   accountKey: z.string().default(DEFAULT_ACCOUNT_KEY),
   targetKey: z.string().default(DEFAULT_TARGET_KEY),
   channel: z.string().pattern(PROCESS_ARGUMENT_PATTERN).default(DEFAULT_CHANNEL),
@@ -96,6 +105,7 @@ interface ReceiptFacts {
   messageIds: string[]
   ok: boolean
   dryRun: boolean
+  failed: boolean
 }
 
 interface PendingCompletion {
@@ -103,13 +113,7 @@ interface PendingCompletion {
   terminal: TurnEndEvent
   summary: string
   timer: ReturnType<typeof setTimeout>
-  retainedAt: number
-}
-
-interface QueuedDelivery {
-  pending: PendingCompletion
-  message: string
-  retainedAt: number
+  record: DeliveryRecord
 }
 
 function parseConstants(text: string): Map<string, string> {
@@ -288,6 +292,7 @@ function inspectReceipt(value: unknown, facts: ReceiptFacts): void {
   }
   if (typeof value !== 'object' || value === null) return
   const record = value as Record<string, unknown>
+  if (record.ok === false || (record.error !== undefined && record.error !== null)) facts.failed = true
   if (record.dryRun === true) facts.dryRun = true
   if (record.ok === true) facts.ok = true
   const channel = record.channel
@@ -306,7 +311,7 @@ function inspectReceipt(value: unknown, facts: ReceiptFacts): void {
   for (const child of Object.values(record)) inspectReceipt(child, facts)
 }
 
-function parseReceipt(stdout: string, channel: string): void {
+function parseReceipt(stdout: string, channel: string): string {
   let value: unknown
   try {
     value = JSON.parse(stdout)
@@ -322,6 +327,7 @@ function parseReceipt(stdout: string, channel: string): void {
     messageIds: [],
     ok: false,
     dryRun: false,
+    failed: false,
   }
   inspectReceipt(value, facts)
   if (facts.dryRun) throw new Error('turn-notify-wechat: delivery returned a dry-run receipt')
@@ -333,9 +339,10 @@ function parseReceipt(stdout: string, channel: string): void {
     || facts.statuses.has('sent')
     || facts.statuses.has('delivered')
     || facts.ok
-  if (!sent || facts.messageIds.length === 0) {
+  if (!sent || facts.failed || [...facts.statuses].some(status => ['failed', 'unknown', 'queued', 'pending', 'error'].includes(status)) || facts.messageIds.length === 0) {
     throw new Error('turn-notify-wechat: delivery returned no verifiable sent receipt')
   }
+  return facts.messageIds[0] as string
 }
 
 function scrubbedEnvironment(): NodeJS.ProcessEnv {
@@ -353,16 +360,16 @@ function scrubbedEnvironment(): NodeJS.ProcessEnv {
 function sendCompletion(
   config: Required<Config>,
   route: WeChatRoute,
-  delivery: QueuedDelivery,
+  delivery: DeliveryRecord,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<string> {
   const args = [
     'message', 'send',
     '--channel', config.channel,
     '--account', route.account,
     '--target', route.target,
     '--message', delivery.message,
-    '--idempotency-key', idempotencyKey(delivery.pending.session, delivery.pending.terminal),
+    '--idempotency-key', delivery.key,
     '--json',
   ]
   return new Promise((resolve, reject) => {
@@ -375,14 +382,14 @@ function sendCompletion(
         timeout: config.timeoutMs,
         windowsHide: true,
       }, (error, stdout) => {
-        if (error !== null) {
-          const reason = error.killed ? 'timeout' : error.name
-          reject(new Error(`turn-notify-wechat: delivery command failed (${reason})`))
+        const reason = error?.killed === true ? 'timeout' : (error?.name ?? 'structured error')
+        const failure = deliveryFailure(stdout, reason)
+        if (error !== null || failure.structured === true) {
+          reject(failure)
           return
         }
         try {
-          parseReceipt(stdout, config.channel)
-          resolve()
+          resolve(parseReceipt(stdout, config.channel))
         } catch (receiptError: unknown) {
           reject(new Error(String(receiptError).replace(/^Error: /u, '')))
         }
@@ -393,27 +400,62 @@ function sendCompletion(
   })
 }
 
+interface DeliveryFailure extends Error {
+  retryable?: boolean
+  structured?: boolean
+  code?: string
+  unknownAfterSend?: boolean
+}
+
+function deliveryFailure(stdout: string, reason: string): DeliveryFailure {
+  const failure: DeliveryFailure = new Error(`turn-notify-wechat: delivery command failed (${reason})`)
+  failure.code = 'command_failure'
+  failure.unknownAfterSend = true
+  try {
+    const result: unknown = JSON.parse(stdout)
+    if (typeof result !== 'object' || result === null) return failure
+    const value = (result as Record<string, unknown>).error
+    if (typeof value !== 'object' || value === null) return failure
+    const detail = value as Record<string, unknown>
+    if (typeof detail.code !== 'string' || !/^[a-z_]{1,64}$/u.test(detail.code)
+      || typeof detail.unknownAfterSend !== 'boolean') return failure
+    failure.structured = true
+    failure.code = detail.code
+    failure.unknownAfterSend = detail.unknownAfterSend
+    failure.retryable = ['provider_rejected', 'connection_failed', 'fetch_unavailable', 'send_in_progress'].includes(detail.code) && detail.unknownAfterSend === false
+  } catch { /* Non-JSON process output cannot prove that no message was sent. */ }
+  return failure
+}
+
 /**
- * Observe top-level turn terminals and send one private WeChat notice after the
- * configured quiet period. A later turn in the same session replaces an older
- * retained notice, and teardown cancels timers before aborting sender processes.
- * @param ctx - host context carrying sessions and their title projection.
- * @param config - validated sender, route-file, timing, and text-bound configuration.
+ * Persist observed top-level completions and recover only this outbox on restart.
+ * Definite provider rejections retry within the configured bound; uncertain sends stop.
+ * @param ctx - Sessions, titles and host lifecycle.
+ * @param config - Validated private delivery route, outbox and timing bounds.
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = config as Required<Config>
-  if (!isAbsolute(resolved.command)) {
-    throw new Error('turn-notify-wechat: command must be an absolute path')
-  }
+  if (!isAbsolute(resolved.command)) throw new Error('turn-notify-wechat: command must be an absolute path')
+  if (!isAbsolute(resolved.outboxFile)) throw new Error('turn-notify-wechat: outboxFile must be an absolute path')
   const route = loadRoute(resolved)
+  const routeHash = createHash('sha256').update(JSON.stringify([resolved.channel, route.account, route.target])).digest('hex')
+  const outbox = new DeliveryOutbox(resolved.outboxFile, routeHash)
   const abortController = new AbortController()
   const inFlight = new Set<Promise<void>>()
-  const deliveryQueue: QueuedDelivery[] = []
-  const queuedBySession = new Map<Session, QueuedDelivery>()
   const pendingBySession = new Map<Session, PendingCompletion>()
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
   let activeDeliveries = 0
-  let nextRetentionOrder = 0
+  let nextRetentionOrder = Math.max(0, ...outbox.records.map(record => record.retainedAt))
   let closing = false
+  let storageFailed = false
+
+  const save = (): boolean => {
+    try { outbox.save(); return true } catch {
+      storageFailed = true
+      ctx.logger.warn('turn-notify-wechat: outbox persistence failed; delivery stopped')
+      return false
+    }
+  }
 
   const clearPending = (session: Session): void => {
     const previous = pendingBySession.get(session)
@@ -421,110 +463,103 @@ export function apply(ctx: Context, config: Config): void {
     pendingBySession.delete(session)
   }
 
-  const clearQueued = (session: Session): void => {
-    const queued = queuedBySession.get(session)
-    if (queued === undefined) return
-    const index = deliveryQueue.indexOf(queued)
-    assert.notEqual(index, -1, 'turn-notify-wechat: queued session must own a delivery-queue entry')
-    deliveryQueue.splice(index, 1)
-    queuedBySession.delete(session)
-  }
-
-  const clearRetained = (session: Session): void => {
-    clearPending(session)
-    clearQueued(session)
-  }
-
-  const dropOldestRetained = (): void => {
-    let oldest: PendingCompletion | QueuedDelivery | undefined
-    for (const pending of pendingBySession.values()) {
-      if (oldest === undefined || pending.retainedAt < oldest.retainedAt) oldest = pending
-    }
-    for (const delivery of deliveryQueue) {
-      if (oldest === undefined || delivery.retainedAt < oldest.retainedAt) oldest = delivery
-    }
-    /* v8 ignore next -- the caller proves at least one retained delivery exists */
-    if (oldest === undefined) return
-    if ('message' in oldest) {
-      clearQueued(oldest.pending.session)
-      ctx.logger.warn(`turn-notify-wechat: retained delivery limit reached; dropped oldest queued notification for session ${oldest.pending.session.id} turn ${oldest.pending.terminal.data.turn}`)
-      return
-    }
-    clearPending(oldest.session)
-    ctx.logger.warn(`turn-notify-wechat: retained delivery limit reached; dropped oldest pending notification for session ${oldest.session.id} turn ${oldest.terminal.data.turn}`)
-  }
+  const retained = (): DeliveryRecord[] => outbox.records.filter(record =>
+    record.state === 'pending' || record.state === 'queued' || record.state === 'retry')
 
   const pumpDeliveries = (): void => {
-    while (!closing && activeDeliveries < resolved.maxConcurrentDeliveries) {
-      const delivery = deliveryQueue.shift()
-      if (delivery === undefined) return
-      queuedBySession.delete(delivery.pending.session)
+    if (retryTimer !== undefined) clearTimeout(retryTimer)
+    retryTimer = undefined
+    if (closing || storageFailed) return
+    while (activeDeliveries < resolved.maxConcurrentDeliveries) {
+      const delivery = outbox.records.find(record =>
+        (record.state === 'queued' || record.state === 'retry') && record.nextAttemptAt <= Date.now())
+      if (delivery === undefined) break
+      delivery.state = 'sending'
+      delivery.attempts += 1
+      if (!save()) return
       activeDeliveries += 1
-      const operation = sendCompletion(
-        resolved,
-        route,
-        delivery,
-        abortController.signal,
-      ).catch((error: unknown) => {
-        if (closing) return
-        ctx.logger.warn(`turn-notify-wechat: notification failed for session ${delivery.pending.session.id} turn ${delivery.pending.terminal.data.turn} (${String(error)})`)
-      }).finally(() => {
-        activeDeliveries -= 1
-        inFlight.delete(operation)
-        pumpDeliveries()
-      })
+      const operation = sendCompletion(resolved, route, delivery, abortController.signal)
+        .then((messageId) => { delivery.state = 'sent'; delivery.messageId = messageId; delete delivery.code; save() })
+        .catch((error: unknown) => {
+          const failure = error as DeliveryFailure
+          delivery.code = failure.code ?? 'invalid_receipt'
+          if (failure.retryable === true && delivery.attempts < resolved.maxAttempts) {
+            delivery.state = 'retry'
+            delivery.nextAttemptAt = Date.now() + Math.min(MAX_TIMER_DELAY_MS, resolved.retryDelayMs * 2 ** (delivery.attempts - 1))
+          } else {
+            delivery.state = failure.unknownAfterSend === false ? 'failed' : 'unknown'
+          }
+          save()
+          if (!closing) ctx.logger.warn(`turn-notify-wechat: notification failed for session ${delivery.sessionId} turn ${delivery.turn} (${String(error)}; code=${delivery.code}; state=${delivery.state})`)
+        }).finally(() => {
+          activeDeliveries -= 1
+          inFlight.delete(operation)
+          pumpDeliveries()
+        })
       inFlight.add(operation)
+    }
+    const waiting = outbox.records.filter(record => record.state === 'queued' || record.state === 'retry')
+    if (waiting.length > 0 && activeDeliveries < resolved.maxConcurrentDeliveries) {
+      const delay = Math.max(0, Math.min(MAX_TIMER_DELAY_MS, Math.min(...waiting.map(record => record.nextAttemptAt)) - Date.now()))
+      retryTimer = setTimeout(pumpDeliveries, delay)
     }
   }
 
   const dispatch = (pending: PendingCompletion): void => {
-    /* v8 ignore next -- cleared or replaced timers cannot dispatch through the event-loop contract */
     if (closing || pendingBySession.get(pending.session) !== pending) return
     pendingBySession.delete(pending.session)
     const rawTitle = ctx.sessionTitle.get(pending.session)?.title
-    if (rawTitle === undefined) {
-      ctx.logger.warn(`turn-notify-wechat: notification skipped for session ${pending.session.id} turn ${pending.terminal.data.turn} (session title unavailable)`)
-      return
-    }
-    const title = normalizeTaskTitle(rawTitle, resolved.titleMaxChars)
+    const title = rawTitle === undefined ? '' : normalizeTaskTitle(rawTitle, resolved.titleMaxChars)
     if (title.length === 0) {
-      ctx.logger.warn(`turn-notify-wechat: notification skipped for session ${pending.session.id} turn ${pending.terminal.data.turn} (session title empty)`)
+      pending.record.state = 'failed'
+      pending.record.code = 'title_unavailable'
+      save()
+      ctx.logger.warn(`turn-notify-wechat: notification skipped for session ${pending.session.id} turn ${pending.terminal.data.turn} (session title ${rawTitle === undefined ? 'unavailable' : 'empty'})`)
       return
     }
-    assert.equal(
-      queuedBySession.has(pending.session),
-      false,
-      'turn-notify-wechat: a pending session cannot also own a queued delivery',
-    )
-    const message = completionMessage(
-      title,
-      pending.summary,
-      pending.terminal.data.reason,
-      resolved.messageMaxBytes,
-    )
-    const delivery = { pending, message, retainedAt: pending.retainedAt }
-    deliveryQueue.push(delivery)
-    queuedBySession.set(pending.session, delivery)
-    pumpDeliveries()
+    pending.record.message = completionMessage(title, pending.summary, pending.terminal.data.reason, resolved.messageMaxBytes)
+    pending.record.state = 'queued'
+    pending.record.nextAttemptAt = Date.now()
+    if (save()) pumpDeliveries()
   }
 
   const detach = ctx.on('session/event', (session, event) => {
-    if (closing || event.type !== 'turn/end' || session.header.origin === 'subagent') return
-    clearRetained(session)
+    if (closing || storageFailed || event.type !== 'turn/end' || session.header.origin === 'subagent') return
+    const key = idempotencyKey(session, event)
+    if (outbox.records.some(record => record.key === key)) return
+    clearPending(session)
+    for (const record of retained()) {
+      if (record.sessionId === String(session.id)) { record.state = 'failed'; record.code = 'superseded' }
+    }
     const source = visibleAssistantText(session, event.data.turn)
-    if (source === undefined) return
+    if (source === undefined) { save(); return }
     const summary = summarizeMessage(source, resolved.summaryMaxChars)
-    if (summary.length === 0) return
-    if (pendingBySession.size + deliveryQueue.length >= resolved.maxRetainedDeliveries) {
-      dropOldestRetained()
+    if (summary.length === 0) { save(); return }
+    const retainedRecords = retained()
+    if (retainedRecords.length >= resolved.maxRetainedDeliveries) {
+      const oldest = retainedRecords.sort((a, b) => a.retainedAt - b.retainedAt)[0]
+      if (oldest !== undefined) {
+        const kind = oldest.state === 'pending' ? 'pending' : 'queued'
+        for (const [pendingSession, pending] of pendingBySession) {
+          if (pending.record === oldest) clearPending(pendingSession)
+        }
+        oldest.state = 'failed'; oldest.code = 'retention_limit'
+        ctx.logger.warn(`turn-notify-wechat: retained delivery limit reached; dropped oldest ${kind} notification for session ${oldest.sessionId} turn ${oldest.turn}`)
+      }
     }
     nextRetentionOrder += 1
+    const rawTitle = ctx.sessionTitle.get(session)?.title
+    const title = rawTitle === undefined ? '' : normalizeTaskTitle(rawTitle, resolved.titleMaxChars)
+    const record: DeliveryRecord = {
+      key, sessionId: String(session.id), turn: event.data.turn,
+      message: title.length === 0 ? '' : completionMessage(title, summary, event.data.reason, resolved.messageMaxBytes),
+      state: 'pending', attempts: 0, nextAttemptAt: Date.now() + resolved.settleDelayMs, retainedAt: nextRetentionOrder,
+    }
+    outbox.records.push(record)
+    if (!save()) return
     const pending: PendingCompletion = {
-      session,
-      terminal: event,
-      summary,
+      session, terminal: event, summary, record,
       timer: setTimeout(() => { dispatch(pending) }, resolved.settleDelayMs),
-      retainedAt: nextRetentionOrder,
     }
     pendingBySession.set(session, pending)
   })
@@ -532,13 +567,12 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => async () => {
     closing = true
     detach()
-    for (const pending of pendingBySession.values()) {
-      clearTimeout(pending.timer)
-    }
+    if (retryTimer !== undefined) clearTimeout(retryTimer)
+    for (const pending of pendingBySession.values()) clearTimeout(pending.timer)
     pendingBySession.clear()
-    deliveryQueue.length = 0
-    queuedBySession.clear()
     abortController.abort()
     await Promise.allSettled([...inFlight])
+    outbox.close()
   }, 'turn-notify-wechat teardown')
+  pumpDeliveries()
 }

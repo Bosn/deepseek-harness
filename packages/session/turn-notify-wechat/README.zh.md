@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 何时选择
 
-当部署需要在每个顶层终态 turn 后发送私人外部通知，并且能够提供 owner 管理的 OpenClaw 命令与 route 文件时选择本插件。如果通知必须在进程退出后仍可恢复、其他渠道已经负责完成报告，或部署必须报告 subagent 或 background-job turn，则跳过本插件。
+当部署需要在每个顶层终态 turn 后发送私人外部通知，并且能够提供 owner 管理的 OpenClaw 命令与 route 文件时选择本插件。如果其他渠道已经负责完成报告，或部署必须报告 subagent 或 background-job turn，则跳过本插件。
 
 ### 通知内容
 
@@ -46,7 +46,7 @@ DSH任务 [完成]：<session title>
 
 ### 最小配置
 
-把本插件与 session 和标题服务一起挂载。两个路径都必须是部署方管理的绝对路径：
+把本插件与 session 和标题服务一起挂载。所有路径都必须是部署方管理的绝对路径：
 
 ```yaml
 - id: turn-notify-wechat
@@ -54,12 +54,16 @@ DSH任务 [完成]：<session title>
   config:
     command: /absolute/path/to/openclaw-wrapper
     routeFile: /absolute/path/to/wechat-route.env
+    outboxFile: /absolute/path/to/private/wechat-outbox.json
 ```
 
 | 字段 | 默认值 | 含义 |
 |---|---:|---|
 | `command` | 必填 | owner wrapper 或 OpenClaw CLI 的绝对路径 |
 | `routeFile` | 必填 | 插件加载时读取一次的 owner-only constants 文件 |
+| `outboxFile` | 必填 | 当前 host 插件独占的私人持久发送队列 |
+| `retryDelayMs` | `30000` | 明确 provider 拒绝后的指数退避初始间隔 |
+| `maxAttempts` | `5` | 每条通知总尝试次数，范围 `1` 至 `10` |
 | `accountKey` | `WEIXIN_ACCOUNT_ID` | route 文件中保存微信 account id 的 key |
 | `targetKey` | `WEIXIN_BOSN_TARGET` | route 文件中保存私人 owner target 的 key |
 | `channel` | `openclaw-weixin` | 传给 `message send` 的非空且不含 NUL 的 OpenClaw channel |
@@ -83,13 +87,16 @@ DSH任务 [完成]：<session title>
 
 插件根据 session id 及精确 `turn/end` 的 turn、sequence、timestamp 和 reason 生成稳定的 SHA-256 幂等键，然后在不经过 shell 的情况下调用配置命令。它只接受非 dry-run 的 JSON 回执；回执必须包含配置的 channel、message id，以及 OpenClaw CLI 的 `action=send` 约定或明确的 sent、delivered 或 `ok` 结果。
 
-子进程获得的是 allowlist 环境，而不是 DSH 的完整环境。经过校验的并发上限限制同时存活的子进程，独立的保留上限约束跨 session 的 pending settle timer 与排队交付总数。同一 session 的较新保留 turn 会替换旧通知；达到保留上限时会丢弃最旧的 pending 或排队通知，以保留最新完成结果。dispose 会移除 observer、取消 timer、丢弃排队交付、中止正在发送的命令并等待它们结束。
+子进程获得的是 allowlist 环境，而不是 DSH 的完整环境。经过校验的并发上限限制同时存活的子进程，独立的保留上限约束跨 session 的 pending settle timer 与排队交付总数。同一 session 的较新保留 turn 会替换旧通知；达到保留上限时会丢弃最旧的 pending 或排队通知，以保留最新完成结果。dispose 会移除 observer、取消 timer、保留未发送记录、中止正在发送的命令并等待它们结束，然后释放 outbox 占用。
+
+版本化私人 outbox 只接收新观察到的合格终态。原子写入与 route hash 在重启后保留待发通知、重试期限、尝试次数与核实的 message ID。只有结构化的 provider 拒绝、发送前连接失败、fetch 不可用或发送器忙碌，并且 `unknownAfterSend=false` 时，才允许有界指数退避。缺失或矛盾回执、超时和发送中断均进入 `unknown` 并停止发送。存储损坏、route 改变或并发占用会停止发送。通知记录不改变 durable business turn result。
 
 ### 源码地图
 
 | 文件 | 职责 |
 |---|---|
-| [`src/index.ts`](src/index.ts) | 插件配置、session observer、通知组装、有界队列和命令回执校验 |
+| [`src/index.ts`](src/index.ts) | 插件配置、observer、有界重试调度和回执校验 |
+| [`src/outbox.ts`](src/outbox.ts) | 私人原子记录、独占所有权与崩溃恢复 |
 
 不发布不变式伴生：外部微信渠道关系无法在插件树内独立观测，命令回执校验由真实组合测试承担。
 
@@ -122,7 +129,8 @@ DSH任务 [完成]：<session title>
 
 这些限制界定通知交付仍需运维支持的范围。
 
-- 插件没有自有的 durable outbox。进程如果在 `turn/end` 之后、获得渠道回执之前退出，通知可能丢失；稳定幂等键只会在命令本身被重试时防止重复交付。
+- 恢复只读取已接收的 outbox 记录，不扫描旧 session history。settle delay 期间重启会使用接收时的标题；没有已捕获标题的通知停止发送。结果未知与次数耗尽需要运维排查。
+- 待发保留有界并优先保留较新 turn。outbox 保存最近 256 条终态发送记录，不是永久交付档案。
 - 标题生成失败可能导致交付时没有可用 session 标题；此时插件只记录不含 payload 的 warning 并跳过通知。
 - 终态标签报告的是一个 DSH turn 的结果，不推断整个 session 或整个 project 的 outcome。
 - 这个 package 只定义通知，不增加 DSH 与其他 agent 之间的控制、委派、共享记忆或跨 agent handoff。

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-11-durable-wechat-notification-recovery.md
+2026-09-11-durable-wechat-notification-recovery.md: 1dbd6b320fc373f1314c5202753eee952ed2cd67
+2026-09-11-durable-wechat-notification-recovery.zh.md: 0881a246cce0189f8b1f089d82d32d10dcc3f9fa
