@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -144,6 +145,9 @@ function applyAt(ctx: Context, routeFile: string, overrides: Partial<Config> = {
   apply(ctx, {
     command: '/owner/bin/ocw',
     routeFile,
+    outboxFile: `${routeFile}.outbox.json`,
+    retryDelayMs: 30_000,
+    maxAttempts: 5,
     accountKey: 'WEIXIN_ACCOUNT_ID',
     targetKey: 'WEIXIN_BOSN_TARGET',
     channel: 'openclaw-weixin',
@@ -313,7 +317,7 @@ describe('turn-notify-wechat plugin', () => {
       expect(() => { applyAt(harness.ctx, routeFile) }).toThrow(expected)
     }
 
-    const base = { command: '/owner/bin/ocw', routeFile: validRouteFile }
+    const base = { command: '/owner/bin/ocw', routeFile: validRouteFile, outboxFile: join(root, 'schema.json') }
     expect(ConfigSchema(base)).toMatchObject({ messageMaxBytes: 8192, maxRetainedDeliveries: 64 })
     for (const maxRetainedDeliveries of [0, 1.5, 257]) {
       expect(() => ConfigSchema({ ...base, maxRetainedDeliveries })).toThrow()
@@ -770,6 +774,8 @@ describe('turn-notify-wechat plugin', () => {
     const mounted = await mount()
     const cases: Array<{ stdout: string; expected: string }> = [
       { stdout: '{', expected: 'invalid JSON' },
+      { stdout: JSON.stringify({ action: 'send', channel: 'openclaw-weixin', status: 'failed', messageId: 'unsafe' }), expected: 'no verifiable sent receipt' },
+      { stdout: JSON.stringify({ action: 'send', channel: 'openclaw-weixin', ok: false, messageId: 'unsafe' }), expected: 'no verifiable sent receipt' },
       { stdout: '"primitive"', expected: 'invalid receipt' },
       { stdout: 'null', expected: 'invalid receipt' },
       { stdout: '[]', expected: 'invalid receipt' },
@@ -869,4 +875,111 @@ describe('turn-notify-wechat plugin', () => {
     await disposal
     expect(mounted.warn).not.toHaveBeenCalled()
   })
+})
+
+
+describe('durable WeChat delivery recovery', () => {
+  const readOutbox = (file: string): { records: Array<{ state: string; code?: string; attempts: number; key: string }> } =>
+    JSON.parse(readFileSync(file, 'utf8')) as { records: Array<{ state: string; code?: string; attempts: number; key: string }> }
+
+  it('persists a definite rejection, resumes its bounded retry after restart, and retains a sent receipt state', async () => {
+    const outboxFile = join(root, 'durable.json')
+    const mounted = await mount(DEFAULT_ROUTE, { outboxFile, retryDelayMs: 100, maxAttempts: 2 })
+    const session = createSession()
+    mounted.titles.set(session, '恢复通知')
+    emitTurn(mounted, session, 1, [{ type: 'text', text: '已完成' }])
+    const first = advanceToDelivery()
+    const key = invocationValue(first, '--idempotency-key')
+    first.callback(new Error('exit'), JSON.stringify({ error: { code: 'provider_rejected', unknownAfterSend: false } }))
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'retry', attempts: 1 })
+    await mounted.cleanup()
+    invocations = []
+    await mount(DEFAULT_ROUTE, { outboxFile, retryDelayMs: 100, maxAttempts: 2 })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(invocations).toHaveLength(1)
+    expect(invocationValue(invocations[0] as Invocation, '--idempotency-key')).toBe(key)
+    succeed(invocations[0] as Invocation)
+    await vi.runAllTimersAsync()
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'sent', attempts: 2, messageId: 'wechat-1' })
+    if (process.platform !== 'win32') expect(statSync(outboxFile).mode & 0o777).toBe(0o600)
+  })
+
+  it('stops after the configured definite-rejection bound and never retries unknown sends', async () => {
+    const outboxFile = join(root, 'bounded.json')
+    const mounted = await mount(DEFAULT_ROUTE, { outboxFile, retryDelayMs: 100, maxAttempts: 2 })
+    const session = createSession()
+    mounted.titles.set(session, '有界重试')
+    emitTurn(mounted, session, 1, [{ type: 'text', text: '完成' }])
+    const first = advanceToDelivery()
+    const rejected = JSON.stringify({ error: { code: 'provider_rejected', unknownAfterSend: false } })
+    first.callback(new Error('exit'), rejected)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(invocations).toHaveLength(2)
+    invocations[1]?.callback(new Error('exit'), rejected)
+    await vi.runAllTimersAsync()
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'failed', attempts: 2 })
+    emitTurn(mounted, session, 2, [{ type: 'text', text: '新通知' }])
+    await vi.advanceTimersByTimeAsync(5000)
+    invocations[2]?.callback(new Error('exit'), JSON.stringify({ error: { code: 'network_error', unknownAfterSend: true } }))
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(3)
+    expect(readOutbox(outboxFile).records[1]).toMatchObject({ state: 'unknown', attempts: 1 })
+  })
+
+  it('recovers the settle queue without reading old sessions and quarantines an interrupted send', async () => {
+    const outboxFile = join(root, 'restart.json')
+    const mounted = await mount(DEFAULT_ROUTE, { outboxFile })
+    const session = createSession()
+    mounted.titles.set(session, '待发通知')
+    emitTurn(mounted, session, 1, [{ type: 'text', text: '已完成' }])
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'pending', attempts: 0 })
+    await mounted.cleanup()
+    const recovered = await mount(DEFAULT_ROUTE, { outboxFile })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(invocations).toHaveLength(1)
+    const sending = readOutbox(outboxFile)
+    expect(sending.records[0]).toMatchObject({ state: 'sending', attempts: 1 })
+    const disposal = recovered.cleanup()
+    invocations[0]?.callback(new Error('abort'), '')
+    await disposal
+    // Recreate a process-crash snapshot after releasing this test process's ownership.
+    await writeFile(outboxFile, JSON.stringify(sending))
+    invocations = []
+    await mount(DEFAULT_ROUTE, { outboxFile })
+    await vi.runAllTimersAsync()
+    expect(invocations).toHaveLength(0)
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'unknown', code: 'interrupted_send' })
+  })
+
+  it('refuses concurrent ownership, corrupt storage and a changed destination before sending', async () => {
+    const outboxFile = join(root, 'ownership.json')
+    const mounted = await mount(DEFAULT_ROUTE, { outboxFile })
+    await expect(mount(DEFAULT_ROUTE, { outboxFile })).rejects.toThrow('already owned')
+    await mounted.cleanup()
+    await expect(mount(DEFAULT_ROUTE.replace('owner-target', 'different-target'), { outboxFile })).rejects.toThrow('unavailable or invalid')
+    await writeFile(outboxFile, '{invalid')
+    await expect(mount(DEFAULT_ROUTE, { outboxFile })).rejects.toThrow('unavailable or invalid')
+    expect(invocations).toHaveLength(0)
+  })
+})
+
+
+it('retries explicit pre-send failures even when the sender exits zero', async () => {
+  const mounted = await mount(DEFAULT_ROUTE, { retryDelayMs: 100, maxAttempts: 2 })
+  for (const code of ['provider_rejected', 'connection_failed', 'fetch_unavailable', 'send_in_progress']) {
+    for (const exitError of [null, new Error('exit')]) {
+      const session = createSession()
+      mounted.titles.set(session, '重试明确未发出的通知')
+      emitTurn(mounted, session, 1, [{ type: 'text', text: '已完成' }])
+      const first = advanceToDelivery()
+      first.callback(exitError, JSON.stringify({ ok: false, error: { code, unknownAfterSend: false } }))
+      await vi.advanceTimersByTimeAsync(100)
+      expect(invocations).toHaveLength(2)
+      expect(invocationValue(invocations[1] as Invocation, '--idempotency-key')).toBe(invocationValue(first, '--idempotency-key'))
+      succeed(invocations[1] as Invocation)
+      await vi.runAllTimersAsync()
+      invocations = []
+    }
+  }
 })

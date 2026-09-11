@@ -22,8 +22,8 @@ afterEach(async () => {
   root = undefined
 })
 
-async function bootComposition(commandBody: string): Promise<{ ctx: Context; callsPath: string }> {
-  root = await mkdtemp(join(tmpdir(), 'dsh-turn-notify-wechat-'))
+async function bootComposition(commandBody: string, existingRoot?: string): Promise<{ ctx: Context; callsPath: string }> {
+  root = existingRoot ?? await mkdtemp(join(tmpdir(), 'dsh-turn-notify-wechat-'))
   const commandPath = join(root, 'fake-ocw.mjs')
   const callsPath = join(root, 'calls.jsonl')
   const routePath = join(root, 'constants.env')
@@ -51,8 +51,11 @@ ${commandBody}
     '  config:',
     `    command: ${JSON.stringify(commandPath)}`,
     `    routeFile: ${JSON.stringify(routePath)}`,
+    `    outboxFile: ${JSON.stringify(join(root, 'outbox.json'))}`,
     '    timeoutMs: 2000',
     '    settleDelayMs: 10',
+    '    retryDelayMs: 500',
+    '    maxAttempts: 2',
     '',
   ].join('\n'))
 
@@ -167,4 +170,27 @@ describe('turn-notify-wechat through a real Loader composition', () => {
       .toMatchObject({ data: { reason: { kind: 'completed' } } })
     expect(warn.mock.calls.flat().join('\n')).not.toContain('任务完成')
   })
+})
+
+
+it('recovers a rejected notice through a fresh Loader without replaying a session', async () => {
+  const first = await bootComposition("console.log(JSON.stringify({ error: { code: 'provider_rejected', unknownAfterSend: false } })); process.exitCode = 7")
+  vi.spyOn(first.ctx.logger, 'warn').mockImplementation(() => undefined)
+  await appendCompletedTurn(first.ctx, 'loader-durable-retry', '已完成')
+  const outboxPath = join(root as string, 'outbox.json')
+  await vi.waitFor(async () => {
+    const state = JSON.parse(await readFile(outboxPath, 'utf8')) as { records: Array<{ state: string }> }
+    expect(state.records[0]?.state).toBe('retry')
+  })
+  const retainedRoot = root as string
+  await first.ctx.fiber.dispose()
+  context = undefined
+  await bootComposition("console.log(JSON.stringify({ channel: 'openclaw-weixin', status: 'sent', messageId: 'recovered-1' }))", retainedRoot)
+  await vi.waitFor(async () => {
+    const state = JSON.parse(await readFile(outboxPath, 'utf8')) as { records: Array<{ state: string; attempts: number; messageId: string }> }
+    expect(state.records[0]).toMatchObject({ state: 'sent', attempts: 2, messageId: 'recovered-1' })
+  })
+  const calls = (await readFile(first.callsPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+  expect(calls).toHaveLength(2)
+  expect(calls[0]).toEqual(calls[1])
 })

@@ -29,7 +29,7 @@ Mount this plugin once in the host composition so one process-level observer cov
 
 ### When to choose it
 
-Choose it when a deployment needs a private external notice after each top-level terminal turn and can provide an owner-controlled OpenClaw command plus route file. Skip it when notifications must be durable across process exit, when another channel owns completion reporting, or when a deployment must report subagent or background-job turns.
+Choose it when a deployment needs a private external notice after each top-level terminal turn and can provide an owner-controlled OpenClaw command plus route file. Skip it when another channel owns completion reporting, or when a deployment must report subagent or background-job turns.
 
 ### Notice content
 
@@ -46,7 +46,7 @@ The label follows the durable terminal reason: `completed` → `完成`, `aborte
 
 ### Minimal configuration
 
-Mount the plugin beside the session and title services. Both paths are deployment-owned absolute paths:
+Mount the plugin beside the session and title services. All paths are deployment-owned absolute paths:
 
 ```yaml
 - id: turn-notify-wechat
@@ -54,12 +54,16 @@ Mount the plugin beside the session and title services. Both paths are deploymen
   config:
     command: /absolute/path/to/openclaw-wrapper
     routeFile: /absolute/path/to/wechat-route.env
+    outboxFile: /absolute/path/to/private/wechat-outbox.json
 ```
 
 | Field | Default | Meaning |
 |---|---:|---|
 | `command` | required | Absolute owner wrapper or OpenClaw CLI path |
 | `routeFile` | required | Owner-only constants file read once at plugin load |
+| `outboxFile` | required | Private durable outbox, exclusively owned by this host plugin |
+| `retryDelayMs` | `30000` | Initial exponential delay after a definite provider rejection |
+| `maxAttempts` | `5` | Total attempts per notice, from `1` through `10` |
 | `accountKey` | `WEIXIN_ACCOUNT_ID` | Route-file key containing the WeChat account id |
 | `targetKey` | `WEIXIN_BOSN_TARGET` | Route-file key containing the private owner target |
 | `channel` | `openclaw-weixin` | Non-empty NUL-free OpenClaw channel passed to `message send` |
@@ -83,13 +87,16 @@ A non-absolute `command`, missing route keys, or an unreadable route file fail p
 
 The plugin derives a stable SHA-256 idempotency key from the session id and exact `turn/end` turn, sequence, timestamp, and reason, then invokes the configured command without a shell. It accepts only a non-dry-run JSON receipt with the configured channel, a message id, and either the OpenClaw CLI `action=send` contract or an explicit sent, delivered, or `ok` result.
 
-The subprocess receives an allowlisted environment rather than the ambient DSH environment. A validated concurrency limit bounds live subprocesses, and a separate retention limit bounds pending settle timers plus queued deliveries across sessions. A newer retained turn from the same session replaces the older notice; when retention is full, the oldest pending or queued notice is dropped so the newest completion remains. Disposal detaches the observer, cancels timers, drops queued deliveries, aborts in-flight sends, and waits for them to settle.
+The subprocess receives an allowlisted environment rather than the ambient DSH environment. A validated concurrency limit bounds live subprocesses, and a separate retention limit bounds pending settle timers plus queued deliveries across sessions. A newer retained turn from the same session replaces the older notice; when retention is full, the oldest pending or queued notice is dropped so the newest completion remains. Disposal detaches the observer, cancels timers, preserves unsent records, aborts in-flight sends, and waits for them to settle before releasing outbox ownership.
+
+The versioned private outbox admits only newly observed eligible terminals. Atomic writes and a route hash preserve pending notices, retry deadlines, attempt counts, and verified message IDs across restarts. Only structured provider rejections, pre-send connection failures, unavailable fetch, or a busy sender with `unknownAfterSend=false` permit bounded exponential retry. Missing or contradictory receipts, timeouts, and interrupted sends become `unknown` and stop. Corrupt storage, route changes, or concurrent ownership stop delivery. Records never change the durable business turn result.
 
 ### Source map
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Plugin configuration, session observer, notice assembly, bounded queue, and command receipt validation |
+| [`src/index.ts`](src/index.ts) | Plugin configuration, observer, bounded retry scheduler, and receipt validation |
+| [`src/outbox.ts`](src/outbox.ts) | Private atomic records, exclusive ownership, and crash recovery |
 
 No invariant companion is published: the external WeChat channel relationship is not independently observable from inside the plugin tree, so command receipt validation stays in the real-composition tests.
 
@@ -122,7 +129,8 @@ No direct effect. The plugin never changes request content or a reusable prefix.
 
 These limits define where notification delivery still needs operational support.
 
-- Delivery has no package-owned durable outbox. A process exit after `turn/end` but before the channel receipt can lose the notice; the stable idempotency key only prevents duplicate delivery when the command itself is retried.
+- Recovery reads only admitted outbox records, never old session history. A restart during the settle delay uses the title captured at admission; a missing captured title stops that notice. Unknown sends and exhausted retries require operator investigation.
+- Pending retention remains bounded and favors newer turns. The outbox retains the latest 256 terminal delivery records; it is not a permanent delivery archive.
 - A title-generation failure can leave the session title unavailable at delivery time, in which case the plugin logs a payload-free warning and skips the notice.
 - The terminal label reports one DSH turn result, not an inferred whole-session or whole-project outcome.
 - The package defines notification only. It adds no control, delegation, shared memory, or inter-agent handoff between DSH and other agents.
