@@ -1,8 +1,10 @@
 {
   "name": "@deepseek-ai/dsh-maintenance-reporter",
   "description": "Top-level DSH maintenance lease lifecycle and reporter coverage",
-  "version": "0.1.5-rc.2",
-  "publishConfig": {"access": "public"},
+  "version": "0.1.7-alpha.2",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/deepseek-ai/deepseek-harness.git",
@@ -12,30 +14,38 @@
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
   "exports": {
-    ".": {"types": "./lib/types/index.d.ts", "default": "./lib/index.js"},
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
-  "files": ["lib/index.js", "lib/types/**/*.d.ts"],
+  "files": [
+    "lib/index.js",
+    "lib/types/**/*.d.ts"
+  ],
   "license": "MIT",
-  "dependencies": {"@deepseek-ai/schemastery": "workspace:^"},
+  "dependencies": {
+    "@deepseek-ai/schemastery": "workspace:~"
+  },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "workspace:^",
-    "@deepseek-ai/dsh-agent": "workspace:^",
-    "@deepseek-ai/dsh-session": "workspace:^",
-    "@deepseek-ai/dsh-shell": "workspace:^",
-    "@deepseek-ai/dsh-shell-env": "workspace:^"
+    "@deepseek-ai/cordis": "workspace:~",
+    "@deepseek-ai/dsh-agent": "workspace:*",
+    "@deepseek-ai/dsh-session": "workspace:*",
+    "@deepseek-ai/dsh-shell": "workspace:*",
+    "@deepseek-ai/dsh-shell-env": "workspace:*"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "workspace:^",
-    "@deepseek-ai/cordis-plugin-loader": "workspace:^",
-    "@deepseek-ai/dsh-agent": "workspace:^",
-    "@deepseek-ai/dsh-app-boot": "workspace:^",
-    "@deepseek-ai/dsh-llm": "workspace:^",
-    "@deepseek-ai/dsh-loader-smoke": "workspace:^",
-    "@deepseek-ai/dsh-session": "workspace:^",
-    "@deepseek-ai/dsh-shell": "workspace:^",
-    "@deepseek-ai/dsh-shell-env": "workspace:^",
-    "@deepseek-ai/dsh-tools": "workspace:^"
+    "@deepseek-ai/cordis": "workspace:~",
+    "@deepseek-ai/cordis-plugin-loader": "workspace:~",
+    "@deepseek-ai/dsh-agent": "workspace:*",
+    "@deepseek-ai/dsh-app-boot": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-loader-smoke": "workspace:*",
+    "@deepseek-ai/dsh-session": "workspace:*",
+    "@deepseek-ai/dsh-shell": "workspace:*",
+    "@deepseek-ai/dsh-shell-env": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*"
   }
 }

@@ -24,10 +24,10 @@ import { SessionSeq, type EpochHeader, type Session, type SessionEvent } from '@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { estimateCompactionInstructionBytes, frameSummary } from './summarizer.ts'
 import type { SummarizationInput, SummaryResult } from './summarizer.ts'
-
 interface RegionDependencies {
   readonly meter: TokenMeter
   summarize(input: SummarizationInput, agent: Agent, signal?: AbortSignal): Promise<SummaryResult>
+  recover(error: unknown, agent: Agent, sourceEventSeqs: readonly SessionSeq[], signal?: AbortSignal): boolean
 }
 
 /** One validated inclusive span of current surface positions. */
@@ -120,7 +120,8 @@ interface TransactionFailure {
  */
 function systemHead(session: Session, headSeq: SessionSeq): SessionEvent<'system/message'> | undefined {
   // Surface nodes are current log seqs, so the event exists.
-  // oxlint-disable-next-line typescript/no-non-null-assertion
+  // Existing Session history read; migration deferred.
+  // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
   const head = session.eventAt(headSeq)!
   return head.type === 'system/message' ? head : undefined
 }
@@ -372,6 +373,8 @@ async function runCompactionTransaction(
       agent,
       compactionId,
       options.sourceCommandId,
+      assertStable,
+      options.summarizationInputBytes,
       signal,
     )
     if (options.owner === null) signal?.throwIfAborted()
@@ -544,9 +547,24 @@ async function summarizeCompaction(
   agent: Agent,
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
+  assertStable: StabilityCheck,
+  summarizationInputBytes: number | undefined,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
-  const summaryResult = await dependencies.summarize(prepared.input, agent, signal)
+  let summaryResult: SummaryResult
+  for (;;) {
+    signal?.throwIfAborted()
+    try {
+      summaryResult = await dependencies.summarize(prepared.input, agent, signal)
+      break
+    } catch (error: unknown) {
+      if (signal?.aborted === true) throw error
+      assertStable(dependencies, agent.session, prepared)
+      if (!dependencies.recover(error, agent, prepared.shadowedSeqs, signal)) throw error
+      prepared = prepareCompaction(dependencies, agent.session,
+        validateSurfaceRegion(agent.session, prepared.start, prepared.end), summarizationInputBytes)
+    }
+  }
   const checkpointMessage = createUserMessage({
     content: frameSummary(summaryResult.summary),
     source: compactCheckpointSource(compactionId, sourceCommandId),
@@ -647,7 +665,7 @@ function commitCompactionBody(
     usage,
     checkpointMessage,
   } = summarized
-  const callProvenance = summarized.llmStreamCall === true
+  const callRecord = summarized.llmStreamCall === true
     ? { rawOutput: summarized.rawOutput, llmStreamCall: true as const }
     : summarized.rawOutput === undefined ? {} : { rawOutput: summarized.rawOutput }
   const summaryEvent = session.append('compaction/summary', {
@@ -656,7 +674,7 @@ function commitCompactionBody(
       ? {}
       : { sourceCommandId: startEvent.data.sourceCommandId },
     summary,
-    ...callProvenance,
+    ...callRecord,
     shadowedRange: { start, end },
     shadowedSeqs: [...shadowedSeqs],
     shadowedTokenCount,
@@ -733,7 +751,8 @@ function buildSummarizationInput(
   const system = head === undefined ? null : session.deriveEventMessage(head)
   const regionMessages = shadowedSeqs
     // shadowedSeqs are current surface seqs, so each is a valid log index.
-    // oxlint-disable-next-line typescript/no-non-null-assertion
+    // Existing Session history read; migration deferred.
+    // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
     .map(seq => session.deriveEventMessage(session.eventAt(seq)!))
     .filter((message): message is Message => message !== null)
   const messages: readonly Message[] = system === null ? regionMessages : [system, ...regionMessages]
@@ -837,7 +856,8 @@ function inspectCompactionEntryState(session: Session): CompactionEntryState {
   let compactionEntryStateKnown = false
   let latestEndSeedSeq: SessionSeq | undefined
   for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
-    // oxlint-disable-next-line typescript/no-non-null-assertion
+    // Existing Session history read; migration deferred.
+    // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
     const event = session.eventAt(SessionSeq(seq))!
     if (latestEndSeedSeq === undefined && event.type === 'session/end-seed') {
       latestEndSeedSeq = event.seq

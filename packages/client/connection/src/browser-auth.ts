@@ -231,16 +231,13 @@ export class BrowserAuth {
   }
 
   /**
-   * Add this process's launch token to the ordinary application root URL;
-   * the disabled authenticator returns the clean root URL instead.
-   * @param baseUrl - canonical browser origin without credentials.
-   * @returns root URL carrying the process token as its sole authentication input.
+   * Add this process's launch token to the caller's application URL; the
+   * disabled authenticator returns the same clean URL instead.
+   * @param baseUrl - clean browser URL whose authority and mount are preserved.
+   * @returns the same URL carrying the process token as its sole authentication input.
    */
   authenticatedUrl(baseUrl: string): string {
     const url = new URL(baseUrl)
-    url.pathname = '/'
-    url.search = ''
-    url.hash = ''
     if (this.disabled) return url.href
     url.searchParams.set(TOKEN_QUERY, this.launchToken)
     return url.href
@@ -248,8 +245,9 @@ export class BrowserAuth {
 
   /**
    * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to clean `/`; a valid cookie lets the caller serve the
-   * index; every other request receives the same minimal 401 response.
+   * and redirects to the directory-relative clean `./`; a valid cookie lets
+   * the caller serve the index; every other request receives the same minimal
+   * 401 response.
    * @param req - incoming root or configured-index request.
    * @param res - response owned when this method returns false.
    * @returns true only when the caller may serve index.html.
@@ -273,7 +271,7 @@ export class BrowserAuth {
         }, this.secret)
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': '/',
+          'location': './',
           'referrer-policy': 'no-referrer',
           'set-cookie': sessionCookie(
             cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000),
@@ -285,7 +283,7 @@ export class BrowserAuth {
       if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req)) {
         res.writeHead(303, {
           'cache-control': 'no-store',
-          'location': '/',
+          'location': './',
           'referrer-policy': 'no-referrer',
         })
         res.end()
@@ -307,37 +305,12 @@ export class BrowserAuth {
   isAuthenticated(request: ConnectionTrustRequest): boolean {
     if (this.disabled) return true
     const authority = requestAuthority(request.headers)
-    return authority !== undefined && this.isAuthenticatedFor(request, [authority])
-  }
-
-  /**
-   * Verify a cookie minted for one of the application authorities on a
-   * same-host sibling-port request, such as the isolated workspace-file
-   * origin. Browser cookies are host-scoped rather than port-scoped, while
-   * the signed payload remains bound to the exact application authority.
-   * @param request - sibling-origin request carrying the browser Cookie header.
-   * @param applicationAuthorities - canonical application authorities allowed
-   * to authenticate this sibling origin.
-   * @returns true only when a same-host application audience signs an unexpired cookie.
-   */
-  isAuthenticatedFor(
-    request: ConnectionTrustRequest,
-    applicationAuthorities: readonly string[],
-  ): boolean {
-    if (this.disabled) return true
-    const requestTarget = requestAuthority(request.headers)
     const rawCookie = header(request.headers, 'cookie')
-    if (requestTarget === undefined || rawCookie === undefined) return false
-    const requestHostname = new URL(`http://${requestTarget}`).hostname
-    const payload = applicationAuthorities.flatMap((authority) => {
-      const authorityHostname = new URL(`http://${authority}`).hostname
-      if (authorityHostname !== requestHostname) return []
-      const value = cookieValue(rawCookie, cookieName(authority))
-      if (value === undefined) return []
-      const decoded = decodeCookie(value, this.secret)
-      return decoded?.authority === authority ? [decoded] : []
-    })[0]
-    if (payload === undefined) return false
+    if (authority === undefined || rawCookie === undefined) return false
+    const value = cookieValue(rawCookie, cookieName(authority))
+    if (value === undefined) return false
+    const payload = decodeCookie(value, this.secret)
+    if (payload === undefined || payload.authority !== authority) return false
     const now = Date.now()
     return payload.issuedAt <= now
       && payload.expiresAt > now

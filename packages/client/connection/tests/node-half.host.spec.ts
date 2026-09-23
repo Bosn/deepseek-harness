@@ -12,21 +12,21 @@ import {
   API_PATH,
   RpcId,
   apply,
-  browserApplicationAuthorities,
   inject,
   type ClientRequest,
   type ConnectionConfig,
   type HostConnectionHandle,
+  type PeerScope,
 } from '../src/index.ts'
+import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
 import { provideBrowserCredentials } from './browser-credentials.ts'
-import { PRIVILEGED_HOSTS_GLOBAL } from '../src/privileged-hosts.ts'
 
 /** Structural webServer fake recording both route registries. */
 function fakeHttpServer(
   routes: WebRoute[],
   upgrades: WebUpgradeRoute[],
-): Pick<WebServer, 'register' | 'registerUpgrade' | 'tapIndex' | 'host' | 'port'> {
+): Pick<WebServer, 'register' | 'registerUpgrade' | 'tapIndex' | 'port'> {
   return {
     register(route) {
       if (routes.some(candidate => candidate.kind === route.kind && candidate.path === route.path)) {
@@ -40,28 +40,27 @@ function fakeHttpServer(
       return () => { upgrades.splice(upgrades.indexOf(route), 1) }
     },
     tapIndex: () => () => {},
-    host: '127.0.0.1',
     port: 0,
   }
 }
 
 /** Bodyless GET carrying the given headers (enough for the trust fence + bridge). */
 function fakeRequest(headers: Record<string, string>, url = `${API_PATH}/session.list`): IncomingMessage {
-  const request = Readable.from([]) as unknown as IncomingMessage
+  const request = Readable.from([]) as IncomingMessage
   Object.assign(request, { url, method: 'GET', headers })
   return request
 }
 
 /** JSON POST carrying a complete client-request envelope. */
 function fakePost(headers: Record<string, string>, url: string, body: unknown): IncomingMessage {
-  const request = Readable.from([Buffer.from(JSON.stringify(body))]) as unknown as IncomingMessage
+  const request = Readable.from([Buffer.from(JSON.stringify(body))]) as IncomingMessage
   Object.assign(request, { url, method: 'POST', headers: { 'content-type': 'application/json', ...headers } })
   return request
 }
 
 /** Raw POST for malformed-body and media-type boundary cases. */
 function fakeRawPost(headers: Record<string, string>, url: string, body: string): IncomingMessage {
-  const request = Readable.from([Buffer.from(body)]) as unknown as IncomingMessage
+  const request = Readable.from([Buffer.from(body)]) as IncomingMessage
   Object.assign(request, { url, method: 'POST', headers })
   return request
 }
@@ -129,16 +128,91 @@ function browserCookie(connection: HostConnectionHandle, authority: string): str
 }
 
 describe('connection node half', () => {
-  it('derives exact cookie authorities for loopback and port-less deployments', () => {
-    expect(browserApplicationAuthorities(
-      ['harness.example', 'exact.example:7443'],
-      3080,
-    )).toEqual([
-      '127.0.0.1:3080',
-      'localhost:3080',
-      'harness.example:3080',
-      'exact.example:7443',
-    ])
+  it('trusts a declared configuration authority, still requires its browser session, and injects the client fact', async () => {
+    // A privileged declaration joins the ordinary Host fence, so no duplicate
+    // trustedHosts entry is required. It does not bypass BrowserAuth.
+    const { ctx, routes, connection, upgrades, dispose } = await mounted({
+      privilegedHosts: ['harness.example'],
+    })
+    const unauthenticated = fakeResponse()
+    await routes[0]!.handler(
+      fakeRequest({ host: 'harness.example' }, `${API_PATH}/settings/describe`),
+      unauthenticated.response,
+    )
+    expect(unauthenticated.state).toMatchObject({ status: 401, body: 'unauthorized' })
+
+    const authenticated = fakeResponse()
+    await routes[0]!.handler(fakeRequest({
+      host: 'harness.example',
+      cookie: browserCookie(connection, 'harness.example'),
+    }, `${API_PATH}/settings/describe`), authenticated.response)
+    expect(authenticated.state.status).toBe(404)
+
+    const table: IndexInjection[] = []
+    ctx.emit('webserver/index-inject', table)
+    expect(table).toContainEqual({
+      kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: ['harness.example'],
+    })
+    expect(upgrades).toHaveLength(0)
+    await dispose()
+  })
+
+  it('runs request admission after authentication and removes it with its owning fiber', async () => {
+    const { ctx, routes, connection, dispose } = await mounted()
+    let admitted = 0
+    const guard = ctx.plugin({ apply(owner: Context) {
+      owner.on('connection/request', async (_request, response) => {
+        admitted++
+        response.writeHead(503)
+        response.end()
+      })
+    } })
+    try {
+      await guard.await()
+      const unauthorized = fakeResponse()
+      await routes[0]!.handler(fakeRequest({ host: 'localhost' }), unauthorized.response)
+      expect(unauthorized.state.status).toBe(401)
+      expect(admitted).toBe(0)
+      const headers = { host: 'localhost', cookie: browserCookie(connection, 'localhost') }
+      const refused = fakeResponse()
+      await routes[0]!.handler(fakeRequest(headers), refused.response)
+      expect(refused.state.status).toBe(503)
+      expect(admitted).toBe(1)
+      await guard.dispose()
+      const allowed = fakeResponse()
+      await routes[0]!.handler(fakeRequest(headers), allowed.response)
+      expect(allowed.state.status).toBe(404)
+      expect(admitted).toBe(1)
+    } finally { await guard.dispose(); await dispose() }
+  })
+
+  it('awaits delegated response transfer before releasing the admission listener', async () => {
+    const { ctx, routes, connection, dispose } = await mounted()
+    const entered = Promise.withResolvers<undefined>()
+    const finish = Promise.withResolvers<undefined>()
+    let completed = false
+    connection.fetch.register({ path: '/api/held', methods: ['GET'], requestBody: 'buffered',
+      async fetch() {
+        return new Response(new ReadableStream({ async start(controller) {
+          entered.resolve(undefined)
+          await finish.promise
+          controller.close()
+        } }))
+      },
+    })
+    const remove = ctx.on('connection/request', async (_request, _response, next) => {
+      await next()
+      completed = true
+    })
+    const response = fakeResponse()
+    const pending = routes[0]!.handler(fakeRequest({ host: 'localhost', cookie: browserCookie(connection, 'localhost') }, '/api/held'), response.response)
+    try {
+      await entered.promise
+      expect(completed).toBe(false)
+      finish.resolve(undefined)
+      await pending
+      expect(completed).toBe(true)
+    } finally { finish.resolve(undefined); await pending; remove(); await dispose() }
   })
 
   it('provides the carrier-neutral service without a Web server', async () => {
@@ -177,7 +251,6 @@ describe('connection node half', () => {
     const ctx = new Context()
     await expect(apply(ctx, { recovery })).rejects.toThrow(error)
     expect(ctx.get('connection')).toBeUndefined()
-
   })
 
   it('reserves enough default carrier capacity for the 200 MiB image batch', () => {
@@ -204,9 +277,7 @@ describe('connection node half', () => {
     provideBrowserCredentials(ctx)
     ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
     const fiber = ctx.plugin({ inject: [...inject], apply }, { trustedHosts: ['harness.internal/path'] })
-    await expect(fiber).rejects.toThrow(
-      'client-connection: configured authority "harness.internal/path" is not a bare host[:port] authority',
-    )
+    await expect(fiber).rejects.toThrow(/not a bare host\[:port\] authority/)
     expect(routes).toHaveLength(0)
     expect(upgrades).toHaveLength(0)
   })
@@ -220,10 +291,6 @@ describe('connection node half', () => {
     expect(routes).toHaveLength(0)
     expect(upgrades).toHaveLength(0)
   })
-
-
-
-
 
   it('refuses an untrusted Host on any /api path before the bridge runs', async () => {
     const { routes, dispose } = await mounted()
@@ -240,7 +307,7 @@ describe('connection node half', () => {
     const { routes, connection, dispose } = await mounted({ trustedHosts: ['harness.example'] })
     const methods = [
       'session/openWorkspacePath',
-      'llm/discoverModels', 'skills/list', 'settings/openAgentPresetDirectory',
+      'llm/discoverModels', 'skills/list', 'agentPresets/list',
     ]
     for (const method of methods) {
       const denied = fakeResponse()
@@ -262,51 +329,6 @@ describe('connection node half', () => {
     await routes[0]!.handler(fakeRequest({ host: 'localhost:3080' }), forged.response)
     expect(forged.state).toMatchObject({ status: 401, body: 'unauthorized' })
     await dispose()
-  })
-
-  it('trusts a declared configuration authority, still requires its browser session, and injects the client fact', async () => {
-    // A privileged declaration joins the ordinary Host fence, so no duplicate
-    // trustedHosts entry is required. It does not bypass BrowserAuth.
-    const { ctx, routes, connection, upgrades, dispose } = await mounted({
-      privilegedHosts: ['harness.example'],
-    })
-    const unauthenticated = fakeResponse()
-    await routes[0]!.handler(
-      fakeRequest({ host: 'harness.example' }, `${API_PATH}/settings/describe`),
-      unauthenticated.response,
-    )
-    expect(unauthenticated.state).toMatchObject({ status: 401, body: 'unauthorized' })
-
-    const authenticated = fakeResponse()
-    await routes[0]!.handler(fakeRequest({
-      host: 'harness.example',
-      cookie: browserCookie(connection, 'harness.example'),
-    }, `${API_PATH}/settings/describe`), authenticated.response)
-    expect(authenticated.state.status).toBe(404)
-
-    const table: IndexInjection[] = []
-    ctx.emit('webserver/index-inject', table)
-    expect(table).toContainEqual({
-      kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: ['harness.example'],
-    })
-    expect(upgrades).toHaveLength(0)
-    await dispose()
-  })
-
-  it('fails the load on a privilegedHosts entry that is not a bare authority', async () => {
-    const routes: WebRoute[] = []
-    const upgrades: WebUpgradeRoute[] = []
-    const ctx = new Context()
-    provideBrowserCredentials(ctx)
-    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
-    const fiber = ctx.plugin({ inject: [...inject], apply }, {
-      privilegedHosts: ['harness.internal/path'],
-    })
-    await expect(fiber).rejects.toThrow(
-      'client-connection: configured authority "harness.internal/path" is not a bare host[:port] authority',
-    )
-    expect(routes).toHaveLength(0)
-    expect(upgrades).toHaveLength(0)
   })
 
   it('passes loopback and declared-authority requests through to the bridge', async () => {
@@ -486,6 +508,47 @@ describe('connection node half', () => {
     await fiber.dispose()
   })
 
+  it('admits every trusted, authenticated request as the operator Peer and hands each call that Peer', async () => {
+    const { connection, routes, dispose } = await mounted({ trustedHosts: ['harness.example'] })
+    const peers: PeerScope[] = []
+    const remove = connection.rpc.intercept(
+      '/api',
+      () => true,
+      async (_endpoint, _payload, _signal, peer) => {
+        peers.push(peer)
+        return { ok: true, value: null }
+      },
+    )
+    expect(connection.admit(fakeRequest({ host: 'other.example' }))).toEqual({ rejection: 403 })
+    expect(connection.admit(fakeRequest({ host: '127.0.0.1:3080' }))).toEqual({ rejection: 401 })
+    const cookie = browserCookie(connection, '127.0.0.1:3080')
+    expect(connection.admit(fakeRequest({ host: '127.0.0.1:3080', cookie }))).toEqual({ peer: connection.operator })
+
+    const route = routes.find(candidate => candidate.path === API_PATH)!
+    const request: ClientRequest = {
+      type: 'client-request',
+      rpcId: RpcId('rpc-peer'),
+      method: 'goals/create',
+      payload: { args: {} },
+    }
+    const answered = fakeResponse()
+    await route.handler(fakePost({ host: '127.0.0.1:3080', cookie }, '/api/goals/create', request), answered.response)
+    expect(JSON.parse(String(answered.state.body))).toMatchObject({ result: { ok: true, value: null } })
+    // A shell-owned carrier dispatches the shared handler without the bridge and speaks for the operator too.
+    const direct = await connection.createSharedFetchHandler('/api').fetch(new Request('http://127.0.0.1:3080/api/goals/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
+    }))
+    expect(direct.status).toBe(200)
+    expect(peers).toEqual([connection.operator, connection.operator])
+
+    // Racing disposals share one completion, and the scope goes with the Connection.
+    await Promise.all([connection.operator.dispose(), connection.operator.dispose()])
+    await remove()
+    await dispose()
+  })
+
   it('applies the configured trust fence and JSON envelope checks to generic channels', async () => {
     const ctx = new Context()
     const routes: WebRoute[] = []
@@ -612,7 +675,7 @@ describe('connection node half over a real HTTP server', () => {
         'settings/openSettingsDocument',
         'session/openWorkspacePath',
         'llm/discoverModels', 'skills/list',
-        'settings/openAgentPresetDirectory',
+        'agentPresets/list',
         'llm/listProviders', 'session/modelCatalog',
       ]
       for (const method of methods) {

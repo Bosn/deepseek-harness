@@ -7,7 +7,7 @@
  */
 
 import { Buffer } from 'node:buffer'
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { EpochHeader } from '@deepseek-ai/dsh-session'
 
 /** Fixed text-density estimate used until exact tokenization is needed. */
@@ -22,11 +22,16 @@ export const ROLE_OVERHEAD = 4
 /**
  * Structural JSON price of one block outside the typed pricing arms: the
  * fixed heuristic for merge-extended blocks and for image references, whose
- * request price is route-owned rather than fixed.
+ * request price is route-owned rather than fixed. Image offload marks do not
+ * change this reference-only heuristic; route pricing owns their placeholders.
  * @param block - block to price without mutation.
  * @returns heuristic tokens for the block's JSON structure.
  */
 export function estimateStructuralBlock(block: ContentBlock): number {
+  if (block.type === 'image') {
+    const { offloaded: _offloaded, ...reference } = block
+    return BLOCK_OVERHEAD + Math.ceil(JSON.stringify(reference).length / CHARS_PER_TOKEN)
+  }
   return BLOCK_OVERHEAD + Math.ceil(JSON.stringify(block).length / CHARS_PER_TOKEN)
 }
 
@@ -47,9 +52,6 @@ export function estimateContent(blocks: readonly ContentBlock[]): number {
         tokens += Math.ceil(block.name.length / CHARS_PER_TOKEN)
           + Math.ceil(block.arguments.length / CHARS_PER_TOKEN)
           + BLOCK_OVERHEAD
-        break
-      case 'tool-result':
-        tokens += estimateContent(block.content) + BLOCK_OVERHEAD
         break
       default:
         // ContentBlockMap is merge-extensible; unknown blocks (and image
@@ -131,11 +133,6 @@ export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
       case 'tool-call':
         bytes += serializedBytes(block)
         break
-      case 'tool-result': {
-        const emptyContent = serializedBytes({ ...block, content: [] })
-        bytes += emptyContent - 2 + estimateContentBytes(block.content)
-        break
-      }
       case 'image':
         bytes += serializedBytes(block) + Math.ceil(block.attachment.bytes / 3) * 4
         break
@@ -153,7 +150,7 @@ export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
  * @param message - message to price without mutation.
  * @returns content and role-framing bytes under the fixed heuristic.
  */
-export function estimateMessageBytes(message: Message): number {
+export function estimateMessageBytes(message: RequestMessage): number {
   const emptyContent = serializedBytes({ ...message, content: [] })
   return emptyContent - 2 + estimateContentBytes(message.content)
 }

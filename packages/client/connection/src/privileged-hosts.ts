@@ -5,8 +5,8 @@ export const PRIVILEGED_HOSTS_GLOBAL = '__DSH_PRIVILEGED_HOSTS__'
 export interface PageAuthority {
   /** URL hostname, already normalized by the browser. */
   hostname: string
-  /** Explicit URL port, or the empty string when the URL omits it. */
-  port: string
+  /** Explicit URL port, or the empty string when the URL omits it; an omitted field counts as absent. */
+  port?: string
 }
 
 function parseAuthority(authority: string): URL | undefined {
@@ -41,7 +41,7 @@ export function assertTrustedAuthority(entry: string): void {
  * @returns whether one declaration names the page.
  */
 export function isDeclaredAuthority(page: PageAuthority, entries: readonly string[]): boolean {
-  const pageUrl = parseAuthority(page.port === '' ? page.hostname : `${page.hostname}:${page.port}`)
+  const pageUrl = parseAuthority(page.port === undefined || page.port === '' ? page.hostname : `${page.hostname}:${page.port}`)
   if (pageUrl === undefined) return false
   return entries.some((entry) => {
     const entryUrl = parseAuthority(entry)
