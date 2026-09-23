@@ -86,28 +86,6 @@ function assertImageBodyCapacity(ctx: Context, maxRequestBodyBytes: number): voi
   }
 }
 
-/**
- * Derive exact application authorities whose host-scoped cookies can reach a sibling port.
- * @param declaredAuthorities - trusted and privileged application authorities.
- * @param applicationPort - actual application listener port for port-less authorities.
- * @returns canonical application authorities accepted as cookie audiences.
- */
-export function browserApplicationAuthorities(
-  declaredAuthorities: readonly string[],
-  applicationPort: number,
-): readonly string[] {
-  const authorities = new Set([
-    new URL(`http://127.0.0.1:${String(applicationPort)}`).host,
-    new URL(`http://localhost:${String(applicationPort)}`).host,
-  ])
-  for (const authority of declaredAuthorities) {
-    const parsed = new URL(`http://${authority}`)
-    authorities.add(parsed.port === ''
-      ? new URL(`http://${parsed.hostname}:${String(applicationPort)}`).host
-      : parsed.host)
-  }
-  return [...authorities]
-}
 
 /** Services required before providing Connection. */
 export const inject = ['credentials']

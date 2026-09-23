@@ -5,21 +5,15 @@ import {
   estimateHeaderBytes,
   estimateMessageBytes,
 } from '@deepseek-ai/dsh-token-meter'
-import { createMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 
 function serializedBytes(value: object): number {
   return Buffer.byteLength(JSON.stringify(value), 'utf8')
 }
 
-function textMessage(text: string, role: Message['role'] = 'user'): Message {
-  return createMessage({
-    role,
-    content: [{ type: 'text', text }],
-    source: role === 'assistant'
-      ? { kind: 'model', provider: 'mock', model: 'mock' }
-      : { kind: 'user' },
-  })
+function textMessage(text: string): Message {
+  return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
 }
 
 describe('byte-priced estimation (gateway request-size pressure)', () => {
@@ -29,16 +23,22 @@ describe('byte-priced estimation (gateway request-size pressure)', () => {
     expect(estimateMessageBytes(textMessage('中文文本'))).toBe(serializedBytes(textMessage('中文文本')))
   })
 
-  it('prices tool-call blocks on name and arguments bytes plus nested results', () => {
+  it('prices tool-call blocks on name and arguments bytes plus tool-result messages', () => {
     const message = createMessage({
       role: 'assistant',
       content: [
         { type: 'tool-call', id: ToolCallId('c1'), name: 'work', arguments: '{"i":1}' },
-        { type: 'tool-result', toolCallId: ToolCallId('c1'), content: [{ type: 'text', text: '出' }], isError: false },
       ],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     })
     expect(estimateMessageBytes(message)).toBe(serializedBytes(message))
+
+    const result = createToolResultMessage({
+      callId: ToolCallId('c1'),
+      content: [{ type: 'text', text: '出' }],
+      isError: false,
+    })
+    expect(estimateMessageBytes(result)).toBe(serializedBytes(result))
 
     const argumentsText = JSON.stringify({ quoted: '"'.repeat(2_000), path: '\\'.repeat(2_000) })
     const escapedArguments = createMessage({

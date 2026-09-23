@@ -125,7 +125,7 @@ function mount(overrides: Partial<WorkspaceBrowserProps> = {}) {
     insertWorkspaceBefore: vi.fn(async () => {}),
     createWorkspace: vi.fn(async () => workspace('created', [])),
     useDirectoryFlow: bindSnapshotSelector({ getSnapshot: () => true, subscribe: () => () => {} }),
-    useHostInfo: selector => selector({ home: undefined, isLoopback: true }),
+    useHostInfo: selector => selector({ home: undefined, isLoopback: true, canUseHostConfiguration: true }),
     renderSlot: renderDirectoryFlowOnly,
     t,
     ...overrides,
@@ -276,7 +276,7 @@ describe('WorkspaceBrowser', () => {
           path: '/home/u/Documents/project',
           title: 'Project',
         }])),
-        useHostInfo: selector => selector({ home: '/home/u', isLoopback: true }),
+        useHostInfo: selector => selector({ home: '/home/u', isLoopback: true, canUseHostConfiguration: true }),
       })
       fireEvent.pointerEnter(screen.getByRole('treeitem').parentElement as HTMLElement)
       act(() => { vi.advanceTimersByTime(800) })

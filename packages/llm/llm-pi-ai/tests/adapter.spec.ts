@@ -384,7 +384,7 @@ describe('PiAiAdapter provider routing', () => {
       model: 'gpt-4.1',
       messages: [createUserMessage({
         content: [{ type: 'image', attachment: ref }],
-        source: { kind: 'plugin', plugin: 'test' },
+        source: { kind: 'user' },
       })],
     })
 

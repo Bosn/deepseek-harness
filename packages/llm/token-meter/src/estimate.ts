@@ -7,7 +7,7 @@
  */
 
 import { Buffer } from 'node:buffer'
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { EpochHeader } from '@deepseek-ai/dsh-session'
 
 /** Fixed text-density estimate used until exact tokenization is needed. */
@@ -133,11 +133,6 @@ export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
       case 'tool-call':
         bytes += serializedBytes(block)
         break
-      case 'tool-result': {
-        const emptyContent = serializedBytes({ ...block, content: [] })
-        bytes += emptyContent - 2 + estimateContentBytes(block.content)
-        break
-      }
       case 'image':
         bytes += serializedBytes(block) + Math.ceil(block.attachment.bytes / 3) * 4
         break
@@ -155,7 +150,7 @@ export function estimateContentBytes(blocks: readonly ContentBlock[]): number {
  * @param message - message to price without mutation.
  * @returns content and role-framing bytes under the fixed heuristic.
  */
-export function estimateMessageBytes(message: Message): number {
+export function estimateMessageBytes(message: RequestMessage): number {
   const emptyContent = serializedBytes({ ...message, content: [] })
   return emptyContent - 2 + estimateContentBytes(message.content)
 }

@@ -8,7 +8,6 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
-import type { TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { estimateHeaderBytes, estimateMessageBytes } from '@deepseek-ai/dsh-token-meter'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
@@ -431,7 +430,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         + 'configure contextWindow on that adapter model',
       )
     }
-const spec = resolveCompactSpec(
+    const spec = resolveCompactSpec(
       policy,
       info.context.contextWindow,
       reservedCompletionTokens(agent, info.defaultMaxTokens),

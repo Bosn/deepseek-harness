@@ -374,6 +374,7 @@ async function runCompactionTransaction(
       compactionId,
       options.sourceCommandId,
       assertStable,
+      options.summarizationInputBytes,
       signal,
     )
     if (options.owner === null) signal?.throwIfAborted()
@@ -547,6 +548,7 @@ async function summarizeCompaction(
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
   assertStable: StabilityCheck,
+  summarizationInputBytes: number | undefined,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
   let summaryResult: SummaryResult
@@ -560,7 +562,7 @@ async function summarizeCompaction(
       assertStable(dependencies, agent.session, prepared)
       if (!dependencies.recover(error, agent, prepared.shadowedSeqs, signal)) throw error
       prepared = prepareCompaction(dependencies, agent.session,
-        validateSurfaceRegion(agent.session, prepared.start, prepared.end))
+        validateSurfaceRegion(agent.session, prepared.start, prepared.end), summarizationInputBytes)
     }
   }
   const checkpointMessage = createUserMessage({

@@ -1,6 +1,6 @@
 /** Translate Messages events while preserving block order and cumulative usage. */
 
-import { LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CONTENT_FILTERED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { object, replayState } from './replay.ts'
 import type { ReplayBlock } from './replay.ts'
@@ -92,6 +92,14 @@ function stopReason(raw: unknown): FinishReason {
     case 'end_turn': case 'stop_sequence': return { kind: 'stop' }
     case 'tool_use': return { kind: 'tool-calls' }
     case 'max_tokens': return { kind: 'max-tokens' }
+    // A moderation stop reason rejects one sampled response, not the request
+    // shape, so it carries the canonical retryable `CONTENT_FILTERED` code the
+    // pi-ai adapter names for the same condition. Gateways fronting this wire
+    // may echo the OpenAI-style `content_filter` value.
+    case 'refusal': case 'content_filter': return {
+      kind: 'error',
+      failure: { message: `model stopped: ${raw}`, code: CONTENT_FILTERED_CODE },
+    }
     default: return malformed(`unsupported stop reason ${String(raw)}`)
   }
 }

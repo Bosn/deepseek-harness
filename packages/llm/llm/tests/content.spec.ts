@@ -407,27 +407,22 @@ describe('offloadRequestImagesUntil', () => {
     expect(offloadRequestImagesUntil(messages, () => true)).toBe(messages)
   })
 
-  it('checks the full request after each oldest nested image replacement', () => {
+  it('checks the full request after each oldest image replacement across message roles', () => {
     const shared = image(300)
     const messages = [
-      createUserMessage({
-        content: [{ type: 'tool-result', toolCallId: ToolCallId('shot'), content: [shared] }],
-        source,
-      }),
+      createToolResultMessage({ callId: ToolCallId('shot'), content: [shared], isError: false }),
       createUserMessage({ content: [shared], source }),
     ]
     let checks = 0
     const fitted = offloadRequestImagesUntil(messages, (candidate) => {
       checks += 1
-      return candidate[0]?.content[0]?.type === 'tool-result'
-        && candidate[0].content[0].content[0]?.type === 'text'
+      return candidate[0]?.content[0]?.type === 'text'
     })
 
     expect(checks).toBe(2)
     expect(fitted[0]?.content).toEqual([{
-      type: 'tool-result',
-      toolCallId: ToolCallId('shot'),
-      content: [{ type: 'text', text: offloadedImageText(shared.attachment) }],
+      type: 'text',
+      text: offloadedImageText(shared.attachment),
     }])
     expect(fitted[1]?.content).toEqual([shared])
   })

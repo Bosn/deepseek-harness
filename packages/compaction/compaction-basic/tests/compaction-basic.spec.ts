@@ -1259,11 +1259,12 @@ describe('compaction region transaction', () => {
     for (const [index, { input }] of compact.calls.entries()) {
       const openCalls = new Set<string>()
       for (const message of input.messages) {
+        if (message.role === 'tool') {
+          expect(openCalls.delete(message.toolCallId)).toBe(true)
+          continue
+        }
         for (const block of message.content) {
           if (block.type === 'tool-call') openCalls.add(block.id)
-          if (block.type === 'tool-result') {
-            expect(openCalls.delete(block.toolCallId)).toBe(true)
-          }
         }
       }
       expect(openCalls).toEqual(new Set())
@@ -1465,7 +1466,7 @@ describe('compaction region transaction', () => {
       .reduce((total, message) => total + ctx.tokenMeter.estimateMessage(message), 0)
     const checkpoint = createUserMessage({
       content: frameSummary(compact.summary),
-      source: { kind: 'plugin', plugin: 'test' },
+      source: { kind: 'test' },
     })
     expect(estimateMessageBytes(checkpoint)).toBeGreaterThan(summarizedInputBytes)
     expect(estimateMessageBytes(checkpoint)).toBeLessThan(durableBytes)
@@ -1650,6 +1651,7 @@ describe('compaction region transaction', () => {
       {
         meter: ctx.tokenMeter,
         summarize: (input, requestAgent, signal) => compact.summarize(input, requestAgent, signal),
+        recover: () => false,
       },
       session,
       nodes[0]!,
@@ -2460,7 +2462,7 @@ describe('automatic listener and loader composition', () => {
       const head = session.surface.nodes[0]!
       session.append('user/message', createUserMessage({
         content: [{ type: 'text', text: 'durable prune replacement' }],
-        source: { kind: 'plugin', plugin: 'test' },
+        source: { kind: 'test' },
       }), {
         surfaceOp: { op: 'replace', startSeq: head, endSeq: head },
         sourceEventSeqs: [head],
@@ -2609,7 +2611,7 @@ describe('automatic listener and loader composition', () => {
       const head = session.surface.nodes[0]!
       session.append('user/message', createUserMessage({
         content: [{ type: 'text', text: 'durable partial recovery' }],
-        source: { kind: 'plugin', plugin: 'test' },
+        source: { kind: 'test' },
       }), {
         surfaceOp: { op: 'replace', startSeq: head, endSeq: head },
         sourceEventSeqs: [head],

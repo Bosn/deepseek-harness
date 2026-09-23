@@ -103,7 +103,6 @@ class SizeGateAdapter extends LlmAdapter {
     this.conversationRequests.push(options)
     const requestBytes = estimateHeaderBytes({
       config: { provider: options.provider, model: options.model },
-      ...options.system === undefined ? {} : { system: options.system },
       ...options.tools === undefined ? {} : { tools: [...options.tools] },
     }) + options.messages.reduce((total, message) => total + estimateMessageBytes(message), 0)
     this.conversationRequestBytes.push(requestBytes)

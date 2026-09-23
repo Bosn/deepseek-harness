@@ -53,7 +53,11 @@ export class DeepSeekAdapter extends LlmAdapter {
     const consumer = new AbortController()
     const signal = options.signal === undefined ? consumer.signal : AbortSignal.any([consumer.signal, options.signal])
     using watchdog = idleWatchdog(signal, connection.streamIdleTimeoutMs, 'MESSAGES_IDLE')
-    const iterator = this.request(options, connection, watchdog.signal, () => { watchdog.pulse() })
+    let requestBytesEstimate: number | undefined
+    const iterator = this.request(
+      options, connection, watchdog.signal, () => { watchdog.pulse() },
+      (estimate) => { requestBytesEstimate = estimate },
+    )
     try {
       while (true) {
         const next = await watchdog.next(iterator)
@@ -61,7 +65,12 @@ export class DeepSeekAdapter extends LlmAdapter {
         yield next.value
       }
     } catch (error) {
-      if (timeoutOf(watchdog.signal, 'MESSAGES_IDLE') !== undefined) throw new LlmError('DeepSeek Messages stream idle timeout', 'TIMEOUT', { cause: error })
+      if (timeoutOf(watchdog.signal, 'MESSAGES_IDLE') !== undefined) {
+        throw new LlmError('DeepSeek Messages stream idle timeout', 'TIMEOUT', {
+          cause: error,
+          ...requestBytesEstimate === undefined ? {} : { requestBytesEstimate },
+        })
+      }
       if (options.signal?.aborted) throw new LlmError('DeepSeek Messages request aborted', 'ABORTED', { cause: error })
       if (error instanceof LlmError) throw error
       throw new LlmError('DeepSeek Messages transport failed', 'TRANSPORT', { cause: error })
@@ -75,6 +84,7 @@ export class DeepSeekAdapter extends LlmAdapter {
 
   private async * request(
     options: GenerateOptions, connection: Connection, signal: AbortSignal, activity: () => void,
+    onRequestSerialized: (requestBytesEstimate: number) => void,
   ): AsyncGenerator<StreamChunk> {
     signal.throwIfAborted()
     const { messages, versions } = await prepareImages(
@@ -110,6 +120,11 @@ export class DeepSeekAdapter extends LlmAdapter {
         ...options.purpose === undefined ? {} : { purpose: options.purpose },
       }, this.dependencies.prepareExtensions)
       signal.throwIfAborted()
+      // The exact serialized request size drives recovery decisions that cannot
+      // be re-derived from the token surface, so every failure of this attempt
+      // carries it.
+      const requestBytesEstimate = new TextEncoder().encode(extensions.payload).byteLength
+      onRequestSerialized(requestBytesEstimate)
       const response = await fetch(`${messagesApiRoot(connection.baseURL)}/messages`, {
         method: 'POST', signal, body: extensions.payload, redirect: 'error',
         headers: {
@@ -131,7 +146,7 @@ export class DeepSeekAdapter extends LlmAdapter {
         }
         const detail = providerErrorDetail(raw)
         if (await files.retry(detail)) continue
-        const failure = providerError(raw, response.status, response.headers)
+        const failure = providerError(raw, response.status, response.headers, requestBytesEstimate)
         const message = files.errorMessage(response.status, failure.message, detail)
         throw new LlmError(message, failure.code, { ...failure.failure, cause: new Error(text) })
       }

@@ -331,6 +331,68 @@ export function requiredImageOffload(
   return offloadedImagePrefixCount(lengths, budget)
 }
 
+/** Collect every image occurrence of one content list in request order. */
+function collectImageBlocks(content: readonly ContentBlock[], images: ImageBlock[]): void {
+  for (const block of content) {
+    if (block.type === 'image') images.push(block)
+  }
+}
+
+/** Replace the first `remaining.count` image occurrences without mutating durable messages. */
+function replaceOldestImages(
+  blocks: readonly ContentBlock[],
+  remaining: { count: number },
+): ContentBlock[] {
+  let next: ContentBlock[] | undefined
+  for (const [index, block] of blocks.entries()) {
+    if (block.type !== 'image' || remaining.count === 0) {
+      next?.push(block)
+      continue
+    }
+    remaining.count -= 1
+    next ??= blocks.slice(0, index)
+    next.push({ type: 'text', text: offloadedImageText(block.attachment) })
+  }
+  return next ?? blocks as ContentBlock[]
+}
+
+/** Replace the requested oldest image occurrences across complete message history. */
+function replaceOldestRequestImages(
+  messages: readonly Message[],
+  count: number,
+): readonly Message[] {
+  const remaining = { count }
+  return messages.map((message) => {
+    const content = replaceOldestImages(message.content, remaining)
+    return content === message.content ? message : { ...message, content }
+  })
+}
+
+/**
+ * Replace oldest images one at a time until a consumer's complete-request
+ * predicate accepts the transient messages. The predicate runs first against
+ * the original request, then after each replacement; if even the image-free
+ * projection is rejected, that final projection is returned for the caller to
+ * apply its non-image overflow policy.
+ * @param messages - complete request history, oldest first.
+ * @param fits - pure complete-request predicate over each transient candidate.
+ * @returns the first accepted candidate, the original when already accepted or image-free, or the image-free candidate.
+ */
+export function offloadRequestImagesUntil(
+  messages: readonly Message[],
+  fits: (candidate: readonly Message[]) => boolean,
+): readonly Message[] {
+  if (fits(messages)) return messages
+  const images: ImageBlock[] = []
+  for (const message of messages) collectImageBlocks(message.content, images)
+  let candidate = messages
+  for (let count = 0; count < images.length; count += 1) {
+    candidate = replaceOldestRequestImages(candidate, 1)
+    if (fits(candidate)) return candidate
+  }
+  return candidate
+}
+
 /** Replace every image occurrence for a text-only model. */
 function replaceImagesForTextModel(blocks: readonly ContentBlock[]): ContentBlock[] {
   let next: ContentBlock[] | undefined
