@@ -154,6 +154,16 @@ function snapshot(value: ConversationNodeAssembler): TrajectorySnapshot {
   return current
 }
 
+function assistantMessage(id: string, text: string) {
+  return {
+    id,
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    source: { kind: 'model', provider: 'test', model: 'test' },
+  }
+}
+
+/** One transient live-chunk entry exactly as the session controller appends it. */
 function transientChunk(
   seq: number,
   turn: number,
@@ -172,17 +182,9 @@ function transientChunk(
   }
 }
 
+/** Assistant event node of one Trajectory snapshot, when the view materialized one. */
 function assistantTiming(value: ConversationNodeAssembler): unknown {
   return snapshot(value).eventNodes.find(candidate => candidate.kind === 'assistant')
-}
-
-function assistantMessage(id: string, text: string) {
-  return {
-    id,
-    role: 'assistant',
-    content: [{ type: 'text', text }],
-    source: { kind: 'model', provider: 'test', model: 'test' },
-  }
 }
 
 function systemMessage(text: string) {
@@ -190,11 +192,22 @@ function systemMessage(text: string) {
     id: `system-${text}`,
     role: 'system',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' },
+    source: { kind: 'system-prompt' },
   }
 }
 
 describe('Trajectory conversation Definitions', () => {
+  it('addresses tool-call inspection with the persisted call identity', () => {
+    expect(trajectoryViewDefinition.toolCallFocus?.('call-1')).toBe('call-1')
+  })
+
+  it('rejects developer history until presentation is implemented', () => {
+    expect(() => assembler([at(0, 'developer/message', { turn: 1, step: 1, message: {
+      id: 'developer', role: 'developer', source: { kind: 'tool-registry' },
+      content: [{ type: 'tool-addition', toolName: 'search' }],
+    } }, { surfaceOp: 'append' })])).toThrow('developer messages are not supported yet')
+  })
+
   it('assembles streaming usage, preserves retry facts, and materializes interruption', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),
@@ -258,7 +271,36 @@ describe('Trajectory conversation Definitions', () => {
     }])
   })
 
-  it('reads first-token timing from a settled embedded stream without replaying its members', () => {
+  it('keeps the streamed first-token time when the attempt settles into a durable message', () => {
+    const stepStart = 1_700_000_000_002
+    const firstToken = stepStart + 498
+    const completed = stepStart + 2_558
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+    ])
+    value.append(transientChunk(2.5, 1, 1, { type: 'text-delta', index: 0, text: 'answer' }, firstToken))
+    value.flush()
+    expect(snapshot(value).partial?.blocks).toEqual([{ kind: 'text', text: 'answer' }])
+
+    const settlement = at(3, 'assistant/message', {
+      turn: 1,
+      step: 1,
+      message: assistantMessage('settled', 'answer'),
+      stream: [{ type: 'text-chunks', time0: firstToken, index: 0, dt: [], texts: ['answer'] }],
+      usage: { inputTokens: 10, outputTokens: 2 },
+    }, { time: completed })
+    if (settlement.event.type !== 'assistant/message') throw new Error('expected Assistant settlement')
+    value.settleAssistant(LlmAttemptId('attempt-1'), { type: 'event', event: settlement.event })
+    value.flush()
+
+    // Settlement retires the transient chunks; the node's timing must survive it.
+    expect(assistantTiming(value)).toMatchObject({
+      timing: { stepStartTime: stepStart, firstTokenTime: firstToken, completedTime: completed },
+    })
+  })
+
+  it('uses live Assistant deltas without replaying settled embedded streams', () => {
     const runningHistory = [
       at(1, 'turn/start', { turn: 1 }),
       at(2, 'step/start', { turn: 1, step: 1 }),
@@ -358,12 +400,19 @@ describe('Trajectory conversation Definitions', () => {
     const finalizedPacked = snapshot(assembler(finalizedInputs))
     expect(finalizedPacked.eventNodes.find(node => node.kind === 'assistant')).toMatchObject({
       blocks: [{ kind: 'text', text: 'done' }],
-      timing: { firstTokenTime: 1_700_000_000_028 },
+      timing: { firstTokenTime: 3_000 },
     })
     expect(finalizedPacked.requests).toMatchObject([{
       purpose: 'assistant',
       retry: 1,
     }])
+
+    const windowed = assembler(finalizedInputs.slice(2), true)
+    const assistant = () => snapshot(windowed).eventNodes.find(node => node.kind === 'assistant')
+    expect(assistant()).toMatchObject({ timing: { stepStartTime: null, firstTokenTime: 3_000 } })
+    windowed.prepend(finalizedInputs.slice(0, 2), false)
+    windowed.flush()
+    expect(assistant()).toEqual(finalizedPacked.eventNodes.find(node => node.kind === 'assistant'))
 
     const namedToolHistory = [
       at(40, 'turn/start', { turn: 3 }),
@@ -389,35 +438,6 @@ describe('Trajectory conversation Definitions', () => {
     expect(namedToolPacked.eventNodes.find(node => node.kind === 'assistant')).toMatchObject({
       blocks: [{ kind: 'tool-call', callId: 'call-2', name: 'read', argsRaw: '' }],
       timing: { firstTokenTime: 4_000 },
-    })
-  })
-
-  it('keeps the streamed first-token time when the attempt settles into a durable message', () => {
-    const stepStart = 1_700_000_000_002
-    const firstToken = stepStart + 498
-    const completed = stepStart + 2_558
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'step/start', { turn: 1, step: 1 }),
-    ])
-    value.append(transientChunk(2.5, 1, 1, { type: 'text-delta', index: 0, text: 'answer' }, firstToken))
-    value.flush()
-    expect(snapshot(value).partial?.blocks).toEqual([{ kind: 'text', text: 'answer' }])
-
-    const settlement = at(3, 'assistant/message', {
-      turn: 1,
-      step: 1,
-      message: assistantMessage('settled', 'answer'),
-      stream: [{ type: 'text-chunks', time0: firstToken, index: 0, dt: [], texts: ['answer'] }],
-      usage: { inputTokens: 10, outputTokens: 2 },
-    }, { time: completed })
-    if (settlement.event.type !== 'assistant/message') throw new Error('expected Assistant settlement')
-    value.settleAssistant(LlmAttemptId('attempt-1'), { type: 'event', event: settlement.event })
-    value.flush()
-
-    // Settlement retires the transient chunks; the node's timing must survive it.
-    expect(assistantTiming(value)).toMatchObject({
-      timing: { stepStartTime: stepStart, firstTokenTime: firstToken, completedTime: completed },
     })
   })
 
@@ -449,11 +469,16 @@ describe('Trajectory conversation Definitions', () => {
       purpose: 'assistant',
       resultSeq: 3,
       status: 'error',
-      provenance: { provider: 'test', model: 'test' },
+      providerMetadata: { provider: 'test', model: 'test' },
     }])
   })
 
   it('keeps parallel roots, raw Tool facts, and mixed-ID PTC dispatch results', () => {
+    const error = {
+      name: 'AutoReviewDeniedError',
+      code: 'AUTO_REVIEW_DENIED',
+      reason: ' raw\r\nreason ',
+    }
     const current = snapshot(assembler([
       at(1, 'turn/start', { turn: 1 }),
       at(2, 'step/start', { turn: 1, step: 1 }),
@@ -485,21 +510,18 @@ describe('Trajectory conversation Definitions', () => {
       at(8, 'tool/ptc-dispatch', {
         rootCallId: 'root-a', parentCallId: 'root-b:code:1', subCallId: 'root-b:ptc:2',
         name: 'read', arguments: { file_path: 'nested.txt' },
-        isError: false, content: [{ type: 'text', text: 'nested contents' }],
+        isError: true, error, content: [{ type: 'text', text: 'not executed' }],
       }),
       at(9, 'tool/result', {
         turn: 1,
         step: 1,
         message: {
           id: 'result-root-a',
-          role: 'user',
+          role: 'tool',
+          toolCallId: 'root-a',
           source: { kind: 'tool', callId: 'root-a' },
-          content: [{
-            type: 'tool-result',
-            toolCallId: 'root-a',
-            content: [{ type: 'text', text: 'root failed' }],
-            isError: true,
-          }],
+          content: [{ type: 'text', text: 'root failed' }],
+          isError: true,
         },
         error: { name: 'ToolError', code: 'failed' },
         meta: { presentation: 'raw' },
@@ -521,7 +543,8 @@ describe('Trajectory conversation Definitions', () => {
         kind: 'tool-result', callId: 'root-b:code:1', parentCallId: 'root-a', call: { name: 'read' },
         subCalls: [{
           kind: 'tool-result', callId: 'root-b:ptc:2', parentCallId: 'root-b:code:1',
-          callTime: 1_700_000_000_007, content: [{ type: 'text', text: 'nested contents' }], subCalls: [],
+          callTime: 1_700_000_000_007, content: [{ type: 'text', text: 'not executed' }],
+          isError: true, error, subCalls: [],
         }],
       }],
     })
@@ -548,7 +571,7 @@ describe('Trajectory conversation Definitions', () => {
         id: 'checkpoint',
         role: 'user',
         content: [{ type: 'text', text: 'summary checkpoint' }],
-        source: { kind: 'plugin', plugin: 'compact', compactionId: 'complete' },
+        source: { kind: 'compact-checkpoint', compactionId: 'complete' },
       }),
       at(4, 'compaction/end', { compactionId: 'complete', turn: null }),
       at(5, 'compaction/start', { compactionId: 'orphan', turn: null }),
@@ -841,7 +864,7 @@ describe('Trajectory conversation Definitions', () => {
       at(11, 'step/start', { turn: 1, step: 3 }),
       at(12, 'user/message', {
         turn: 1, step: 3, id: 'summary', role: 'user',
-        content: [{ type: 'text', text: 'summary' }], source: { kind: 'plugin', plugin: 'compaction' },
+        content: [{ type: 'text', text: 'summary' }], source: { kind: 'compact-checkpoint', compactionId: 'compaction-1' },
       }, { surfaceOp: { op: 'replace', startSeq: 5, endSeq: 9 }, sourceEventSeqs: [5, 8, 9] }),
       at(13, 'request/header', {
         reason: 'series', header: { config: { provider: 'test', model: 'test' }, tools: [] },
@@ -894,7 +917,7 @@ describe('Trajectory conversation Definitions', () => {
       at(6, 'system/message', { turn: 1, step: 1, message: systemMessage('B') }, { surfaceOp: 'append' }),
       at(7, 'request/header', { reason: 'resume', header: { config: { provider: 'test', model: 'test' } } }),
       at(8, 'user/message', {
-        ...systemMessage('summary'), role: 'user', source: { kind: 'plugin', plugin: 'compaction' },
+        ...systemMessage('summary'), role: 'user', source: { kind: 'compact-checkpoint', compactionId: 'compaction-1' },
       }, { surfaceOp: { op: 'replace', startSeq: 2, endSeq: 6 } }),
       at(9, 'assistant/message', { turn: 1, step: 1, message: assistantMessage('reply', 'reply') }),
     ])

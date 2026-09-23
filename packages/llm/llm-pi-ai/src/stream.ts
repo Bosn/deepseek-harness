@@ -11,7 +11,7 @@
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { CONTENT_FILTERED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, isContextWindowExceededError, isQuotaExceededError, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, LlmFailure, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import { isContextOverflow } from '@earendil-works/pi-ai'
+import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
 
@@ -225,9 +225,9 @@ export function mapStopReason(
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
  * @param callerSignal - caller cancellation state; an aborted caller makes any
  *   in-band terminal error an aborted finish.
- * @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
+* @param requestBytesEstimate - UTF-8 bytes in the converted pi-ai request content.
  * @param quotaWorded429IsRateLimit - whether this route uses quota wording for transient HTTP 429 throttling.
- * @param requestedModel - request model identity for durable replay provenance.
+ * @param requestedModel - request model identity recorded for durable replay.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */
