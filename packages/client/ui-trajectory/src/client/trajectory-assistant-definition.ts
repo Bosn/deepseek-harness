@@ -214,7 +214,6 @@ function settleMessage(
     sawChunk: false,
     blocks,
     visibleBlocks: countVisibleBlocks(blocks),
-    firstTokenTime: state.firstTokenTime ?? assistantStreamFirstTokenTime(event.data.stream),
     final: match,
     usage: event.data.usage,
   }

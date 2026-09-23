@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it } from 'vitest'
 import type {
-  SessionEventLikeEntry, SessionLiveEventEntry, SessionTransientEventEntry,
+  SessionEventLikeEntry, SessionLiveEventEntry,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
   ConversationNodeDefinition, ConversationViewDefinition,
@@ -10,7 +10,6 @@ import { ConversationNodeAssembler, inspectRequestPrompt } from '@deepseek-ai/ds
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
 import { inspectSystemPrompt } from '../../ui-conversation/src/client/contract/system-prompt.ts'
 import { AssistantStreamAccumulator } from '@deepseek-ai/dsh-llm/assistant-stream'
-import { LlmAttemptId } from '@deepseek-ai/dsh-llm/brand'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { registerTrajectoryAssistantDefinition } from '../src/client/trajectory-assistant-definition.ts'
 import { registerTrajectoryCompactionDefinitions } from '../src/client/trajectory-compaction-definition.ts'
@@ -163,30 +162,6 @@ function assistantMessage(id: string, text: string) {
   }
 }
 
-/** One transient live-chunk entry exactly as the session controller appends it. */
-function transientChunk(
-  seq: number,
-  turn: number,
-  step: number,
-  chunk: StreamChunk,
-  time: number,
-): SessionTransientEventEntry {
-  return {
-    type: 'transient',
-    event: {
-      type: 'assistant/live-chunk',
-      seq,
-      time,
-      data: { attemptId: LlmAttemptId('attempt-1'), turn, step, chunk },
-    },
-  }
-}
-
-/** Assistant event node of one Trajectory snapshot, when the view materialized one. */
-function assistantTiming(value: ConversationNodeAssembler): unknown {
-  return snapshot(value).eventNodes.find(candidate => candidate.kind === 'assistant')
-}
-
 function systemMessage(text: string) {
   return {
     id: `system-${text}`,
@@ -269,35 +244,6 @@ describe('Trajectory conversation Definitions', () => {
       retryDelayMs: 25,
       usage: { inputTokens: 10, outputTokens: 3 },
     }])
-  })
-
-  it('keeps the streamed first-token time when the attempt settles into a durable message', () => {
-    const stepStart = 1_700_000_000_002
-    const firstToken = stepStart + 498
-    const completed = stepStart + 2_558
-    const value = assembler([
-      at(1, 'turn/start', { turn: 1 }),
-      at(2, 'step/start', { turn: 1, step: 1 }),
-    ])
-    value.append(transientChunk(2.5, 1, 1, { type: 'text-delta', index: 0, text: 'answer' }, firstToken))
-    value.flush()
-    expect(snapshot(value).partial?.blocks).toEqual([{ kind: 'text', text: 'answer' }])
-
-    const settlement = at(3, 'assistant/message', {
-      turn: 1,
-      step: 1,
-      message: assistantMessage('settled', 'answer'),
-      stream: [{ type: 'text-chunks', time0: firstToken, index: 0, dt: [], texts: ['answer'] }],
-      usage: { inputTokens: 10, outputTokens: 2 },
-    }, { time: completed })
-    if (settlement.event.type !== 'assistant/message') throw new Error('expected Assistant settlement')
-    value.settleAssistant(LlmAttemptId('attempt-1'), { type: 'event', event: settlement.event })
-    value.flush()
-
-    // Settlement retires the transient chunks; the node's timing must survive it.
-    expect(assistantTiming(value)).toMatchObject({
-      timing: { stepStartTime: stepStart, firstTokenTime: firstToken, completedTime: completed },
-    })
   })
 
   it('uses live Assistant deltas without replaying settled embedded streams', () => {
