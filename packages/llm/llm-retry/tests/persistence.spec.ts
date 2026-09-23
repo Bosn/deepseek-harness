@@ -41,7 +41,7 @@ describe('JSONL retry-event persistence', () => {
         step: 1,
         provider: 'mock',
         mode: 'always',
-        policyKey: '["always",500,10000,0.1,[60000,180000,300000]]',
+        policyKey: '["always",500,10000,0.1]',
         retry: 1,
         delayMs: 750,
         failure: { message: 'provider busy', code: 'RATE_LIMIT', status: 429 },
