@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-29-generation-scoped-client-inspect-sync.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-29-generation-scoped-client-inspect-sync.md
-2026-08-29-generation-scoped-client-inspect-sync.md: b56080d2150de2e95663271188450d3b5780fff0
-2026-08-29-generation-scoped-client-inspect-sync.zh.md: c01116f70be4becd8bd2ab9c7922cda0d2467970
+/agent-note-generation-scoped-client-inspect-synchronization:
+  en: 7d656174eb386a40
+  zh: 11c42b8125943f7a
+/agent-note-generation-scoped-client-inspect-synchronization/problem:
+  en: 8d164826e14b1e86
+  zh: 61c6e5a61f8da610
+/agent-note-generation-scoped-client-inspect-synchronization/decision:
+  en: 7e3d7c9776e5e351
+  zh: 98574f234fa5bcde
+/agent-note-generation-scoped-client-inspect-synchronization/alternatives-considered:
+  en: 2db982ca367755a9
+  zh: 3f22f5866f805cdb
+/agent-note-generation-scoped-client-inspect-synchronization/verification:
+  en: 00d63caf98e0bb03
+  zh: c89db7209d3c1a65
+/agent-note-generation-scoped-client-inspect-synchronization/consequences:
+  en: 39188158603b184d
+  zh: 1f5338fa71b633a8
+/agent-note-generation-scoped-client-inspect-synchronization/supersession-audit:
+  en: 1156ecff614f1845
+  zh: 326519882c1ad15c

@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-30-boagents-maintenance-reporting.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-30-boagents-maintenance-reporting.md
-2026-08-30-boagents-maintenance-reporting.md: f05079deb813ffd781eea15ebb80c6fbc56be277
-2026-08-30-boagents-maintenance-reporting.zh.md: 6ccaf575b13a4803ce29e608751aaa5eaa4e1b88
+/agent-note-top-level-boagents-maintenance-reporting:
+  en: 35767b1f71cdcbd8
+  zh: dc56647ee42efc20
+/agent-note-top-level-boagents-maintenance-reporting/problem:
+  en: 5e0165a554507f78
+  zh: e60e529778e7c27e
+/agent-note-top-level-boagents-maintenance-reporting/decision:
+  en: 5a80b58d60b15f4b
+  zh: 6162b7e9dab3af58
+/agent-note-top-level-boagents-maintenance-reporting/alternatives-considered:
+  en: a70919bb319ee2c3
+  zh: c6b0398137b574f5
+/agent-note-top-level-boagents-maintenance-reporting/consequences:
+  en: 147199ad226e1ea9
+  zh: 31beec7ac6b6c49e

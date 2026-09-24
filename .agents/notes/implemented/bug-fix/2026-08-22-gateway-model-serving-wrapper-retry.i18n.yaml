@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-22-gateway-model-serving-wrapper-retry.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-22-gateway-model-serving-wrapper-retry.md
-2026-08-22-gateway-model-serving-wrapper-retry.md: 0611a142a399682d8fa6a174db206efeddd0797a
-2026-08-22-gateway-model-serving-wrapper-retry.zh.md: d4bbbb68771cd066ba4eb9b7fa488dc647967f9d
+/agent-note-retry-gateway-model-serving-wrapper-failures:
+  en: 9468e0da2c942d38
+  zh: 620dc505807ec14d
+/agent-note-retry-gateway-model-serving-wrapper-failures/problem:
+  en: 6331446f7ae25c7b
+  zh: f16910dc0baf584d
+/agent-note-retry-gateway-model-serving-wrapper-failures/decision:
+  en: 3e3690ccb020ca58
+  zh: 3b146583084fcc7c
+/agent-note-retry-gateway-model-serving-wrapper-failures/alternatives-considered:
+  en: b0dd8ed9bafbc04a
+  zh: c0efa219018eebb2
+/agent-note-retry-gateway-model-serving-wrapper-failures/verification:
+  en: 1bd1987be79bdc16
+  zh: b50dad3e52f00476
+/agent-note-retry-gateway-model-serving-wrapper-failures/consequences:
+  en: bc2065b5d7e903e8
+  zh: f435bb8993870e4d

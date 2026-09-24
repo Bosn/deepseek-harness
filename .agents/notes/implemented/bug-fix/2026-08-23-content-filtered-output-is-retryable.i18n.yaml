@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-23-content-filtered-output-is-retryable.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-23-content-filtered-output-is-retryable.md
-2026-08-23-content-filtered-output-is-retryable.md: 04f748f22fe0730c79cc537f4c4e7b4bd61bcf77
-2026-08-23-content-filtered-output-is-retryable.zh.md: 566f42a45cfcac51b9698817c84db64632b43e0c
+/agent-note-content-filtered-outputs-are-retryable-content-filtered-failures:
+  en: 3036900dd4c0938e
+  zh: 47e1192f49e0303f
+/agent-note-content-filtered-outputs-are-retryable-content-filtered-failures/problem:
+  en: 9f91139484b928f9
+  zh: e59b4e1dfbc1e4aa
+/agent-note-content-filtered-outputs-are-retryable-content-filtered-failures/decision:
+  en: 83fb8dc56f26046a
+  zh: ddafe81901d85618
+/agent-note-content-filtered-outputs-are-retryable-content-filtered-failures/alternatives-considered:
+  en: 3c82371e55b7da44
+  zh: 88b8f2ba2d295d83
+/agent-note-content-filtered-outputs-are-retryable-content-filtered-failures/consequences:
+  en: 78238222f7b770aa
+  zh: 2a3ffc24f43210e7

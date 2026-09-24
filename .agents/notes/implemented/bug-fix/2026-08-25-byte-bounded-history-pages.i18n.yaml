@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-25-byte-bounded-history-pages.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-25-byte-bounded-history-pages.md
-2026-08-25-byte-bounded-history-pages.md: b3eb4eab441c40f5b93967b4d6da3fb594b27336
-2026-08-25-byte-bounded-history-pages.zh.md: e23786d2ac8c972a280cefce0ee1a7598aff9298
+/agent-note-byte-bounded-history-pages:
+  en: 2c35b95a7a59ee0c
+  zh: 37a7b028e0c7fb64
+/agent-note-byte-bounded-history-pages/problem:
+  en: 5e0d264ddfb0d9d0
+  zh: f58990e634b4986d
+/agent-note-byte-bounded-history-pages/decision:
+  en: 25cded22369bfde8
+  zh: bdd5b780349a1758
+/agent-note-byte-bounded-history-pages/alternatives-considered:
+  en: e21b3e3f704ea22b
+  zh: 9799bfe38de1e7d7
+/agent-note-byte-bounded-history-pages/verification:
+  en: 7d1e5429d2743ddf
+  zh: ee64a890ada7959d
+/agent-note-byte-bounded-history-pages/consequences:
+  en: 0d275bd866af6b08
+  zh: be00cb3f3d539d76
+/agent-note-byte-bounded-history-pages/supersession-audit:
+  en: c927578a30e62f0f
+  zh: 036b3ba8947486c2

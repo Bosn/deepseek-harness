@@ -1,6 +1,31 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-07-10-after-call-compaction-pressure-and-overflow-recovery.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-07-10-after-call-compaction-pressure-and-overflow-recovery.md
-2026-07-10-after-call-compaction-pressure-and-overflow-recovery.md: 57defd1715759e67e496762031204c8b99c0fc12
-2026-07-10-after-call-compaction-pressure-and-overflow-recovery.zh.md: 55a5edf7e00d15e8334ed80f20c128aa847a504b
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery:
+  en: 222ec39368eceda7
+  zh: d0f312b0cd9630fb
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/problem:
+  en: 036da3e545debe29
+  zh: 82e031a3120ca36c
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/decision:
+  en: a15c7c13f167e5ac
+  zh: 63bcc2ef60c2f344
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/decision/successful-pressure-runs-at-the-next-pre-step-boundary:
+  en: 5f5a656b38730ec6
+  zh: aece66b85cc610cf
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/decision/request-recovery-is-limited-to-the-final-model-boundary:
+  en: 2b6fb44c759cd83b
+  zh: ac0d230fd0184bc1
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/decision/compactionengine-exposes-intent-not-token-accounting:
+  en: be8268b71cdf8f01
+  zh: 2522585111bf7446
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/testing:
+  en: cc75b0bbf5327b94
+  zh: 7c2190a8cc00f361
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/alternatives-considered:
+  en: b5322df60b220499
+  zh: 1c022865114da321
+/agent-note-after-call-compaction-pressure-and-failed-request-recovery/consequences:
+  en: f6f120fd5d32e0d1
+  zh: 5f3e2659d645516c

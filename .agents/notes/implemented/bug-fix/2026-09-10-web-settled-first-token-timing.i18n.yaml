@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-10-web-settled-first-token-timing.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-10-web-settled-first-token-timing.md
-2026-09-10-web-settled-first-token-timing.md: 0f563b1d2697a24dba8fc7826b4e73c8c9144e30
-2026-09-10-web-settled-first-token-timing.zh.md: 84a11cb03983274cd181a427c3726d7d3f16093d
+/agent-note-restore-first-token-timing-on-settled-web-assistant-records:
+  en: 956b45c36a846cda
+  zh: 0d13d07d0d252061
+/agent-note-restore-first-token-timing-on-settled-web-assistant-records/problem:
+  en: b31ec8a8c3a7d5c5
+  zh: 54928361bc8e56e1
+/agent-note-restore-first-token-timing-on-settled-web-assistant-records/decision:
+  en: 48b7fe6102e40622
+  zh: 9eef610f5ba12ef1
+/agent-note-restore-first-token-timing-on-settled-web-assistant-records/verification:
+  en: c56331d7ff742db2
+  zh: 0fb39f086986d00f
+/agent-note-restore-first-token-timing-on-settled-web-assistant-records/alternatives-considered:
+  en: 267dafcf902efe81
+  zh: a2c9e0e084c64748
+/agent-note-restore-first-token-timing-on-settled-web-assistant-records/consequences:
+  en: ac4ff23e4bb48fd8
+  zh: 47b5f3e42b8f9d2a

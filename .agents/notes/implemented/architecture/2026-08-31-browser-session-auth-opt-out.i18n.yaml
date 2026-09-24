@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-31-browser-session-auth-opt-out.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-31-browser-session-auth-opt-out.md
-2026-08-31-browser-session-auth-opt-out.md: dcea7cfce0a879c92f9cd2ad3124d03fb074bbf3
-2026-08-31-browser-session-auth-opt-out.zh.md: 6191a2622729e6758acc98d10549af764e320b0b
+/agent-note-deployment-browser-session-authentication-opt-out:
+  en: 959cde196c11cd90
+  zh: 79e9a9df8e3e0326
+/agent-note-deployment-browser-session-authentication-opt-out/problem:
+  en: 635d94fc3c9475ae
+  zh: 732e60cd55c89c01
+/agent-note-deployment-browser-session-authentication-opt-out/decision:
+  en: a36cf865156b353f
+  zh: 2671cef301dcfab7
+/agent-note-deployment-browser-session-authentication-opt-out/verification:
+  en: 0badafb923fc7cdb
+  zh: 6ec89598fb1fa4af
+/agent-note-deployment-browser-session-authentication-opt-out/alternatives-considered:
+  en: cbf8542581dbfd8c
+  zh: c93dee38c363fd42
+/agent-note-deployment-browser-session-authentication-opt-out/consequences:
+  en: 601dd1cd3b37f59e
+  zh: 74d8fe7543930afe

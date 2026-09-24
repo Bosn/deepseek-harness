@@ -1,6 +1,49 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/session/turn-notify-wechat/README.md
-README.md: 4f8c373f69450d35c231e6d1a70d930c46ff4f8b
-README.zh.md: a93a69f86a7f3ffbf1d3592ae62b6180f5a17d34
+/:
+  en: 85e5b55f50c590c5
+  zh: 949223799f79b23b
+/deepseek-ai-dsh-turn-notify-wechat:
+  en: 0ccb0aa06ba2cbd5
+  zh: 492de18c7674df30
+/deepseek-ai-dsh-turn-notify-wechat/summary:
+  en: 8a050d80dbc9e4bd
+  zh: efe9b9b1e3427d9d
+/deepseek-ai-dsh-turn-notify-wechat/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-turn-notify-wechat/use-this-package:
+  en: 567d3a2a459cbcbc
+  zh: 6e0912f808a5192c
+/deepseek-ai-dsh-turn-notify-wechat/use-this-package/when-to-choose-it:
+  en: 13644a6853182ef7
+  zh: 71562c44d41ccd05
+/deepseek-ai-dsh-turn-notify-wechat/use-this-package/notice-content:
+  en: e784e4812bb737e5
+  zh: e0403786bb12e831
+/deepseek-ai-dsh-turn-notify-wechat/use-this-package/minimal-configuration:
+  en: 7bae0603b1bc83a2
+  zh: 514f444138ba5deb
+/deepseek-ai-dsh-turn-notify-wechat/understand-the-implementation:
+  en: 243aa7179161583b
+  zh: 44ebff5c92f7b053
+/deepseek-ai-dsh-turn-notify-wechat/understand-the-implementation/source-map:
+  en: 0cb9817109f0a7bb
+  zh: 2037d1d9e9cb074b
+/deepseek-ai-dsh-turn-notify-wechat/further-exploration:
+  en: 3eb6c2613f84cca9
+  zh: 385882da0bb55222
+/deepseek-ai-dsh-turn-notify-wechat/model-experience:
+  en: 83d55581df63fbbb
+  zh: db058fd93c5967ae
+/deepseek-ai-dsh-turn-notify-wechat/model-experience/kv-cache-effect:
+  en: e81e79512ae0c72d
+  zh: 9e06e675599ed072
+/deepseek-ai-dsh-turn-notify-wechat/known-limitations-and-deferred-work:
+  en: b2deb19680f63d22
+  zh: 3dfa126246dcef55
+/deepseek-ai-dsh-turn-notify-wechat/known-limitations-and-deferred-work/dev-note:
+  en: e67f633dc6fe7773
+  zh: 3bb0c20c93f16f98
