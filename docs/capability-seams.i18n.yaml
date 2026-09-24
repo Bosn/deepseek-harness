@@ -1,6 +1,10 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for capability-seams.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/capability-seams.md
-capability-seams.md: efff7c4b5827bd95c1f96dd9bd50305d43e646d3
-capability-seams.zh.md: 27990e271e05be941a9d1304c5d037c72c6cec74
+/:
+  en: 41d772192075e133
+  zh: 5ef3da69b4de1d8a
+/capability-seams-and-core-services:
+  en: 7061b83e4d0a7464
+  zh: 8e6a01ad00206e5b

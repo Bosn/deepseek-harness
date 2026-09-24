@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
-#   pnpm run verify-translation-pairing --write 2026-08-21-request-size-timeout-recovery.md
-2026-08-21-request-size-timeout-recovery.md: 80fe0db62ef6d88aeaccf0adda8c0a3c5d09092a
-2026-08-21-request-size-timeout-recovery.zh.md: af1143f7258edcb9b317b63affc7234f2a34b76c
+# Bilingual-pair consistency record for 2026-08-21-request-size-timeout-recovery.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-21-request-size-timeout-recovery.md
+/agent-note-bound-request-size-and-stalled-stream-recovery:
+  en: 273c870ba104932f
+  zh: 82d5954e29cf75ad
+/agent-note-bound-request-size-and-stalled-stream-recovery/problem:
+  en: fcaccd5beb2df38f
+  zh: 1b85c970b2096b84
+/agent-note-bound-request-size-and-stalled-stream-recovery/decision:
+  en: 13789775e9c953b2
+  zh: 468bf3e7985d040a
+/agent-note-bound-request-size-and-stalled-stream-recovery/alternatives-considered:
+  en: 3fa204ec068e055c
+  zh: cd993ed461d6d8b0
+/agent-note-bound-request-size-and-stalled-stream-recovery/verification:
+  en: a2f96f2c32dfbe62
+  zh: 0a4464adac1cc3e9
+/agent-note-bound-request-size-and-stalled-stream-recovery/supersession-audit:
+  en: 0b0afd9a52618132
+  zh: aa53956afd3682d4
+/agent-note-bound-request-size-and-stalled-stream-recovery/consequences:
+  en: 5ced99a2012e8418
+  zh: 9b3b7033e232675f

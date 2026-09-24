@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-29-deployment-declared-privileged-browser-authority.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-29-deployment-declared-privileged-browser-authority.md
-2026-08-29-deployment-declared-privileged-browser-authority.md: b134116ab4c5d71bbd7f9fd9ab905836455b7bbd
-2026-08-29-deployment-declared-privileged-browser-authority.zh.md: fc01df691def2d4775db4597683791901cb594a6
+/agent-note-deployment-declared-host-configuration-authority:
+  en: 84802b58940a3df6
+  zh: 45f83489a27fb675
+/agent-note-deployment-declared-host-configuration-authority/problem:
+  en: 65025e4a1fec6802
+  zh: 0662f6c6ea211a4f
+/agent-note-deployment-declared-host-configuration-authority/decision:
+  en: 90937272761ad9c1
+  zh: 329ab157d5cad26c
+/agent-note-deployment-declared-host-configuration-authority/alternatives-considered:
+  en: 7d7f5a4a93fdfa5e
+  zh: 6190a71086548207
+/agent-note-deployment-declared-host-configuration-authority/consequences:
+  en: 391acb1890500e56
+  zh: f51db10282bc12fd
