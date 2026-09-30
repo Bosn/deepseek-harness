@@ -1383,7 +1383,9 @@ describe('DeepSeekAdapter against a mock server', () => {
     const result = await assemble(ctx,{ model: 'deepseek-v4-flash', messages: [] })
     expect(result.finish).toEqual({
       kind: 'error',
-      failure: { message: `failed with ${status}`, code, status },
+      // The retained fork plumbing carries the exact serialized request size
+      // on every attempt failure (see providerError in transport.ts).
+      failure: { message: `failed with ${status}`, code, status, requestBytesEstimate: expect.any(Number) },
     })
   })
 
@@ -1438,6 +1440,7 @@ describe('DeepSeekAdapter against a mock server', () => {
         status: 429,
         providerRetryAfterMs: 2_000,
         requestId: ProviderRequestId('req-429'),
+        requestBytesEstimate: expect.any(Number),
       },
     })
   })
@@ -1465,6 +1468,7 @@ describe('DeepSeekAdapter against a mock server', () => {
           status: 503,
           providerRetryAfterMs: 3_000,
           requestId: ProviderRequestId('deepseek-503'),
+          requestBytesEstimate: expect.any(Number),
         },
       })
     } finally {
@@ -1490,7 +1494,7 @@ describe('DeepSeekAdapter against a mock server', () => {
       const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
       expect(result.finish).toEqual({
         kind: 'error',
-        failure: { message: 'retry later', code: 'RATE_LIMIT', status: 429 },
+        failure: { message: 'retry later', code: 'RATE_LIMIT', status: 429, requestBytesEstimate: expect.any(Number) },
       })
     }
   })
@@ -1504,7 +1508,12 @@ describe('DeepSeekAdapter against a mock server', () => {
   })
 
   it('distinguishes terminal quota exhaustion from transient HTTP 429 throttling', () => {
+    // Fork rule: quota wording on a 429 is transient gateway throttling (qwen
+    // Model Studio), so the retry policy owns the wait; quota wording on any
+    // other status (e.g. a 402 insufficient balance) stays terminal.
     expect(providerError({ error: { code: 'insufficient_quota', message: 'account credits exhausted' } }, 429).code)
+      .toBe('RATE_LIMIT')
+    expect(providerError({ error: { code: 'insufficient_quota', message: 'account credits exhausted' } }, 402).code)
       .toBe(QUOTA_EXCEEDED_CODE)
     expect(providerError({ error: { message: 'request rate limit exceeded' } }, 429).code).toBe('RATE_LIMIT')
   })
