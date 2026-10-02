@@ -35,6 +35,7 @@ interface Invocation {
   }
   callback: (error: ExecError | null, stdout: string) => void
   settled: boolean
+  stdin?: string
 }
 
 interface MountedPlugin {
@@ -83,7 +84,7 @@ beforeEach(async () => {
       settled: false,
     }
     invocations.push(invocation)
-    return undefined
+    return { stdin: { end(value: string) { invocation.stdin = value } } }
   })
 })
 
@@ -254,7 +255,79 @@ function succeed(invocation: Invocation, receipt: unknown = {
   invocation.callback(null, JSON.stringify(receipt))
 }
 
+function readOutbox(file: string): { records: Array<{ state: string; attempts: number; messageId?: string }> } {
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
 describe('turn-notify-wechat plugin', () => {
+  it('admits Dot notices through stdin and keeps durable pending distinct from verified callback delivery', async () => {
+    const outboxFile = join(root, 'dot-pending.json')
+    const mounted = await mount('', { transport: 'dot', command: '/owner/bin/dot-notification-send',
+      routeFile: '/unavailable/weixin-route', outboxFile })
+    const session = createSession()
+    mounted.titles.set(session, 'Dot 完成通知')
+    const terminal = emitTurn(mounted, session, 1, [{ type: 'text', text: '已完成合成任务' }])
+    const invocation = advanceToDelivery()
+    expect(invocation.args).toEqual([])
+    expect(JSON.parse(invocation.stdin!)).toMatchObject({ source: 'dsh', kind: 'task-completed',
+      operationKey: expect.stringMatching(/^dsh-turn-dot\/v1\/[a-f0-9]{64}$/u), occurredAt: new Date(terminal.time).toISOString(),
+      body: expect.stringContaining('已完成合成任务') })
+    succeed(invocation, { protocolVersion: 'bo.cloud-klaus-notifications/v1', status: 'pending',
+      notificationId: 'dot-1', eventId: 'event-1', occurredAt: new Date(terminal.time).toISOString(),
+      expiresAt: new Date(terminal.time + 7 * 86_400_000).toISOString(), callbackReceiptAt: null })
+    await vi.runAllTimersAsync()
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'queued-dot', attempts: 1, messageId: 'dot-1' })
+    await mounted.cleanup()
+    invocations = []
+    await mount('', { transport: 'dot', command: '/owner/bin/dot-notification-send', outboxFile })
+    await vi.runAllTimersAsync()
+    expect(invocations).toEqual([])
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'queued-dot' })
+  })
+
+  it('requires a callback receipt for delivered Dot results and never replays ambiguous or expired results', async () => {
+    for (const status of ['delivered', 'unknown', 'failed', 'expired']) {
+      const outboxFile = join(root, `dot-${status}.json`)
+      const mounted = await mount('', { transport: 'dot', outboxFile })
+      const session = createSession()
+      mounted.titles.set(session, '合成 Dot 状态')
+      const terminal = emitTurn(mounted, session, 1, [{ type: 'text', text: '合成任务终态' }])
+      const invocation = advanceToDelivery()
+      succeed(invocation, { protocolVersion: 'bo.cloud-klaus-notifications/v1', status, notificationId: `dot-${status}`,
+        eventId: `event-${status}`, occurredAt: new Date(terminal.time).toISOString(),
+        expiresAt: new Date(terminal.time + 7 * 86_400_000).toISOString(),
+        callbackReceiptAt: status === 'delivered' ? new Date(terminal.time + 1000).toISOString() : null })
+      await vi.runAllTimersAsync()
+      expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: status === 'delivered' ? 'sent' : status, attempts: 1 })
+      await mounted.cleanup()
+      invocations = []
+    }
+    const outboxFile = join(root, 'dot-invalid-delivered.json')
+    const mounted = await mount('', { transport: 'dot', outboxFile })
+    const session = createSession()
+    mounted.titles.set(session, '不能伪造 delivered')
+    emitTurn(mounted, session, 1, [{ type: 'text', text: '合成消息' }])
+    succeed(advanceToDelivery(), { protocolVersion: 'bo.cloud-klaus-notifications/v1', status: 'delivered',
+      notificationId: 'dot-invalid', eventId: 'event-invalid', occurredAt: '2026-10-02T00:00:00Z',
+      expiresAt: '2026-10-09T00:00:00Z', callbackReceiptAt: null })
+    await vi.runAllTimersAsync()
+    expect(readOutbox(outboxFile).records[0]).toMatchObject({ state: 'unknown', attempts: 1 })
+    expect(invocations).toHaveLength(1)
+  })
+
+  it('refuses to read a legacy Weixin outbox as the explicit Dot route', async () => {
+    const outboxFile = join(root, 'legacy-outbox.json')
+    const mounted = await mount(DEFAULT_ROUTE, { outboxFile })
+    const session = createSession()
+    mounted.titles.set(session, '保留旧历史')
+    emitTurn(mounted, session, 1, [{ type: 'text', text: '历史不回放到新路由' }])
+    await mounted.cleanup()
+    const original = readFileSync(outboxFile, 'utf8')
+    await expect(mount('', { transport: 'dot', outboxFile })).rejects.toThrow('unavailable or invalid')
+    expect(readFileSync(outboxFile, 'utf8')).toBe(original)
+    expect(invocations).toEqual([])
+  })
+
   it('parses deployment constants, scrubs the child environment, and detaches before stopping', async () => {
     process.env.DSH_NOTIFY_TEST_TOKEN = 'must-not-cross-process'
     const mounted = await mount([

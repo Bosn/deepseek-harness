@@ -41,10 +41,12 @@ const CHARACTER_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'graphe
 
 /** Deployment route, presentation bounds, and sender configuration. */
 export interface Config {
+  /** Explicit delivery adapter; legacy private Weixin remains readable. */
+  transport?: 'weixin' | 'dot'
   /** Absolute owner wrapper or OpenClaw CLI path. */
   command: string
   /** Owner-only constants file containing the configured account and target. */
-  routeFile: string
+  routeFile?: string
   /** Absolute private outbox file; never shared between host processes. */
   outboxFile: string
   /** Initial exponential retry delay for a definite provider rejection. */
@@ -75,8 +77,9 @@ export interface Config {
 
 /** Schemastery validation and supported deployment defaults. */
 export const Config: z<Config> = z.object({
+  transport: z.union([z.const('weixin'), z.const('dot')]).default('weixin'),
   command: z.string().required(),
-  routeFile: z.string().required(),
+  routeFile: z.string().default(''),
   outboxFile: z.string().required(),
   retryDelayMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(30_000),
   maxAttempts: z.number().step(1).min(1).max(10).default(5),
@@ -272,7 +275,7 @@ function completionMessage(
   return ellipsizeUtf8(`DSH任务 [${terminalLabel(reason)}]：${title}\n${summary}`, maxBytes)
 }
 
-function idempotencyKey(session: Session, terminal: TurnEndEvent): string {
+function idempotencyKey(session: Session, terminal: TurnEndEvent, transport = 'weixin'): string {
   const digest = createHash('sha256')
     .update(JSON.stringify([
       String(session.id),
@@ -282,7 +285,58 @@ function idempotencyKey(session: Session, terminal: TurnEndEvent): string {
       terminal.data.reason.kind,
     ]))
     .digest('hex')
-  return `dsh-turn-wechat/v1/${digest}`
+  return `dsh-turn-${transport === 'dot' ? 'dot' : 'wechat'}/v1/${digest}`
+}
+
+interface DeliveryResult {
+  state: 'sent' | 'queued-dot' | 'unknown' | 'failed' | 'expired'
+  messageId: string
+  expiresAt?: string
+}
+
+function sendDotCompletion(config: Required<Config>, delivery: DeliveryRecord, signal: AbortSignal): Promise<DeliveryResult> {
+  const input = {
+    operationKey: delivery.key, source: 'dsh', kind: 'task-completed',
+    title: delivery.message.split('\n', 1).join('').slice(0, 240), body: delivery.message,
+    ...(delivery.occurredAt ? { occurredAt: delivery.occurredAt } : {}),
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const child = execFile(config.command, [], { encoding: 'utf8', env: scrubbedEnvironment(),
+        maxBuffer: MAX_RECEIPT_BYTES, signal, timeout: config.timeoutMs, windowsHide: true,
+      }, (error, stdout) => {
+        try {
+          const receipt = JSON.parse(stdout) as Record<string, unknown>
+          if (receipt.protocolVersion !== 'bo.cloud-klaus-notifications/v1'
+            || typeof receipt.notificationId !== 'string' || !receipt.notificationId
+            || typeof receipt.eventId !== 'string' || !receipt.eventId
+            || typeof receipt.occurredAt !== 'string' || !Number.isFinite(Date.parse(receipt.occurredAt))
+            || typeof receipt.expiresAt !== 'string' || !Number.isFinite(Date.parse(receipt.expiresAt))
+            || !['pending', 'delivered', 'unknown', 'failed', 'expired'].includes(String(receipt.status))
+            || (receipt.status === 'delivered' && (typeof receipt.callbackReceiptAt !== 'string'
+              || !Number.isFinite(Date.parse(receipt.callbackReceiptAt))))
+            || (error !== null && ['pending', 'delivered'].includes(String(receipt.status)))) {
+            throw new Error('invalid Dot receipt')
+          }
+          const state = receipt.status === 'pending' ? 'queued-dot'
+            : receipt.status === 'delivered' ? 'sent' : receipt.status as 'unknown' | 'failed' | 'expired'
+          resolve({ state, messageId: receipt.notificationId, expiresAt: receipt.expiresAt })
+        } catch {
+          // Process rejection, transport loss and malformed acknowledgment never prove delivery.
+          const failure: DeliveryFailure = new Error('turn-notify-wechat: Dot acknowledgment unavailable')
+          failure.code = 'dot_acknowledgment_unavailable'
+          failure.unknownAfterSend = true
+          reject(failure)
+        }
+      })
+      child.stdin?.end(JSON.stringify(input))
+    } catch {
+      const failure: DeliveryFailure = new Error('turn-notify-wechat: Dot command unavailable')
+      failure.code = 'dot_command_unavailable'
+      failure.unknownAfterSend = false
+      reject(failure)
+    }
+  })
 }
 
 function inspectReceipt(value: unknown, facts: ReceiptFacts): void {
@@ -362,7 +416,8 @@ function sendCompletion(
   route: WeChatRoute,
   delivery: DeliveryRecord,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<DeliveryResult> {
+  if (config.transport === 'dot') return sendDotCompletion(config, delivery, signal)
   const args = [
     'message', 'send',
     '--channel', config.channel,
@@ -389,7 +444,7 @@ function sendCompletion(
           return
         }
         try {
-          resolve(parseReceipt(stdout, config.channel))
+          resolve({ state: 'sent', messageId: parseReceipt(stdout, config.channel) })
         } catch (receiptError: unknown) {
           reject(new Error(String(receiptError).replace(/^Error: /u, '')))
         }
@@ -437,8 +492,10 @@ export function apply(ctx: Context, config: Config): void {
   const resolved = config as Required<Config>
   if (!isAbsolute(resolved.command)) throw new Error('turn-notify-wechat: command must be an absolute path')
   if (!isAbsolute(resolved.outboxFile)) throw new Error('turn-notify-wechat: outboxFile must be an absolute path')
-  const route = loadRoute(resolved)
-  const routeHash = createHash('sha256').update(JSON.stringify([resolved.channel, route.account, route.target])).digest('hex')
+  if (resolved.transport === 'dot' && resolved.messageMaxBytes > 12000) throw new Error('turn-notify-wechat: Dot messageMaxBytes exceeds its typed admission bound')
+  const route = resolved.transport === 'dot' ? { account: 'owner', target: 'dot-klaus' } : loadRoute(resolved)
+  const routeHash = createHash('sha256').update(JSON.stringify(resolved.transport === 'dot'
+    ? ['dot', 'klaus', resolved.command] : [resolved.channel, route.account, route.target])).digest('hex')
   const outbox = new DeliveryOutbox(resolved.outboxFile, routeHash)
   const abortController = new AbortController()
   const inFlight = new Set<Promise<void>>()
@@ -464,7 +521,7 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const retained = (): DeliveryRecord[] => outbox.records.filter(record =>
-    record.state === 'pending' || record.state === 'queued' || record.state === 'retry')
+    record.state === 'pending' || record.state === 'queued' || record.state === 'retry' || record.state === 'queued-dot')
 
   const pumpDeliveries = (): void => {
     if (retryTimer !== undefined) clearTimeout(retryTimer)
@@ -474,12 +531,20 @@ export function apply(ctx: Context, config: Config): void {
       const delivery = outbox.records.find(record =>
         (record.state === 'queued' || record.state === 'retry') && record.nextAttemptAt <= Date.now())
       if (delivery === undefined) break
+      if (resolved.transport === 'dot' && delivery.occurredAt
+        && Date.parse(delivery.occurredAt) + 7 * 86_400_000 <= Date.now()) {
+        delivery.state = 'expired'; delivery.code = 'notification_expired'; save(); continue
+      }
       delivery.state = 'sending'
       delivery.attempts += 1
       if (!save()) return
       activeDeliveries += 1
       const operation = sendCompletion(resolved, route, delivery, abortController.signal)
-        .then((messageId) => { delivery.state = 'sent'; delivery.messageId = messageId; delete delivery.code; save() })
+        .then((result) => {
+          delivery.state = result.state; delivery.messageId = result.messageId
+          if (result.expiresAt) delivery.expiresAt = result.expiresAt
+          delete delivery.code; save()
+        })
         .catch((error: unknown) => {
           const failure = error as DeliveryFailure
           delivery.code = failure.code ?? 'invalid_receipt'
@@ -525,7 +590,7 @@ export function apply(ctx: Context, config: Config): void {
 
   const detach = ctx.on('session/event', (session, event) => {
     if (closing || storageFailed || event.type !== 'turn/end' || session.header.origin === 'subagent') return
-    const key = idempotencyKey(session, event)
+    const key = idempotencyKey(session, event, resolved.transport)
     if (outbox.records.some(record => record.key === key)) return
     clearPending(session)
     for (const record of retained()) {
@@ -552,6 +617,7 @@ export function apply(ctx: Context, config: Config): void {
     const title = rawTitle === undefined ? '' : normalizeTaskTitle(rawTitle, resolved.titleMaxChars)
     const record: DeliveryRecord = {
       key, sessionId: String(session.id), turn: event.data.turn,
+      ...(resolved.transport === 'dot' ? { occurredAt: new Date(event.time).toISOString() } : {}),
       message: title.length === 0 ? '' : completionMessage(title, summary, event.data.reason, resolved.messageMaxBytes),
       state: 'pending', attempts: 0, nextAttemptAt: Date.now() + resolved.settleDelayMs, retainedAt: nextRetentionOrder,
     }

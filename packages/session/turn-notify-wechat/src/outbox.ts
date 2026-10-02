@@ -14,7 +14,7 @@ export interface DeliveryRecord {
   /** Bounded owner-visible notice; empty only before a title exists. */
   message: string
   /** Delivery outcome independent of the business turn. */
-  state: 'pending' | 'queued' | 'sending' | 'retry' | 'sent' | 'unknown' | 'failed'
+  state: 'pending' | 'queued' | 'sending' | 'retry' | 'queued-dot' | 'sent' | 'unknown' | 'failed' | 'expired'
   /** Number of durably admitted sender attempts. */
   attempts: number
   /** Earliest send time in Unix milliseconds. */
@@ -25,9 +25,13 @@ export interface DeliveryRecord {
   code?: string
   /** Message identifier from a verified successful receipt. */
   messageId?: string
+  /** Original terminal event UTC instant for the explicit Dot route only. */
+  occurredAt?: string
+  /** Original Dot outbox expiry from its durable acknowledgment. */
+  expiresAt?: string
 }
 
-const STATES = new Set(['pending', 'queued', 'sending', 'retry', 'sent', 'unknown', 'failed'])
+const STATES = new Set(['pending', 'queued', 'sending', 'retry', 'queued-dot', 'sent', 'unknown', 'failed', 'expired'])
 const MAX_BYTES = 8 * 1024 * 1024
 
 /** One process owns an outbox; interrupted sends never become automatic retries. */
@@ -80,7 +84,7 @@ export class DeliveryOutbox {
       for (const candidate of data.records) {
         if (typeof candidate !== 'object' || candidate === null) throw new Error('invalid record')
         const record = candidate as Record<string, unknown>
-        if (typeof record.key !== 'string' || !/^dsh-turn-wechat\/v1\/[a-f0-9]{64}$/u.test(record.key)
+        if (typeof record.key !== 'string' || !/^dsh-turn-(?:wechat|dot)\/v1\/[a-f0-9]{64}$/u.test(record.key)
           || keys.has(record.key) || typeof record.sessionId !== 'string' || record.sessionId.length > 256
           || typeof record.message !== 'string' || Buffer.byteLength(record.message) > 16 * 1024
           || record.message.includes('\0') || typeof record.state !== 'string' || !STATES.has(record.state)
@@ -90,6 +94,11 @@ export class DeliveryOutbox {
             || record.messageId.length === 0 || record.messageId.length > 512))
           || (record.code !== undefined && (typeof record.code !== 'string' || !/^[a-z_]+$/u.test(record.code)))) {
           throw new Error('invalid record fields')
+        }
+        for (const field of ['occurredAt', 'expiresAt']) {
+          if (record[field] !== undefined && (typeof record[field] !== 'string' || !Number.isFinite(Date.parse(record[field])))) {
+            throw new Error('invalid Dot publication clock')
+          }
         }
         keys.add(record.key)
         const entry = record as unknown as DeliveryRecord
@@ -112,7 +121,7 @@ export class DeliveryOutbox {
 
   /** Persist state before network activity and after its independently verified result. */
   save(): void {
-    const terminal = this.records.filter(record => ['sent', 'unknown', 'failed'].includes(record.state))
+    const terminal = this.records.filter(record => ['sent', 'unknown', 'failed', 'expired'].includes(record.state))
     const expired = new Set(terminal.slice(0, Math.max(0, terminal.length - 256)))
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const record = this.records[index]

@@ -22,7 +22,7 @@ afterEach(async () => {
   root = undefined
 })
 
-async function bootComposition(commandBody: string, existingRoot?: string): Promise<{ ctx: Context; callsPath: string }> {
+async function bootComposition(commandBody: string, existingRoot?: string, transport = 'weixin'): Promise<{ ctx: Context; callsPath: string }> {
   root = existingRoot ?? await mkdtemp(join(tmpdir(), 'dsh-turn-notify-wechat-'))
   const commandPath = join(root, 'fake-ocw.mjs')
   const callsPath = join(root, 'calls.jsonl')
@@ -52,6 +52,7 @@ ${commandBody}
     `    command: ${JSON.stringify(commandPath)}`,
     `    routeFile: ${JSON.stringify(routePath)}`,
     `    outboxFile: ${JSON.stringify(join(root, 'outbox.json'))}`,
+    `    transport: ${transport}`,
     '    timeoutMs: 2000',
     '    settleDelayMs: 10',
     '    retryDelayMs: 500',
@@ -63,11 +64,13 @@ ${commandBody}
   context.baseUrl = pathToFileURL(root).href + '/'
   await context.plugin(Loader)
   context.loader.builtins.include = Include
+  const notifier = process.env.DSH_DOT_NOTIFIER_ENTRY
+    ? await import(pathToFileURL(process.env.DSH_DOT_NOTIFIER_ENTRY).href) as typeof TurnNotifyWechat : TurnNotifyWechat
   const modules = new Map<string, unknown>([
     ['@deepseek-ai/dsh-session', SessionStore],
     ['@deepseek-ai/dsh-session-projection', SessionProjectionRegistry],
     ['@deepseek-ai/dsh-session-title', SessionTitleService],
-    ['@deepseek-ai/dsh-turn-notify-wechat', TurnNotifyWechat],
+    ['@deepseek-ai/dsh-turn-notify-wechat', notifier],
   ])
   context.loader.internal = {
     version: 'v2',
@@ -117,6 +120,23 @@ async function appendCompletedTurn(ctx: Context, id: string, assistantText: stri
 }
 
 describe('turn-notify-wechat through a real Loader composition', () => {
+  it('keeps Dot pending admission as queued-dot using the real Loader, subprocess stdin and private outbox', async () => {
+    const { ctx, callsPath } = await bootComposition(`
+let body = ''
+for await (const chunk of process.stdin) body += chunk
+const input = JSON.parse(body)
+if (input.source !== 'dsh' || input.kind !== 'task-completed' || !input.operationKey.startsWith('dsh-turn-dot/v1/') || !input.body.includes('已完成合成 Dot 任务')) throw new Error('invalid synthetic Dot admission')
+console.log(JSON.stringify({protocolVersion:'bo.cloud-klaus-notifications/v1',status:'pending',notificationId:'synthetic-dot-1',eventId:'synthetic-event-1',occurredAt:input.occurredAt,expiresAt:new Date(Date.parse(input.occurredAt)+7*86400000).toISOString(),callbackReceiptAt:null}))
+`, undefined, 'dot')
+    await appendCompletedTurn(ctx, 'loader-dot-notice', '已完成合成 Dot 任务')
+    await vi.waitFor(async () => {
+      const outbox = JSON.parse(await readFile(join(root!, 'outbox.json'), 'utf8'))
+      expect(outbox.records[0]).toMatchObject({ state: 'queued-dot', messageId: 'synthetic-dot-1' })
+    })
+    const calls = (await readFile(callsPath, 'utf8')).trim().split('\n').map(value => JSON.parse(value))
+    expect(calls).toEqual([[]])
+  })
+
   it('sends the folded task title and final assistant summary from a logged top-level turn', async () => {
     const { ctx, callsPath } = await bootComposition(
       'console.log(JSON.stringify({ action: \'send\', channel: \'openclaw-weixin\', dryRun: false, handledBy: \'plugin\', messageId: \'wechat-1\' }))',
