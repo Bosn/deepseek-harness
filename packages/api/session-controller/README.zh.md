@@ -18,6 +18,7 @@ kind: "package-reference"
 - [Client 引用](#client-references)
 - [会话媒体引用](#session-media-references)
 - [配置](#configuration)
+- [实时任务元数据](#live-task-metadata)
 - [模型体验](#model-experience)
 - [已知限制与延期工作](#known-limitations-and-deferred-work)
 - [开发备注](#dev-note)
@@ -96,6 +97,11 @@ GUI 模型选择要求确切提供方／模型对出现在可用目录中；不�
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。
 
 -----
+
+<a id="live-task-metadata"></a>
+## 实时任务元数据
+
+`session/supervision-metadata` 接收精确的 `sessionId` 与数字字符串 `nativeTurnId`。Controller 私有内存 cell 只观察原生提交后的边界，不进入 projection checkpoint、cache、restore 或 hydration。只有现场观察到 `turn/start` 才建立覆盖；缺失、晚挂载、重启、损坏或序列缺口均保持 unknown，直到新的原生 start。查询只读取精确附着的 Session 与 cell，不读取历史、inbox 或冷持久化。终态来自 `turn/end.reason.kind`，未知扩展保持 unknown。问题数量不可用，字段缺失并明确返回 partial 覆盖。沿用既有 Connection 与 Gateway 准入。不支持冷任务监督或自动续做。
 
 <a id="model-experience"></a>
 ## 模型体验

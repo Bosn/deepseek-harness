@@ -605,6 +605,8 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   AgentMessageSource: 'subagent.md',
   SubagentCatalogEntry: 'subagent.md',
   SubagentCatalogState: 'subagent.md',
+  SessionSupervisionMetadataRequest: 'session.md',
+  SessionSupervisionMetadataValue: 'session.md',
   SessionProjectionsRequest: 'session.md',
   SessionProjectionsValue: 'session.md',
   SubagentDescendantListEntry: 'subagent.md',

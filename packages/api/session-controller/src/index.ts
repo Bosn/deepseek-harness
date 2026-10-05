@@ -25,6 +25,8 @@ import { SessionFileReferences } from './file-references.ts'
 import { ApiSessionList } from './list.ts'
 import { buildModelCatalog, hasProviderApiKey } from './catalog.ts'
 import { installModelSelectionProjection } from './model-selection-projection.ts'
+import { LiveSupervisionMetadata } from './supervision-metadata.ts'
+import type { SessionSupervisionMetadataRequest, SessionSupervisionMetadataValue } from './types.ts'
 import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
 import { ArchivedSessionGate } from './archived-session-gate.ts'
@@ -115,6 +117,7 @@ export class SessionController extends TypertRemoteService {
     nativeOpen: z.boolean(),
   })
 
+  private readonly supervisionState: LiveSupervisionMetadata
   private readonly agents: ApiSessionAgentController
   private readonly commands: SessionCommandController
   private readonly controlState: SessionControlController
@@ -135,6 +138,7 @@ export class SessionController extends TypertRemoteService {
   constructor(ctx: Context, config: Config, internals: SessionControllerInternals = {}) {
     super(ctx, 'sessionController', { namespace: 'session' })
     installModelSelectionProjection(ctx)
+    this.supervisionState = new LiveSupervisionMetadata(ctx)
     this.agents = new ApiSessionAgentController(ctx)
     this.commands = new SessionCommandController(ctx, this.agents, process.cwd())
     ctx.effect(() => ctx.fileUploads.registerAgentResolver(async (sessionId) => {
@@ -479,6 +483,16 @@ export class SessionController extends TypertRemoteService {
   @Remote({ mode: 'stream' })
   follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
     return this.history.follow(request, signal)
+  }
+
+  /**
+   * Read one exact attached turn without loading event history or cold state.
+   * @param request - exact Session and native turn identity.
+   * @returns no-body metadata or an explicit coverage obstruction.
+   */
+  @Remote('supervision-metadata')
+  supervisionMetadata(request: SessionSupervisionMetadataRequest): SessionSupervisionMetadataValue {
+    return this.supervisionState.read(request)
   }
 
   /**

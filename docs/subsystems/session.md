@@ -931,6 +931,13 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote({ mode: 'stream' }) follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame>
 
 /**
+ * Read one exact attached turn without loading event history or cold state.
+ * @param request - exact Session and native turn identity.
+ * @returns no-body metadata or an explicit coverage obstruction.
+ */
+@Remote('supervision-metadata') supervisionMetadata(request: SessionSupervisionMetadataRequest): SessionSupervisionMetadataValue
+
+/**
  * Read all registered projections without activating an Agent.
  * @param request - Session whose current values are required.
  * @param signal - cancellation for the Session observation.

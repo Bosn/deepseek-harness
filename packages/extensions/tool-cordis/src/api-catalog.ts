@@ -2030,6 +2030,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a complete opening snapshot followed by gap-free durable event frames and optional cursorless assistant-stream frames.',
       },
       {
+        signature: '@Remote(\'supervision-metadata\') supervisionMetadata(request: SessionSupervisionMetadataRequest): SessionSupervisionMetadataValue',
+        description: 'Read one exact attached turn without loading event history or cold state.',
+        parameters: [{ name: 'request', description: 'exact Session and native turn identity.' }],
+        returns: 'no-body metadata or an explicit coverage obstruction.',
+      },
+      {
         signature: '@Remote(\'projections\') async projections(request: SessionProjectionsRequest, signal: AbortSignal): Promise<SessionProjectionsValue>',
         description: 'Read all registered projections without activating an Agent.',
         parameters: [{ name: 'request', description: 'Session whose current values are required.' }, { name: 'signal', description: 'cancellation for the Session observation.' }],
@@ -6874,6 +6880,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionSummary',
     declaration: 'export interface SessionSummary {\n    readonly agentAvailable: boolean;\n    readonly sessionId: SessionId;\n    readonly updatedAt: number;\n    readonly running: boolean;\n    readonly blank: boolean;\n    readonly parentSessionId?: SessionId;\n    readonly origin?: \'subagent\';\n    readonly cwd?: string;\n    readonly projections?: SessionProjectionHints;\n}',
+  },
+  {
+    name: 'SessionSupervisionMetadataRequest',
+    declaration: 'export interface SessionSupervisionMetadataRequest {\n    readonly sessionId: SessionId;\n    readonly nativeTurnId: string;\n}',
+  },
+  {
+    name: 'SessionSupervisionMetadataValue',
+    declaration: 'export interface SessionSupervisionMetadataValue {\n    readonly nativeTaskId: SessionId;\n    readonly nativeSessionId: SessionId;\n    readonly nativeTurnId: string;\n    readonly status: \'running\' | \'succeeded\' | \'cancelled\' | \'failed\' | \'waiting-input\' | \'unknown\';\n    readonly nativeStatus: string;\n    readonly metadataSeq: SessionSeqCursor | null;\n    readonly terminalReason: SessionSupervisionTerminalReason | null;\n    readonly coverage: \'observed\' | \'partial\' | \'unavailable\';\n    readonly reason: \'question-count-unavailable\' | \'not-attached\' | \'projection-unavailable-or-stale\' | \'projection-corrupt\' | \'identity-mismatch\' | \'terminal-reason-unknown\' | \'no-turn\';\n}',
+  },
+  {
+    name: 'SessionSupervisionTerminalReason',
+    declaration: 'export type SessionSupervisionTerminalReason = \'completed\' | \'aborted\' | \'blocked\' | \'error\' | \'max-tokens\' | \'interrupted\' | \'forked\' | \'unknown\';',
   },
   {
     name: 'SessionSurface',

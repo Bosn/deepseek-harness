@@ -414,6 +414,37 @@ export type SessionAddress =
     readonly mode: 'one-shot' | 'continuable' | 'unknown'
   }
 
+/** Known native turn-end kinds; extensions remain unknown to this reader. */
+export type SessionSupervisionTerminalReason = 'completed' | 'aborted' | 'blocked' | 'error'
+  | 'max-tokens' | 'interrupted' | 'forked' | 'unknown'
+
+/** Controller-private memory state, never a persisted projection or body. */
+export interface SessionSupervisionProjection {
+  readonly turn: number
+  readonly open: boolean
+  readonly terminalReason: SessionSupervisionTerminalReason | null
+}
+
+/** Exact identity for a live-only supervision read. */
+export interface SessionSupervisionMetadataRequest {
+  readonly sessionId: SessionId
+  readonly nativeTurnId: string
+}
+
+/** No-body native observation; requested IDs alone do not prove coverage. */
+export interface SessionSupervisionMetadataValue {
+  readonly nativeTaskId: SessionId
+  readonly nativeSessionId: SessionId
+  readonly nativeTurnId: string
+  readonly status: 'running' | 'succeeded' | 'cancelled' | 'failed' | 'waiting-input' | 'unknown'
+  readonly nativeStatus: string
+  readonly metadataSeq: SessionSeqCursor | null
+  readonly terminalReason: SessionSupervisionTerminalReason | null
+  readonly coverage: 'observed' | 'partial' | 'unavailable'
+  readonly reason: 'question-count-unavailable' | 'not-attached' | 'projection-unavailable-or-stale'
+    | 'projection-corrupt' | 'identity-mismatch' | 'terminal-reason-unknown' | 'no-turn'
+}
+
 /** One non-activating Session projection read. */
 export interface SessionProjectionsRequest {
   readonly sessionId: SessionId

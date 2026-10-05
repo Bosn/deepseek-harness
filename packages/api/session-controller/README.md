@@ -18,6 +18,7 @@ Desktop analytics follows the [product collection policy](../../client/product-a
 - [Client references](#client-references)
 - [Session media references](#session-media-references)
 - [Configuration](#configuration)
+- [Live task metadata](#live-task-metadata)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
 - [Dev Note](#dev-note)
@@ -96,6 +97,10 @@ A successful `selectModel` response acknowledges the Session-local selection wit
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
 
 -----
+
+## Live task metadata
+
+`session/supervision-metadata` accepts exact `sessionId` and numeric-string `nativeTurnId`. A controller-private memory cell observes native post-commit boundaries and never enters projection checkpoint, cache, restore or hydration. Only an observed `turn/start` establishes coverage; missing, late-mounted, restarted, corrupt or sequence-gapped cells stay unknown until a fresh native start. Queries read the exact attached Session and cell, without history, inbox or cold persistence. `turn/end.reason.kind` supplies terminal reasons; unknown extensions stay unknown. Question counts are unavailable and omitted with partial coverage. Existing Connection and Gateway admission applies. Cold supervision and automatic continuation are unsupported.
 
 <a id="model-experience"></a>
 ## Model Experience
