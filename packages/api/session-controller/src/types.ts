@@ -177,6 +177,8 @@ export type QueueAction =
 export interface SessionSummary {
   /** Whether this Session currently owns a live Agent. */
   readonly agentAvailable: boolean
+  /** Current for attached Sessions; otherwise the persistence format status when reported. */
+  readonly formatStatus?: 'current' | 'migration-required'
   readonly sessionId: SessionId
   readonly updatedAt: number
   readonly running: boolean
@@ -224,6 +226,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'session/steer-unavailable': { readonly itemId: MessageId }
     'session/title-invalid': { readonly sessionId: SessionId }
     'session/fork-unavailable': { readonly sessionId: SessionId }
+    'session/migration-required': { readonly sessionId: SessionId }
     'subagent/not-found': {
       readonly parentSessionId: SessionId
       readonly childSessionId: SessionId
@@ -322,6 +325,8 @@ export interface SessionForkRequest {
   readonly sessionId: SessionId
   /** Exact inclusive source event seq; omission selects the latest completed-turn prefix. */
   readonly atSeq?: number
+  /** False asks the Host to check for required migration before forking. Defaults to true. */
+  readonly allowMigration?: boolean
 }
 
 /** Identity of a newly forked Session. */
@@ -414,13 +419,47 @@ export type SessionAddress =
     readonly mode: 'one-shot' | 'continuable' | 'unknown'
   }
 
+/** Known native turn-end kinds; extensions remain unknown to this reader. */
+export type SessionSupervisionTerminalReason = 'completed' | 'aborted' | 'blocked' | 'error'
+  | 'max-tokens' | 'interrupted' | 'forked' | 'unknown'
+
+/** Controller-private memory state, never a persisted projection or body. */
+export interface SessionSupervisionProjection {
+  readonly turn: number
+  readonly open: boolean
+  readonly terminalReason: SessionSupervisionTerminalReason | null
+}
+
+/** Exact identity for a live-only supervision read. */
+export interface SessionSupervisionMetadataRequest {
+  readonly sessionId: SessionId
+  readonly nativeTurnId: string
+}
+
+/** No-body native observation; requested IDs alone do not prove coverage. */
+export interface SessionSupervisionMetadataValue {
+  readonly nativeTaskId: SessionId
+  readonly nativeSessionId: SessionId
+  readonly nativeTurnId: string
+  readonly status: 'running' | 'succeeded' | 'cancelled' | 'failed' | 'waiting-input' | 'unknown'
+  readonly nativeStatus: string
+  readonly metadataSeq: SessionSeqCursor | null
+  readonly terminalReason: SessionSupervisionTerminalReason | null
+  readonly coverage: 'observed' | 'partial' | 'unavailable'
+  readonly reason: 'question-count-unavailable' | 'not-attached' | 'projection-unavailable-or-stale'
+    | 'projection-corrupt' | 'identity-mismatch' | 'terminal-reason-unknown' | 'no-turn'
+}
+
 /** One non-activating Session projection read. */
 export interface SessionProjectionsRequest {
   readonly sessionId: SessionId
 }
 
-/** Complete Session projection baseline; null when the Session does not exist. */
-export type SessionProjectionsValue = SessionProjectionBaseline | null
+/** Exact projections carry their event cut; required migration returns sequence-free cache hints. Null means absent. */
+export type SessionProjectionsValue =
+  | (SessionProjectionBaseline & { readonly kind: 'sequenced' })
+  | { readonly kind: 'migration-required'; readonly values: SessionProjectionValues }
+  | null
 
 /** One raw Session event in the Remote journal. */
 export interface SessionEventEntry {
