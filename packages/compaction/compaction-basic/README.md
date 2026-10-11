@@ -72,6 +72,7 @@ All settings are optional. With context window `W`, effective request output cap
 | `maxTokens` | `headroomTokens` (`65536`) | Positive summary output cap, including any provider-counted reasoning tokens. Explicit per-model caps override explicit global caps; otherwise the cap follows the resolved headroom. |
 | `compactionRetries` | `1` | Extra condensation attempts after the first when pressure remains above threshold. |
 | `maxOverflowRetries` | `1` | Maximum retries after a confirmed context-window overflow; `0` disables recovery only. |
+| `maxRegionTransactions` | `16` | Ceiling on one region condensation's total summarizer transactions. A region that cannot fit within this many bounded requests — or whose next bounded pass would re-summarize only the checkpoint it just wrote — fails with an actionable error instead of blocking the turn for one model call per history item. |
 | `modelPolicies` | `[]` | Exact `{ provider, model, ...partialPolicy }` overrides for individual model routes. |
 | `auto` | `true` | Enable automatic condensation and overflow recovery; set `false` for manual-only operation. |
 
@@ -79,7 +80,7 @@ Misconfiguration fails fast: unknown settings, duplicate per-model overrides, in
 
 ### What happens when condensation runs
 
-The oldest balanced span is replaced by one summary message and the recent tail stays verbatim; the conversation continues from the summary. The operation reports how many history items were condensed and the estimated tokens freed. If nothing can be condensed safely — for example the whole conversation is one indivisible unit — nothing changes and nothing is written to the session log. If no model is available to write the summary (no configured target and no routed request yet), condensation fails with a clear error telling you to configure the summarization provider and model or route one request.
+The oldest balanced span is replaced by one summary message and the recent tail stays verbatim; the conversation continues from the summary. When the summarizer byte cap is smaller than the span, balanced transactions fold it piece by piece and merge their checkpoints; an operation that would exceed `maxRegionTransactions` transactions, or whose next piece is only the checkpoint it just wrote, fails with an error naming the settings to raise instead of spending one model call per history item. The operation reports how many history items were condensed and the estimated tokens freed. If nothing can be condensed safely — for example the whole conversation is one indivisible unit — nothing changes and nothing is written to the session log. If no model is available to write the summary (no configured target and no routed request yet), condensation fails with a clear error telling you to configure the summarization provider and model or route one request.
 
 ### On-demand condensation with /compact
 
@@ -123,6 +124,8 @@ A direct `ctx.llm.stream()` call uses the configured provider/model pair and cap
 Failed summary requests dispatch synchronous `compaction/summary-error` after checking cancellation and selection stability. A recovery listener must record a durable input change before requesting retry. The backend re-derives the selected messages and refreshes their token prices and shrink baseline. The image-offload plugin owns image selection; its recorded omissions remain effective if the summary later fails or is cancelled.
 
 The transaction validates the surface span and the durable lock, appends `compaction/start`, summarizes through the hook, revalidates stability (whole-surface for automatic calls, selected-span for manual calls), rejects a summary that does not shrink its source, appends `compaction/summary` plus the replacement `user/message`, and makes exactly one `compaction/end` attempt. A live unmatched start is the durable lock: an unmatched marker before a newer `session/end-seed` is stale evidence from a prior lifecycle and does not block; one after that boundary reports `busy`. A failed close deliberately leaves a blocking orphan. Cancellation remains authoritative after cleanup and durability.
+
+A region wider than the summarizer-input cap partitions hierarchically: front messages outside the cap compact in earlier transactions, and each replacement checkpoint is carried into the next bounded pass so partition summaries converge to one checkpoint. A pass whose only front drop is that carried checkpoint would re-summarize the checkpoint without absorbing new content while the region keeps its size, so the partition rejects it before any provider call; the operation's total transactions are additionally bounded by `maxRegionTransactions`, so a partition that only crawls forward cannot block the turn for one provider call per surface node.
 
 ### Config resolution
 
@@ -242,6 +245,7 @@ These limits define when automatic condensation is a poor fit or needs special c
 - **Meter accuracy follows the fixed heuristic** — missing reusable provider usage falls back to character count plus structural overhead rather than exact tokenization; image occurrences carry provider-exact visual tokens only on routes whose adapter declares request-image pricing.
 - **Overflow classification is adapter-maintained** — provider wording can change; both DeepSeek adapters normalize recognized context-limit failures to `CONTEXT_WINDOW_EXCEEDED`.
 - **Some indivisible-unit and envelope-only overflow remains outside surface compaction** — recovery cannot shrink system/tools/prefix, split an indivisible non-tool node, or repair a tool unit whose non-prunable remainder still exceeds the window. The optional pruner can shrink text-bearing tool-result bulk inside an otherwise indivisible pair.
+- **A checkpoint that fills the summarizer-input cap cannot be partitioned further** — when the fixed replay bytes plus the carried checkpoint leave no room for another region message, the operation fails loud with the settings to raise instead of retrying; raising `summarizationInputBytes` or `maxRequestBytes`, or compacting a smaller span, is the operator's call.
 - **`compactRegion` requires an open turn** — a manual call on a fully-closed session throws ("no open turn") rather than compacting.
 - **Summarization failure preserves the latest durable surface** — before any replacement, the auto path logs a warning and proceeds with full over-budget history. If pruning already landed, a later summarization failure proceeds from that durable pruned surface. Summarization truncation at `maxTokens`, which hidden reasoning tokens can consume, follows the same rule.
 

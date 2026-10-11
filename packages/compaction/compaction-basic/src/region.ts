@@ -11,6 +11,7 @@ import {
   CompactionId,
   ManualCompactionError,
   compactCheckpointSource,
+  isCompactCheckpointSource,
   toolPairingBalancedAfter,
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
@@ -76,6 +77,14 @@ interface CompactionTransactionOptions {
    * are partitioned into balanced compaction transactions that each fit it.
    */
   readonly summarizationInputBytes?: number
+  /**
+   * Optional ceiling on this operation's total summarizer transactions. When
+   * the hierarchical partition cannot fit the region within this many bounded
+   * transactions, it fails loud instead of paying one provider call per
+   * surface node; omitted keeps the structural one-transaction-per-node
+   * ceiling.
+   */
+  readonly maxRegionTransactions?: number
 }
 
 interface CompactionEntryState {
@@ -124,6 +133,23 @@ function systemHead(session: Session, headSeq: SessionSeq): SessionEvent<'system
   // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
   const head = session.eventAt(headSeq)!
   return head.type === 'system/message' ? head : undefined
+}
+
+/**
+ * Whether one surface node projects to a compaction checkpoint left by an
+ * earlier transaction, so compacting it again can only re-summarize a summary.
+ * @param session - session supplying the log behind the surface.
+ * @param seq - surface-node seq to inspect.
+ * @returns whether the node's message carries the compact-checkpoint source.
+ */
+function isCompactionCheckpointNode(session: Session, seq: SessionSeq): boolean {
+  // Surface nodes are current log seqs, so the event exists.
+  // Existing Session history read; migration deferred.
+  // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
+  const event = session.eventAt(seq)!
+  if (event.type !== 'user/message') return false
+  const message = session.deriveEventMessage(event)
+  return message !== null && isCompactCheckpointSource(message.source)
 }
 
 /**
@@ -209,10 +235,16 @@ export async function compactSurfaceRegion(
     'compaction',
   )
   const owner = resolveCompactionOwner(options, entryState)
+  // The structural ceiling is one transaction per shadowed node; a configured
+  // ceiling keeps a large region from blocking its turn for one provider call
+  // per node when the partition's forward progress degrades.
+  const transactionLimit = options.maxRegionTransactions === undefined
+    ? initial.shadowedSeqs.length
+    : Math.min(initial.shadowedSeqs.length, options.maxRegionTransactions)
   const operation: CompactionOperationState = {
     expectedOwner: owner,
-    transactionLimit: initial.shadowedSeqs.length,
-    remainingTransactions: initial.shadowedSeqs.length,
+    transactionLimit,
+    remainingTransactions: transactionLimit,
   }
 
   return compactSurfaceSelection(
@@ -271,6 +303,18 @@ async function compactSurfaceSelection(
     /* v8 ignore next 3 -- a positive prepared drop count always selects a non-empty prefix. */
     if (omittedHeadSeq === undefined || omittedTailSeq === undefined) {
       throw new Error('compactRegion: bounded compaction selected an empty prefix')
+    }
+    // A one-node omitted prefix that is itself the carried checkpoint removes
+    // the checkpoint and re-adds its replacement, so the region keeps its
+    // length and the next pass selects the same drop. Compacting it cannot
+    // absorb any new content, so the partition has no exit through progress.
+    if (prepared.dropCount === 1 && isCompactionCheckpointNode(session, omittedHeadSeq)) {
+      throw new Error(
+        'compactRegion: the front node selected for an earlier transaction is the carried '
+        + 'compaction checkpoint, so re-summarizing it would absorb no new content while '
+        + 'the region keeps its size; raise summarizationInputBytes or maxRequestBytes, '
+        + 'or compact a smaller span',
+      )
     }
     const prefix = await compactSurfaceSelection(
       dependencies,
@@ -345,7 +389,8 @@ async function runCompactionTransaction(
   if (operation.remainingTransactions === 0) {
     throw new Error(
       `compactRegion: bounded compaction exhausted its ${operation.transactionLimit}-transaction limit `
-      + 'before the selected region fit the summarization-input cap',
+      + 'before the selected region fit the summarization-input cap; raise the configured '
+      + 'maxRegionTransactions or the summarization-input cap',
     )
   }
   operation.remainingTransactions -= 1

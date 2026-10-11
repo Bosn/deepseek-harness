@@ -163,6 +163,7 @@ const maxOverflowRetriesSchema = z.number().step(1).min(0)
 const maxRequestBytesSchema = z.number().step(1).min(MIN_SUMMARIZER_REQUEST_BYTES)
 const summarizationInputBytesSchema = z.number().step(1).min(MIN_SUMMARIZER_REQUEST_BYTES)
 const timeoutRecoveryBytesSchema = z.number().step(1).min(1)
+const maxRegionTransactionsSchema = z.number().step(1).min(1)
 const learnedByteSafetyRatioSchema = z.number()
 
 const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
@@ -180,6 +181,7 @@ const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   maxRequestBytes: maxRequestBytesSchema,
   summarizationInputBytes: summarizationInputBytesSchema,
   timeoutRecoveryBytes: timeoutRecoveryBytesSchema,
+  maxRegionTransactions: maxRegionTransactionsSchema,
 })
 
 /**
@@ -206,6 +208,7 @@ export class BasicCompactionEngine extends CompactionEngine {
     maxRequestBytes: maxRequestBytesSchema,
     summarizationInputBytes: summarizationInputBytesSchema,
     timeoutRecoveryBytes: timeoutRecoveryBytesSchema,
+    maxRegionTransactions: maxRegionTransactionsSchema,
     learnedByteSafetyRatio: learnedByteSafetyRatioSchema,
     modelPolicies: z.array(modelPolicy),
     auto: z.boolean(),
@@ -487,7 +490,9 @@ export class BasicCompactionEngine extends CompactionEngine {
 
   /**
    * Compact one inclusive positional range from the agent-owned surface using
-   * the effective token meter for all retention and shrink pricing.
+   * the effective token meter for all retention and shrink pricing. The
+   * operation fails loud when its hierarchical partition needs more than the
+   * routed `maxRegionTransactions` summarizer transactions.
    * @param start - inclusive first surface-node seq.
    * @param end - inclusive last surface-node seq.
    * @param agent - owner of the target session, used by the summarizer.
@@ -514,6 +519,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         owner: 'current-turn',
         stability: 'whole-surface',
         summarizationInputBytes: inputCap,
+        maxRegionTransactions: this.regionTransactionLimitFor(agent),
       },
       signal,
     )
@@ -555,6 +561,7 @@ export class BasicCompactionEngine extends CompactionEngine {
               owner: null,
               stability: 'selected-span',
               summarizationInputBytes: this.summarizationBudgetFor(agent),
+              maxRegionTransactions: this.regionTransactionLimitFor(agent),
               ...sourceCommandId === undefined ? {} : { sourceCommandId },
               flush: async () => {
                 await this.ctx.sessions.flush(agent.session)
@@ -607,6 +614,14 @@ export class BasicCompactionEngine extends CompactionEngine {
       ? undefined
       : this.learnedByteBudget(agent, target)
     return summarizerBudget(policy, learned)
+  }
+
+  /** Resolve the configured summarizer-transaction ceiling for one agent route. */
+  private regionTransactionLimitFor(agent: Agent): number {
+    const target = conversationTarget(agent)
+    return target === undefined
+      ? this.config.maxRegionTransactions
+      : resolveTargetPolicy(this.config, target).maxRegionTransactions
   }
 
   /** Read a probe-learned byte budget without sharing it across routed targets. */

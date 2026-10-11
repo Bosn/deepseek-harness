@@ -357,6 +357,7 @@ describe('compact configuration and defaults', () => {
       maxOverflowRetries: 1,
       summarizationInputBytes: 524288,
       timeoutRecoveryBytes: 524288,
+      maxRegionTransactions: 16,
       learnedByteSafetyRatio: 0.75,
       modelPolicies: [],
       auto: true,
@@ -386,6 +387,26 @@ describe('compact configuration and defaults', () => {
     expect(() => resolveConfig({
       modelPolicies: [{ provider: MODEL, model: MODEL, headroomTokens: 0 }],
     })).toThrow(/modelPolicies\[0\].maxTokens.*positive integer/)
+  })
+
+  it('bounds region transactions by default and merges exact-target overrides', () => {
+    expect(resolveConfig({}).maxRegionTransactions).toBe(16)
+    expect(resolveTargetPolicy(resolveConfig({
+      modelPolicies: [{ provider: MODEL, model: MODEL, maxRegionTransactions: 4 }],
+    }), { provider: MODEL, model: MODEL }).maxRegionTransactions).toBe(4)
+    expect(resolveTargetPolicy(resolveConfig({ maxRegionTransactions: 8 }), {
+      provider: 'other',
+      model: 'other',
+    }).maxRegionTransactions).toBe(8)
+    expect(() => resolveConfig({ maxRegionTransactions: 0 })).toThrow(
+      /maxRegionTransactions.*positive integer/,
+    )
+    expect(() => resolveConfig({ maxRegionTransactions: 1.5 })).toThrow(
+      /maxRegionTransactions.*positive integer/,
+    )
+    expect(() => resolveConfig({
+      modelPolicies: [{ provider: MODEL, model: MODEL, maxRegionTransactions: 0 }],
+    })).toThrow(/modelPolicies\[0\].maxRegionTransactions.*positive integer/)
   })
 
   it('resolves threshold and retention overrides independently', () => {
@@ -1519,7 +1540,7 @@ describe('compaction region transaction', () => {
     expect(session.surface.replaceGeneration).toBe(0)
   })
 
-  it('bounds repeated multibyte checkpoint folds by the original message count', async () => {
+  it('rejects repeated multibyte checkpoint folds at the first zero-progress partition', async () => {
     const compact = service({ auto: false })
     compact.summaryForCall = (_input, index) => [{
       type: 'text',
@@ -1531,16 +1552,20 @@ describe('compaction region transaction', () => {
       + estimateHeaderBytes(session.requestHeader())
       + 6_500
 
+    // The first transaction folds the oversized front user message into a
+    // multibyte checkpoint. The next partition's only front drop is that
+    // checkpoint, so the fold is rejected before a second summarizer call
+    // instead of spending one provider call per remaining fold.
     await expect(compact.compactRegion(
       nodes[0]!,
       nodes[nodes.length - 1]!,
       agent(session, MODEL),
       SIGNAL,
       cap,
-    )).rejects.toThrow(/exhausted its 2-transaction limit/)
+    )).rejects.toThrow(/carried compaction checkpoint.*absorb no new content/)
 
-    expect(compact.calls).toHaveLength(2)
-    expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(2)
+    expect(compact.calls).toHaveLength(1)
+    expect(session.snapshotEvents().filter(event => event.type === 'compaction/summary')).toHaveLength(1)
   })
 
   it('rechecks the durable lock before the final bounded transaction', async () => {

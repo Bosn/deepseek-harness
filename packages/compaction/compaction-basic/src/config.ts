@@ -51,6 +51,14 @@ export const MIN_USEFUL_REQUEST_BYTES = 64 * 1024
  */
 export const DEFAULT_LEARNED_BYTE_SAFETY_RATIO = 0.75
 
+/**
+ * Default ceiling on one region compaction's summarizer transactions. A
+ * region needing more than this many bounded transactions cannot finish in
+ * interactive time; failing it costs minutes instead of one provider call
+ * per surface node.
+ */
+export const DEFAULT_MAX_REGION_TRANSACTIONS = 16
+
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
   'thresholdRatio',
@@ -65,6 +73,7 @@ const POLICY_CONFIG_KEYS = [
   'maxRequestBytes',
   'summarizationInputBytes',
   'timeoutRecoveryBytes',
+  'maxRegionTransactions',
 ] as const
 
 /** Complete public top-level configuration key set. */
@@ -156,6 +165,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     ...maxRequestBytes === undefined ? {} : { maxRequestBytes },
     summarizationInputBytes,
     timeoutRecoveryBytes: config.timeoutRecoveryBytes ?? DEFAULT_TIMEOUT_RECOVERY_BYTES,
+    maxRegionTransactions: config.maxRegionTransactions ?? DEFAULT_MAX_REGION_TRANSACTIONS,
     learnedByteSafetyRatio,
     modelPolicies,
     auto: config.auto ?? true,
@@ -193,6 +203,7 @@ export function resolveTargetPolicy(
       : { maxRequestBytes: override?.maxRequestBytes ?? config.maxRequestBytes }),
     summarizationInputBytes: override?.summarizationInputBytes ?? config.summarizationInputBytes,
     timeoutRecoveryBytes: override?.timeoutRecoveryBytes ?? config.timeoutRecoveryBytes,
+    maxRegionTransactions: override?.maxRegionTransactions ?? config.maxRegionTransactions,
   })
 }
 
@@ -274,6 +285,7 @@ export function resolveCompactSpec(
     ...policy.maxRequestBytes === undefined ? {} : { maxRequestBytes: policy.maxRequestBytes },
     summarizationInputBytes: policy.summarizationInputBytes,
     timeoutRecoveryBytes: policy.timeoutRecoveryBytes,
+    maxRegionTransactions: policy.maxRegionTransactions,
   })
 }
 
@@ -368,6 +380,9 @@ function validatePolicy(
   }
   if (config.timeoutRecoveryBytes !== undefined) {
     assertPositiveInteger(`${name}.timeoutRecoveryBytes`, config.timeoutRecoveryBytes)
+  }
+  if (config.maxRegionTransactions !== undefined) {
+    assertPositiveInteger(`${name}.maxRegionTransactions`, config.maxRegionTransactions)
   }
 
   validateSummarizationPair(config, name)
