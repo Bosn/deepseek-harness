@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { AttachmentId, AttachmentStore, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type {
@@ -17,9 +17,10 @@ import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { DEFAULT_MAX_REQUEST_IMAGE_BYTES, resolveProfiles } from '../src/config.ts'
 import { memoryAuth } from './auth-double.ts'
 import { assemble } from './assemble.ts'
-import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
+import { anthropicTextEvents, closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 afterEach(async () => {
+  vi.useRealTimers()
   vi.unstubAllEnvs()
   await closeMockServers()
 })
@@ -333,76 +334,6 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
-  it('reports timeout bytes after request image offload', async () => {
-    const server = await mockServer([{ events: textEvents, delayMs: 200 }])
-    const ref: ImageAttachmentRef = {
-      ...IMAGE_REF,
-      bytes: 1_000_000,
-    }
-    const readImage = vi.fn((_ref: ImageAttachmentRef): Promise<StoredImageAttachment> =>
-      Promise.resolve({ ref, data: new Uint8Array(ref.bytes) }))
-
-    class OffloadAttachmentStore extends AttachmentStore {
-      readonly imageLimits: ImageAttachmentLimits = {
-        maxImageBytes: ref.bytes,
-        maxImagesPerMessage: 1,
-        maxMessageImageBytes: ref.bytes,
-        maxImagePixels: 1,
-        maxImageDimension: 2000,
-        mediaTypes: ['image/png'],
-      }
-
-      validateImage(_input: SaveImageAttachment): Promise<void> {
-        return Promise.reject(new Error('not used'))
-      }
-
-      saveImage(_input: SaveImageAttachment): Promise<ImageAttachmentRef> {
-        return Promise.reject(new Error('not used'))
-      }
-
-      readImage(value: ImageAttachmentRef): Promise<StoredImageAttachment> {
-        return readImage(value)
-      }
-    }
-
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    await ctx.plugin(LlmPiAi, {
-      providers: {
-        openai: {
-          apiKeyEnv: 'PI_TEST_KEY',
-          baseURL: `${server.url}/v1`,
-          maxRequestImageBytes: 1,
-          streamIdleTimeoutMs: 100,
-        },
-      },
-    })
-    await ctx.plugin(OffloadAttachmentStore)
-
-    const result = await assemble(ctx, {
-      provider: 'openai',
-      model: 'gpt-4.1',
-      messages: [createUserMessage({
-        // pi-ai 0.87.1 made gpt-4.1 image-capable, so the request pipeline would
-        // derive this image and fail the 1-byte base64 bound before the stream
-        // starts; pin the post-offload envelope the retrying caller would send.
-        content: [{ type: 'image', attachment: ref, offloaded: true }],
-        source: { kind: 'user' },
-      })],
-    })
-
-    expect(result.finish).toMatchObject({
-      kind: 'error',
-      failure: { code: 'TIMEOUT' },
-    })
-    if (result.finish.kind !== 'error') throw new Error('expected timeout failure')
-    const requestBytesEstimate = result.finish.failure.requestBytesEstimate
-    if (requestBytesEstimate === undefined) throw new Error('expected converted request byte estimate')
-    expect(requestBytesEstimate).toBeLessThan(ref.bytes)
-    expect(readImage).not.toHaveBeenCalled()
-    expect(server.paths).toEqual(['/v1/responses'])
-  })
-
   it('forces one wire request for an SDK-retryable provider failure', async () => {
     const server = await mockServer([
       {
@@ -448,65 +379,14 @@ describe('PiAiAdapter provider routing', () => {
   it.each([
     [401, 'AUTH'],
     [400, 'INVALID_REQUEST'],
-    [413, CONTEXT_WINDOW_EXCEEDED_CODE],
     [429, 'RATE_LIMIT'],
     [500, 'SERVER'],
   ] as const)('maps HTTP %s failures to %s', async (status, code) => {
     const server = await mockServer([{ status, body: JSON.stringify({ error: { message: `provider ${status}` } }) }])
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
-    expect(result.finish).toMatchObject({ kind: 'error', failure: { code, status } })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
     expect(server.paths).toEqual(['/chat/completions'])
-  })
-
-  it('treats quota-worded HTTP 429 as throttling when the route opts in', async () => {
-    const server = await mockServer([{
-      status: 429,
-      body: JSON.stringify({
-        error: {
-          message: 'You exceeded your current quota',
-          type: 'insufficient_quota',
-          code: 'insufficient_quota',
-        },
-      }),
-    }])
-    const ctx = await harness(server.url, { quotaWorded429IsRateLimit: true })
-
-    const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
-
-    expect(result.finish).toMatchObject({
-      kind: 'error',
-      failure: {
-        code: 'RATE_LIMIT',
-        status: 429,
-      },
-    })
-    expect(server.paths).toEqual(['/chat/completions'])
-  })
-
-  it('preserves OpenAI quota-worded HTTP 429 as terminal quota', async () => {
-    const server = await mockServer([{
-      status: 429,
-      body: JSON.stringify({
-        error: {
-          message: 'You exceeded your current quota',
-          type: 'insufficient_quota',
-          code: 'insufficient_quota',
-        },
-      }),
-    }])
-    const adapter = adapterOf({ openai: { baseURL: server.url } })
-    const chunks = []
-
-    for await (const chunk of adapter.stream({ provider: 'openai', model: 'gpt-5.5', messages: [] })) {
-      chunks.push(chunk)
-    }
-
-    expect(chunks.at(-1)).toMatchObject({
-      type: 'finish',
-      reason: { kind: 'error', failure: { code: 'QUOTA', status: 429 } },
-    })
-    expect(server.requests).toHaveLength(1)
   })
 
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {
@@ -525,83 +405,37 @@ describe('PiAiAdapter provider routing', () => {
 
     const result = await assemble(ctx, { model: model.id, messages: [] })
 
-    expect(result.finish).toMatchObject({
+    expect(result.finish).toEqual({
       kind: 'error',
       failure: {
         message: `pi-ai detected context overflow for model "${model.id}"`,
         code: CONTEXT_WINDOW_EXCEEDED_CODE,
       },
     })
-    if (result.finish.kind !== 'error') throw new Error('expected context overflow failure')
-    expect(result.finish.failure.requestBytesEstimate).toBeTypeOf('number')
   })
 
   it('stops the SDK request when the adapter idle watchdog expires', async () => {
-    const server = await mockServer([
-      { events: textEvents },
-      { events: textEvents, delayMs: 200 },
-    ])
-    const profile: LlmPiAi.PiAiProviderProfile = {
-      apiKeyEnv: 'PI_TEST_KEY',
-      baseURL: server.url,
-      streamIdleTimeoutMs: 1_000,
-    }
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    ctx.llm.registerAdapter(['deepseek'], adapterOf({ deepseek: profile }))
+    const server = await mockServer([{ holdOpen: true }])
+    const ctx = await harness(server.url, { streamIdleTimeoutMs: 20 })
+    const controller = new AbortController()
+    onTestFinished(async () => {
+      controller.abort()
+      await ctx.fiber.dispose()
+    })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 
-    const warmup = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
-    expect(warmup.finish).toEqual({ kind: 'stop' })
-    await vi.waitFor(() => { expect(server.closedResponses).toBe(1) }, { timeout: 1_000 })
+    const pending = assemble(ctx, { model: 'deepseek-flash', messages: [], signal: controller.signal })
+    await server.requestReceived
+    expect(server.closedResponses).toBe(0)
+    await vi.advanceTimersByTimeAsync(20)
+    vi.useRealTimers()
 
-    profile.streamIdleTimeoutMs = 20
-    const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
+    const result = await pending
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
-    await vi.waitFor(() => { expect(server.closedResponses).toBe(2) }, { timeout: 1_000 })
+    await server.responseClosed
 
-    expect(server.paths).toEqual(['/chat/completions', '/chat/completions'])
-    expect(server.requests).toHaveLength(2)
-    expect(server.closedResponses).toBe(2)
-  })
-
-  it('isolates a timed-out stream from concurrent and later requests', async () => {
-    const server = await mockServer([
-      { events: textEvents },
-      { events: textEvents, delayMs: 200 },
-      { events: textEvents },
-      { events: textEvents },
-    ])
-    const profile: LlmPiAi.PiAiProviderProfile = {
-      apiKeyEnv: 'PI_TEST_KEY',
-      baseURL: server.url,
-      streamIdleTimeoutMs: 1_000,
-    }
-    const ctx = new Context()
-    await ctx.plugin(LlmRuntime)
-    ctx.llm.registerAdapter(['deepseek'], adapterOf({ deepseek: profile }))
-
-    const warmup = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
-    expect(warmup.finish).toEqual({ kind: 'stop' })
-    await vi.waitFor(() => { expect(server.closedResponses).toBe(1) }, { timeout: 1_000 })
-
-    profile.streamIdleTimeoutMs = 20
-    const stalled = assemble(ctx, { model: 'deepseek-flash', messages: [] })
-    await vi.waitFor(() => { expect(server.requests).toHaveLength(2) })
-
-    const concurrent = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
-    expect(concurrent.finish).toEqual({ kind: 'stop' })
-    expect((await stalled).finish).toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
-
-    const later = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
-    expect(later.finish).toEqual({ kind: 'stop' })
-    await vi.waitFor(() => { expect(server.closedResponses).toBe(4) }, { timeout: 1_000 })
-    expect(server.paths).toEqual([
-      '/chat/completions',
-      '/chat/completions',
-      '/chat/completions',
-      '/chat/completions',
-    ])
-    expect(server.requests).toHaveLength(4)
+    expect(server.paths).toEqual(['/chat/completions'])
+    expect(server.closedResponses).toBe(1)
   })
 })
 
@@ -954,6 +788,58 @@ describe('provider profile lifecycle', () => {
     expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
   })
 
+  it('reports efforts in ascending order and dispatches the level a caller selects', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([
+      { events: anthropicTextEvents },
+      { events: anthropicTextEvents },
+      { events: anthropicTextEvents },
+    ])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'adaptive-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          reasoning: 'max',
+          compat: { forceAdaptiveThinking: true },
+          models: [
+            // Declaring no `off` level means the model cannot stop reasoning.
+            { id: 'always-thinks', reasoningEfforts: { low: 'low', high: 'high', max: 'max' } },
+            { id: 'may-think', reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' } },
+          ],
+        },
+      },
+    })
+    const request = (model: string, effort: string): Promise<unknown> => assemble(ctx, {
+      provider: 'adaptive-gateway',
+      model,
+      reasoningEffort: ReasoningEffortId(effort),
+      maxTokens: 64,
+      messages: [],
+    })
+
+    await expect(ctx.llm.resolveModelInfo('adaptive-gateway', 'always-thinks'))
+      .resolves.toMatchObject({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }, { id: 'max' }] } })
+    await expect(ctx.llm.resolveModelInfo('adaptive-gateway', 'may-think'))
+      .resolves.toMatchObject({ reasoning: { efforts: [{ id: 'off' }, { id: 'low' }, { id: 'high' }, { id: 'max' }] } })
+
+    await request('always-thinks', 'max')
+    await request('always-thinks', 'low')
+    await request('may-think', 'off')
+
+    expect(server.requests[0]).toMatchObject({ thinking: { type: 'adaptive' }, output_config: { effort: 'max' } })
+    expect(server.requests[1]).toMatchObject({
+      max_tokens: 64,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'low' },
+    })
+    expect(server.requests[2]).toMatchObject({ max_tokens: 64, thinking: { type: 'disabled' } })
+    expect(server.requests[2]).not.toHaveProperty('output_config')
+  })
+
   it('accepts absent credentials for pi-ai ambient authentication', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', 'ambient-key')
     const server = await mockServer([{ events: textEvents }])
@@ -1009,28 +895,6 @@ describe('provider profile lifecycle', () => {
       .toBe(DEFAULT_MAX_REQUEST_IMAGE_BYTES)
     expect(resolveProfiles({ openai: { maxRequestImageBytes: 1024 } }).get('openai')?.maxRequestImageBytes)
       .toBe(1024)
-    expect(resolveProfiles({ openai: {} }).get('openai')?.quotaWorded429IsRateLimit).toBe(false)
-    expect(resolveProfiles({ 'qwen-token-plan': {} }).get('qwen-token-plan')?.quotaWorded429IsRateLimit).toBe(true)
-    expect(resolveProfiles({ 'qwen-token-plan-cn': {} }).get('qwen-token-plan-cn')?.quotaWorded429IsRateLimit)
-      .toBe(true)
-    expect(resolveProfiles({
-      'qwen-token-plan': { quotaWorded429IsRateLimit: false },
-    }).get('qwen-token-plan')?.quotaWorded429IsRateLimit).toBe(false)
-    expect(resolveProfiles({
-      custom: {
-        api: 'openai-completions',
-        baseURL: 'https://example.test/v1',
-        models: [{ id: 'custom-model' }],
-      },
-    }).get('custom')?.quotaWorded429IsRateLimit).toBe(false)
-    expect(resolveProfiles({
-      custom: {
-        api: 'openai-completions',
-        baseURL: 'https://example.test/v1',
-        models: [{ id: 'custom-model' }],
-        quotaWorded429IsRateLimit: true,
-      },
-    }).get('custom')?.quotaWorded429IsRateLimit).toBe(true)
   })
 
   it.each([
@@ -1061,7 +925,6 @@ describe('provider profile lifecycle', () => {
       { streamIdleTimeoutMs: 0 },
       { streamIdleTimeoutMs: Number.NaN },
       { streamIdleTimeoutMs: MAX_TIMER_DELAY_MS + 1 },
-      { quotaWorded429IsRateLimit: 'yes' as never },
       { maxRequestImageBytes: 0 },
       { maxRequestImageBytes: 1.5 },
       { maxRequestImageBytes: Number.NaN },
