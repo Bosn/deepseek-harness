@@ -48,6 +48,13 @@ export interface CompactionPolicyConfig {
    * request-size compaction before generic retry. Defaults to `512 * 1024`.
    */
   timeoutRecoveryBytes?: number
+  /**
+   * Ceiling on one region compaction's total summarizer transactions. A
+   * hierarchical partition that cannot fit the selected region within this
+   * many bounded transactions fails loud instead of blocking the turn for one
+   * provider call per surface node. Positive integer; defaults to `16`.
+   */
+  maxRegionTransactions?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -90,6 +97,7 @@ interface ResolvedPolicyFields {
   readonly maxRequestBytes?: number
   readonly summarizationInputBytes: number
   readonly timeoutRecoveryBytes: number
+  readonly maxRegionTransactions: number
 }
 
 /** Validated immutable config whose target-specific defaults remain unresolved. */

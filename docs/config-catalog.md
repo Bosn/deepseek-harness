@@ -220,7 +220,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:80`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:83`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
@@ -700,7 +700,7 @@ export type ThemePreference = typeof THEME_PREFERENCES[number]
 ## `@deepseek-ai/dsh-compaction-basic`
 
 - `inject`: `llm` · `tokenMeter` · `sessions`
-- `source`: [`packages/compaction/compaction-basic/src/types.ts:62`](../packages/compaction/compaction-basic/src/types.ts)
+- `source`: [`packages/compaction/compaction-basic/src/types.ts:69`](../packages/compaction/compaction-basic/src/types.ts)
 
 ```ts config-catalog
 /** Basic compaction configuration with an optional exact-target policy table. */
@@ -759,6 +759,13 @@ export interface CompactionPolicyConfig {
    * request-size compaction before generic retry. Defaults to `512 * 1024`.
    */
   timeoutRecoveryBytes?: number
+  /**
+   * Ceiling on one region compaction's total summarizer transactions. A
+   * hierarchical partition that cannot fit the selected region within this
+   * many bounded transactions fails loud instead of blocking the turn for one
+   * provider call per surface node. Positive integer; defaults to `16`.
+   */
+  maxRegionTransactions?: number
 }
 
 /** Exact provider/model override merged over the default compaction policy. */
@@ -4276,10 +4283,12 @@ export type ToolPresentationMode = 'native' | 'ptc'
 ```ts config-catalog
 /** Deployment route, presentation bounds, and sender configuration. */
 export interface Config {
+  /** Explicit delivery adapter; legacy private Weixin remains readable. */
+  transport?: 'weixin' | 'dot'
   /** Absolute owner wrapper or OpenClaw CLI path. */
   command: string
   /** Owner-only constants file containing the configured account and target. */
-  routeFile: string
+  routeFile?: string
   /** Absolute private outbox file; never shared between host processes. */
   outboxFile: string
   /** Initial exponential retry delay for a definite provider rejection. */
