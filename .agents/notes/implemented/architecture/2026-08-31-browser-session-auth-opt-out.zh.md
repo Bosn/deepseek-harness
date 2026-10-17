@@ -12,7 +12,7 @@ Status: implemented
 
 `dsh-client-connection` 增加经校验的 `browserSessionAuth` 配置，默认 `true`。部署把它设为 `false` 时，Connection 激活会选择 `BrowserAuth.bypass()` 而不是创建签名密钥认证器：每个入口——`authorizeIndex`、`isAuthenticated`、`isAuthenticatedFor` 和 `authenticatedUrl`——都无条件放行或打印干净 URL，启动令牌交换与签名 cookie 逻辑则保持不变，继续服务默认部署。`dsh-web-app` 于是打印不带 `?token=...` 的普通根 URL，index、`/api` 与工作区文件请求只需通过既有检查即可获得服务。
 
-该 opt-out 关闭的是身份识别，绝不是可达性策略。[Host/Origin 信任栅栏](2026-07-28-api-browser-trust-boundary.zh.md)仍作用于每个 `/api` 与工作区文件请求，随附 CLI 仍拒绝 `--host 0.0.0.0`，`privilegedHosts` 仍然只决定是否显示 Host 配置 UI。封闭责任落到操作者的网络层（绑定、代理认证或 overlay 网络成员资格）外加栅栏。
+该 opt-out 关闭的是身份识别，绝不是可达性策略。[Host/Origin 信任栅栏](2026-07-28-api-browser-trust-boundary.zh.md)仍作用于每个 `/api` 与工作区文件请求，随附 CLI 仍拒绝 `--host 0.0.0.0`；[部署声明的配置权威退役](2026-10-17-retire-declared-host-configuration-authority.zh.md)后，`trustedHosts` 是唯一的可达性声明。封闭责任落到操作者的网络层（绑定、代理认证或 overlay 网络成员资格）外加栅栏。
 
 ## 验证
 

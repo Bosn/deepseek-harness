@@ -12,7 +12,7 @@ The [browser launch-token authentication](2026-08-24-browser-token-authenticatio
 
 `dsh-client-connection` gains the validated `browserSessionAuth` config, default `true`. When a deployment sets it to `false`, Connection activation selects `BrowserAuth.bypass()` instead of creating the signing-secret authenticator: every entry point — `authorizeIndex`, `isAuthenticated`, `isAuthenticatedFor`, and `authenticatedUrl` — accepts unconditionally or prints a clean URL, while the launch-token exchange and signed-cookie logic stay untouched for default deployments. `dsh-web-app` then prints the ordinary root URL without `?token=...`, and index, `/api`, and workspace-file requests serve after the existing checks only.
 
-The opt-out disables identity, never reachability policy. The [Host/Origin trust fence](2026-07-28-api-browser-trust-boundary.md) still applies to every `/api` and workspace-file request, `--host 0.0.0.0` remains rejected by the shipped CLI, and `privilegedHosts` still only gates Host-configuration UI. Containment falls to the operator's network layer (bind, proxy authentication, or overlay-network membership) plus the fence.
+The opt-out disables identity, never reachability policy. The [Host/Origin trust fence](2026-07-28-api-browser-trust-boundary.md) still applies to every `/api` and workspace-file request, `--host 0.0.0.0` remains rejected by the shipped CLI, and `trustedHosts` remains the only reachability declaration since the [deployment-declared configuration authority was retired](2026-10-17-retire-declared-host-configuration-authority.md). Containment falls to the operator's network layer (bind, proxy authentication, or overlay-network membership) plus the fence.
 
 ## Verification
 

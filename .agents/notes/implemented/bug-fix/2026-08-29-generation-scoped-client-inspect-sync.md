@@ -36,4 +36,4 @@ Web startup and reconnect publish Client inspect capabilities only through an ac
 
 ## Supersession audit
 
-No active note is archived, rejected, or deleted. [Cordis Web dynamic packages](../../rejected/architecture/2026-08-08-cordis-web-dynamic-packages.md) continues to own the broader Host/Client runner design; this note owns the Client inspect manifest's Connection lifecycle and partially specializes that proposal without replacing it.
+No active note is archived, rejected, or deleted. [Client shells and dynamic packages](../architecture/2026-08-15-client-shells-and-dynamic-packages.md) continues to own the broader Host/Client runner design; this note owns the Client inspect manifest's Connection lifecycle and partially specializes that proposal without replacing it.

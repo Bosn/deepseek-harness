@@ -3,8 +3,8 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-29-deployment-declared-privileged-browser-authority.md
 /agent-note-deployment-declared-host-configuration-authority:
-  en: 84802b58940a3df6
-  zh: 45f83489a27fb675
+  en: 132ace5f40411695
+  zh: ff371121471e7038
 /agent-note-deployment-declared-host-configuration-authority/problem:
   en: 65025e4a1fec6802
   zh: 0662f6c6ea211a4f

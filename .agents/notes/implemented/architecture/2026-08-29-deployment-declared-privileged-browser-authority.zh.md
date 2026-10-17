@@ -4,6 +4,8 @@ Status: implemented
 
 [English](2026-08-29-deployment-declared-privileged-browser-authority.md) | 中文
 
+已被[退役部署声明的 Host 配置权威](2026-10-17-retire-declared-host-configuration-authority.zh.md)取代：dsh-v0.2.1-rc.2 取消了基于位置的设置持久化，因此该声明及其提供的客户端事实已退役。
+
 ## 问题
 
 每项 Host 操作都要求同一个已认证浏览器会话，但浏览器仅根据 loopback hostname 选择 Host 支撑的配置客户端。因此，通过受信任远程权威提供的已认证页面仍会选择进程内设置镜像，完全不发出 `settings.describe`，即使同一会话能够调用 Host API。
