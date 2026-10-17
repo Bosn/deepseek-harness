@@ -25,13 +25,15 @@ This package lets web-client features expose editable preferences backed by the 
 <a id="use-this-package"></a>
 ## Use this package
 
-Feature plugins use this package to store and edit their preferences without re-implementing transport or schema handling. Mount it once per composition; it injects `remote` and the `remote.settings` namespace and owns the single `settings.describe` reader in the browser.
+Feature plugins use this package to store and edit their preferences without re-implementing transport or schema handling. Mount it once per composition; it injects the `remote` service with its `settings` namespace and owns the single `settings.describe` reader in the browser.
 
 ### Configuration forms
 
-`ctx.configForms.developerTools` owns the Coding Tools switch and the shared Web and desktop preference `ui-settings.enabled`, defaulting to `true`. Its `enabled` observable publishes accepted choices and `setEnabled` uses the same ordered settings writes. Desktop and loopback Web persist to the Host document; remote Web keeps this choice in one browser-local observable until reload without issuing Host writes. This controls presentation and HTML preview permissions, not Host authorization or Session recording. Host-backed clients keep developer features disabled until the first accepted schema-resolved value arrives; missing or failed initial responses do not enable them. Later refreshes retain the last accepted choice.
+`ctx.configForms.developerTools` owns the Coding Tools switch and the shared Web and desktop preference `ui-settings.enabled`, defaulting to `true`. Its `enabled` observable publishes accepted choices and `setEnabled` uses the same ordered settings writes. Desktop and every authenticated Web browser persist to the Host document. This controls presentation and HTML preview permissions, not Host authorization or Session recording. Host-backed clients keep developer features disabled until the first accepted schema-resolved value arrives; missing or failed initial responses do not enable them. Later refreshes retain the last accepted choice.
 
-Feature adapters use `ctx.configForms.get(entryId)` to obtain accepted values and a write queue shared by every editor of that Host entry. Snapshots contain resolved `value`, inherited `base`, raw `user`, revision, writability, and persistence mode. `set` and `unset` submit one operation; `mutate` submits one atomic operation list. Staged editors pass the revision read before editing; conflicts preserve their drafts. Unsetting removes the override and restores inheritance.
+Feature adapters use `ctx.configForms.get(entryId)` to obtain accepted values and a write queue shared by every editor of that Host entry. Snapshots contain resolved `value`, inherited `base`, raw `user`, revision, and writability. `set` and `unset` submit one operation; `mutate` submits one atomic operation list. Staged editors pass the revision read before editing; conflicts preserve their drafts. Unsetting removes the override and restores inheritance.
+
+A configuration form persists through the Host settings service for every authenticated browser; the [authenticated-browser Host preferences note](../../../.agents/notes/implemented/bug-fix/2026-09-15-authenticated-browser-host-preferences.md) owns that policy. `settings.describe.writable` is the authority on whether a write is accepted.
 
 ### Following served namespaces
 
@@ -59,7 +61,7 @@ The package realizes one ownership rule: the browser keeps one shared mirror of 
 
 ### The describe mirror
 
-The Host Config of the `ui-settings` entry declares the default-on `enabled` preference. The Client plugin injects `remote` and the `remote.settings` namespace, resolves Host persistence once from `ctx.remote.$host.canUseHostConfiguration`, and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Without that capability, the mirror remains process-local in memory and does not cross the settings wire. The capability selects whether Host-backed configuration UI is enabled; it is independent of Connection authentication and does not authorize API requests. Cross-namespace surfaces read the mirror through `ctx.configForms.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
+The Host Config of the `ui-settings` entry declares the default-on `enabled` preference. The Client plugin injects `remote` with its `settings` namespace and owns the one `settings.describe` reader in the browser: a shared mirror refreshed on every forwarded `settings/document-updated` event and on `connection/reset` (the first connection included, closing the window where a commit lands between the eager read and the SSE subscription). Cross-namespace surfaces read it through `ctx.configForms.describe()`, a read/fold face (`getSnapshot`/`subscribe`/`ensure`, plus `acceptView` folding a write answer in).
 
 ### Shared entry writes
 
@@ -101,9 +103,9 @@ None; this package neither assembles nor sends a provider request.
 <a id="known-limitations-and-deferred-work"></a>
 
 
-These limits define where the settings transport cannot reach; they are current package constraints.
+These limits define the settings transport's reach and who shares a settings document; they are current package constraints.
 
-- **Pages without Host configuration capability get no durable settings** — when `canUseHostConfiguration` is false, this Client keeps Host persistence disabled there, so a form starts `unavailable` and never crosses the wire; form writes are inert even though Connection authentication covers the API. The shared Coding Tools preference instead provides browser-local changes. Connection authentication is a separate concern and does not imply this UI capability.
+- **Host preferences are shared across authenticated entries** — browsers accessing the same settings document share its persisted preferences, rather than retaining per-browser choices.
 
 <a id="dev-note"></a>
 ### Dev Note

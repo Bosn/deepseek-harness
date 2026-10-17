@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for 2026-10-17-retire-declared-host-configuration-authority.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-17-retire-declared-host-configuration-authority.md
+/agent-note-retire-the-deployment-declared-host-configuration-authority:
+  en: 153d1774f886003a
+  zh: 056cd3291a1af2fb
+/agent-note-retire-the-deployment-declared-host-configuration-authority/problem:
+  en: c2f28e486cfbcc26
+  zh: 173ee764b4728e4a
+/agent-note-retire-the-deployment-declared-host-configuration-authority/decision:
+  en: 5ff0fc62a453af94
+  zh: 464a8a9f30ea0393
+/agent-note-retire-the-deployment-declared-host-configuration-authority/alternatives-considered:
+  en: 85b4fce27e37b7fa
+  zh: c48646726fa69db2
+/agent-note-retire-the-deployment-declared-host-configuration-authority/consequences:
+  en: 184f9140997af0fd
+  zh: 322df826f3cc544e
+/agent-note-retire-the-deployment-declared-host-configuration-authority/testing:
+  en: 1b2b86e2a1ec0002
+  zh: b8483f24faee0329

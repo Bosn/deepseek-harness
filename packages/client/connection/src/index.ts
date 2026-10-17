@@ -7,15 +7,16 @@ import type {} from '@deepseek-ai/dsh-credentials'
 // Activates the webServer Context merge used below.
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { API_PATH } from './api-path.ts'
+import { CONNECT_PATH } from './connect-protocol.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority } from './api-request-trust.ts'
 import { BrowserAuth } from './browser-auth.ts'
-import { PRIVILEGED_HOSTS_GLOBAL } from './privileged-hosts.ts'
 import { HostConnectionService } from './rpc-host.ts'
 import { ConnectionRecoveryConfigSchema, resolveConnectionConfig, type ConnectionRecoveryConfig } from './recovery-config.ts'
 
 export type {
   PeerAdmission,
+  ConnectionAdmission,
   ConnectionFetchMethod,
   ConnectionFetchHandler,
   ConnectionFetchRoute,
@@ -37,9 +38,11 @@ export type {
   RpcMessage,
   ServerResponse,
 } from './rpc.ts'
-export type { PeerId, PeerScope, RemoteInvocation } from '@deepseek-ai/dsh-typert-protocol'
+export type { PeerId, PeerScope, Principal, RemoteInvocation } from '@deepseek-ai/dsh-typert-protocol'
 export { RpcId, transportError } from './rpc.ts'
-export { OperatorPeer } from './operator-peer.ts'
+export { Peer } from './peer.ts'
+export type { PeerOptions } from './peer.ts'
+export { CONNECT_PATH, type ConnectionInteractions } from './connect-protocol.ts'
 export {
   clientRequestSchema,
   rpcErrorSchema,
@@ -102,21 +105,13 @@ export interface ConnectionConfig {
    */
   trustedHosts?: string[]
   /**
-   * Remote page authorities where the shipped client may expose Host-backed
-   * configuration UI, in the same `host[:port]` form as
-   * {@link ConnectionConfig.trustedHosts}. Each entry also joins the outer
-   * Host/Origin trust fence, but never bypasses browser-session authentication.
-   * This is a client capability declaration, not a method-specific API grant.
-   */
-  privilegedHosts?: string[]
-  /**
    * Serve the browser surface without the launch-token exchange and signed
    * cookies. Defaults to true; false accepts every root and /api request that
    * clears the Host/Origin trust fence, leaving containment entirely to
    * network reachability and {@link ConnectionConfig.trustedHosts}.
    */
   browserSessionAuth?: boolean
-  /** Absolute browser-session lifetime in days. Default: 30. */
+  /** Absolute browser and API cookie lifetime in days. Default: 30. */
   cookieMaxAgeDays?: number
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
   maxRequestBodyBytes?: number
@@ -125,7 +120,6 @@ export interface ConnectionConfig {
 export const Config: z<ConnectionConfig> = z.object({
   recovery: ConnectionRecoveryConfigSchema.default({}),
   trustedHosts: z.array(String).default([]),
-  privilegedHosts: z.array(String).default([]),
   browserSessionAuth: z.boolean().default(true),
   cookieMaxAgeDays: z.natural().min(1).default(30),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
@@ -135,9 +129,7 @@ export const Config: z<ConnectionConfig> = z.object({
  * Provides carrier-neutral RPC and Fetch registries. When `webServer` is
  * present, the plugin also mounts the `/api` browser transport with Host/Origin
  * checks and, unless `browserSessionAuth` is false, persistent browser
- * authentication. `privilegedHosts` contributes to the outer trust fence and
- * client capability injection only; it never replaces the browser session or
- * creates a method-specific authorization path.
+ * authentication.
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
@@ -145,19 +137,18 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   const recovery = resolveConnectionConfig(config?.recovery)
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
-  const privilegedHosts = config?.privilegedHosts ?? []
-  const fenceHosts = [...trustedHosts, ...privilegedHosts]
   const cookieMaxAgeDays = config?.cookieMaxAgeDays ?? 30
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
-  for (const entry of fenceHosts) assertTrustedAuthority(entry)
+  for (const entry of trustedHosts) assertTrustedAuthority(entry)
+  assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const browserAuth = config?.browserSessionAuth === false
     ? BrowserAuth.bypass()
     : await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
   const connection = new HostConnectionService(
     ctx,
-    fenceHosts,
+    trustedHosts,
     browserAuth,
   )
   ctx.inject(['webServer'], (webCtx) => {
@@ -176,16 +167,14 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
           res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
           return
         }
-        await webCtx.waterfall('connection/request', req, res, () => bridge(req, res, fetchHandler, maxRequestBodyBytes))
+        await webCtx.waterfall('connection/request', req, res, () => bridge(req, res, fetchHandler, admission.peer, maxRequestBodyBytes))
       },
     }
     webCtx.effect(() => webCtx.webServer.register(route), 'client-connection: /api route')
-    // The browser uses this to decide whether the shipped client exposes Host
-    // configuration surfaces. Every request still passes the uniform Host fence
-    // and BrowserAuth session check above.
-    webCtx.on('webserver/index-inject', (table) => {
-      table.push({ kind: 'global', name: PRIVILEGED_HOSTS_GLOBAL, value: privilegedHosts })
-    })
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact', path: CONNECT_PATH,
+      handler: (req, res) => { connection.authorizeConnect(req, res) },
+    }), 'client-connection: /connect route')
   })
   ctx.inject(['attachments'], (attachmentCtx) => {
     assertImageBodyCapacity(attachmentCtx, maxRequestBodyBytes)

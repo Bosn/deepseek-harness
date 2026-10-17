@@ -4,6 +4,8 @@ Status: implemented
 
 English | [中文](2026-08-29-deployment-declared-privileged-browser-authority.zh.md)
 
+Superseded by [Retire the deployment-declared Host configuration authority](2026-10-17-retire-declared-host-configuration-authority.md): dsh-v0.2.1-rc.2 removed locality-based settings persistence, so the declaration and the client fact it fed were retired.
+
 ## Problem
 
 Every Host operation requires one authenticated browser session, but the browser selected its Host-backed configuration client only from a loopback hostname. An authenticated page served through a trusted remote authority therefore selected its process-local settings mirror and never issued `settings.describe`, even though the same session could call the Host API.

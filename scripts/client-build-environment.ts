@@ -265,7 +265,19 @@ export function assertClientBuildEnvironment(
 export function clientBuildEnvironmentDefines(
   environment: NodeJS.ProcessEnv,
 ): Record<string, string> {
-  const defines: Record<string, string> = { 'process.env': '{}' }
+  return { 'process.env': '{}', ...clientBuildValueDefines(environment) }
+}
+
+/**
+ * Create Node-face substitutions that fix each public client build value into the artifact.
+ * `process.env` itself stays untouched, so Host code keeps reading its other variables at runtime.
+ * @param environment - environment inherited by the build process.
+ * @returns one deterministic tsdown `define` expression per public value the build sets.
+ */
+export function clientBuildValueDefines(
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> {
+  const defines: Record<string, string> = {}
   for (const [name, value] of Object.entries(clientBuildEnvironment(environment))) {
     defines[`process.env.${name}`] = JSON.stringify(value)
   }
@@ -335,7 +347,7 @@ export function readClientBuildRecord(
 export function clientArtifactPaths(root: string): string[] {
   return globSync([...CLIENT_ARTIFACT_PATTERNS], { cwd: root })
     .map(path => path.replaceAll('\\', '/'))
-    .filter(path => statSync(resolve(root, path)).isFile())
+    .filter(path => !/\/lib\/client\.node(?:\.|$)/.test(path) && statSync(resolve(root, path)).isFile())
     .sort()
 }
 
