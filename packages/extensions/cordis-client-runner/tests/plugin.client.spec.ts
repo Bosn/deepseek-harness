@@ -126,7 +126,9 @@ async function boot(): Promise<Bench> {
     for (const listener of [...generationListeners]) listener()
   }
   const connection: ConnectionHandle = {
+    interactions: 'answer',
     isLoopback: true,
+    openWebSocket: () => { throw new Error('unexpected WebSocket') },
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {
